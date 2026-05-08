@@ -125,7 +125,7 @@ class Alert(BaseModel):
     description: str
     affected_routes: set[str] = Field(default_factory=set)
     affected_systems: set[str] = Field(default_factory=set)
-    active_periods: list[tuple[datetime, datetime]] = Field(default_factory=list)
+    active_periods: list[tuple[datetime, Optional[datetime]]] = Field(default_factory=list)
     severity: Literal["INFO", "WARNING", "SEVERE"] = "INFO"
     url: Optional[str] = None
 

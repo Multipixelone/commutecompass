@@ -1,19 +1,552 @@
-"""Tests for mta.py."""
+"""Tests for mta.py — GTFS-RT alert fetcher and matcher."""
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timedelta
+from typing import Any
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from commutecop.mta import fetch_alerts, alerts_affecting_route
+from commutecop.models import Alert, Route, TransitLeg, Event
+from commutecop.mta import (
+    fetch_alerts,
+    alerts_affecting_route,
+    _parse_alert,
+    _time_overlaps,
+    _systems_lines_overlap,
+    NYC_TZ,
+)
 
 
-def test_fetch_alerts_stub() -> None:
-    """Stub: fetch_alerts raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
-        fetch_alerts("", "", "")
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def make_aware(dt: datetime) -> datetime:
+    """Ensure datetime is NYC-aware."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=NYC_TZ)
+    return dt.astimezone(NYC_TZ)
 
 
-def test_alerts_affecting_route_stub() -> None:
-    """Stub: alerts_affecting_route raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
-        alerts_affecting_route([], None, None)  # type: ignore[arg-type]
+def subway_leg(
+    line: str,
+    system: str = "MTA Subway",
+    depart_at: datetime | None = None,
+    arrive_at: datetime | None = None,
+) -> TransitLeg:
+    """Build a transit leg for testing."""
+    now = make_aware(datetime.now(NYC_TZ))
+    return TransitLeg(
+        mode="TRANSIT",
+        system=system,
+        line=line,
+        headsign=None,
+        depart_at=depart_at or now,
+        arrive_at=arrive_at or (now + timedelta(minutes=30)),
+        duration_seconds=1800,
+        summary=f"{line} from A to B",
+    )
+
+
+def sample_route(
+    legs: list[TransitLeg],
+    depart_at: datetime | None = None,
+    arrive_at: datetime | None = None,
+) -> Route:
+    """Build a route from legs."""
+    now = make_aware(datetime.now(NYC_TZ))
+    return Route(
+        legs=legs,
+        depart_at=depart_at or now,
+        arrive_at=arrive_at or (now + timedelta(minutes=60)),
+        total_duration_seconds=3600,
+        transfers=0,
+        raw_provider_payload=None,
+    )
+
+
+def alert_with_period(
+    alert_id: str,
+    affected_routes: set[str],
+    affected_systems: set[str],
+    period_start: datetime,
+    period_end: datetime | None,
+    severity: str = "WARNING",
+    header: str = "Test alert",
+) -> Alert:
+    """Build an Alert with a single active period."""
+    return Alert(
+        id=alert_id,
+        header=header,
+        description="Test description",
+        affected_routes=affected_routes,
+        affected_systems=affected_systems,
+        active_periods=[(make_aware(period_start), make_aware(period_end) if period_end else None)],
+        severity=severity,
+    )
+
+
+# ─── fetch_alerts tests ───────────────────────────────────────────────────────
+
+class TestFetchAlerts:
+    """Tests for fetch_alerts (network + parsing)."""
+
+    def test_parses_valid_protobuf_fixture(self) -> None:
+        """fetch_alerts parses the gtfs_rt_sample.pb fixture into Alert models."""
+        with patch("commutecop.mta.httpx.Client") as mock_client_cls:
+            # Read the real fixture bytes
+            with open("tests/fixtures/gtfs_rt_sample.pb", "rb") as f:
+                fixture_bytes = f.read()
+
+            # Build a mock response
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.content = fixture_bytes
+
+            mock_client = MagicMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            # All three feeds return the same fixture bytes (simplified test setup)
+            # In reality each feed has its own protobuf content
+            alerts = fetch_alerts(
+                "https://example.com/subway.pb",
+                "https://example.com/lirr.pb",
+                "https://example.com/bus.pb",
+                client=mock_client,
+            )
+
+        # The fixture contains 2 alerts (C line + A line)
+        # Each feed produces both alerts, so with 3 feeds we get 6 total
+        # Subway feed alerts are first (system = "MTA Subway")
+        subway_alerts = [a for a in alerts if a.id.startswith("MTA Subway")]
+        assert len(subway_alerts) == 2, f"Expected 2 subway alerts, got {len(subway_alerts)}: {subway_alerts}"
+        ids = {a.id for a in subway_alerts}
+        assert any("C" in id_ for id_ in ids)
+        assert any("A" in id_ for id_ in ids)
+
+    def test_filters_entities_without_alerts(self) -> None:
+        """Feed entities without alert payload are ignored."""
+        from google.transit.gtfs_realtime_pb2 import FeedMessage, FeedEntity
+
+        # Build a feed with one alert entity and one trip-update entity
+        feed = FeedMessage()
+        feed.header.gtfs_realtime_version = "2.0"
+        feed.header.timestamp = int(time.time())
+
+        entity = FeedEntity()
+        entity.id = "trip-update-1"
+        # No alert field set — should be skipped
+        feed.entity.append(entity)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = feed.SerializeToString()
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=None)
+
+        mock_client_cls = MagicMock(return_value=mock_client)
+        with patch("commutecop.mta.httpx.Client", mock_client_cls):
+            alerts = fetch_alerts(
+                "https://example.com/subway.pb",
+                "https://example.com/lirr.pb",
+                "https://example.com/bus.pb",
+                client=mock_client,
+            )
+
+        assert alerts == []
+
+    def test_url_construction_with_empty_strings(self) -> None:
+        """Empty strings fall back to canonical MTA URLs."""
+        with patch("commutecop.mta.httpx.Client") as mock_client_cls:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.content = b""  # empty feed
+
+            mock_client = MagicMock()
+            mock_client.get.return_value = mock_response
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            # Pass empty strings — should fall back to canonical URLs
+            fetch_alerts("", "", "", client=mock_client)
+
+            # Verify all three feeds were requested
+            calls = mock_client.get.call_args_list
+            assert len(calls) == 3
+
+
+# ─── alerts_affecting_route tests ────────────────────────────────────────────
+
+class TestAlertsAffectingRoute:
+    """Tests for alerts_affecting_route — time-window overlap logic."""
+
+    def test_no_alerts_returns_empty(self) -> None:
+        """Zero alerts → zero matches."""
+        route = sample_route([subway_leg("C")])
+        now = make_aware(datetime.now(NYC_TZ))
+        result = alerts_affecting_route([], route, now)
+        assert result == []
+
+    def test_no_route_legs_returns_empty(self) -> None:
+        """Route with no legs → no matches."""
+        now = make_aware(datetime.now(NYC_TZ))
+        route = Route(legs=[], depart_at=now, arrive_at=now, total_duration_seconds=0)
+        alert = alert_with_period(
+            "x", {"C"}, {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+        )
+        result = alerts_affecting_route([alert], route, now)
+        assert result == []
+
+    def test_line_match_without_time_overlap_returns_empty(self) -> None:
+        """Alert that covers the C line but time window doesn't overlap route."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        # Route departs in 2 hours
+        route = sample_route([
+            subway_leg(
+                "C",
+                depart_at=now + timedelta(hours=2),
+                arrive_at=now + timedelta(hours=2, minutes=45),
+            )
+        ])
+
+        # Alert is only active RIGHT NOW (started 1h ago, ends 30min from now)
+        # Route departs in 2h — no overlap
+        alert = alert_with_period(
+            "c-line-now",
+            {"C"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(minutes=30),
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert result == []
+
+    def test_time_overlap_but_wrong_line_returns_empty(self) -> None:
+        """Time window overlaps but line doesn't match — no match."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        # Route uses C line
+        route = sample_route([
+            subway_leg(
+                "C",
+                depart_at=now + timedelta(hours=1),
+                arrive_at=now + timedelta(hours=1, minutes=45),
+            )
+        ])
+
+        # Alert is active and covers the A line (not C)
+        alert = alert_with_period(
+            "a-line-active",
+            {"A"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=3),
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert result == []
+
+    def test_c_line_matched_during_active_period(self) -> None:
+        """C line alert active during route time → matched."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        # Route with C leg departs in 30 minutes (overlaps with alert active now)
+        route = sample_route([
+            subway_leg(
+                "C",
+                depart_at=now + timedelta(minutes=30),
+                arrive_at=now + timedelta(hours=1),
+            )
+        ])
+
+        # Alert active from 1h ago to 1h from now — covers the route departure
+        alert = alert_with_period(
+            "c-line-active",
+            {"C"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+            header="C line delayed",
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert len(result) == 1
+        assert result[0].id == "c-line-active"
+        assert "C" in result[0].header
+
+    def test_multi_leg_route_c_match(self) -> None:
+        """Route with multiple legs — C line match is found."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        route = sample_route([
+            subway_leg("A", depart_at=now, arrive_at=now + timedelta(minutes=20)),
+            subway_leg("C", depart_at=now + timedelta(minutes=20), arrive_at=now + timedelta(minutes=50)),
+        ])
+
+        alert = alert_with_period(
+            "c-in-multi-leg",
+            {"C"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=2),
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert len(result) == 1
+
+    def test_open_ended_active_period(self) -> None:
+        """Alert with no end time (open-ended) overlaps route at check time."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        route = sample_route([
+            subway_leg(
+                "C",
+                depart_at=now + timedelta(minutes=15),
+                arrive_at=now + timedelta(minutes=45),
+            )
+        ])
+
+        # Active period started 2h ago, no end — still active now
+        alert = Alert(
+            id="open-ended",
+            header="C line issue",
+            description="Ongoing",
+            affected_routes={"C"},
+            affected_systems={"MTA Subway"},
+            active_periods=[(make_aware(datetime.now(NYC_TZ) - timedelta(hours=2)), None)],
+            severity="WARNING",
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert len(result) == 1
+
+    def test_multiple_alerts_c_and_a_line(self) -> None:
+        """Multiple alerts — C and A line both match."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        route = sample_route([
+            subway_leg("C", depart_at=now + timedelta(minutes=10), arrive_at=now + timedelta(minutes=40)),
+            subway_leg("A", depart_at=now + timedelta(minutes=40), arrive_at=now + timedelta(hours=1, minutes=10)),
+        ])
+
+        c_alert = alert_with_period(
+            "c-alert",
+            {"C"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+        )
+        a_alert = alert_with_period(
+            "a-alert",
+            {"A"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+        )
+        other_alert = alert_with_period(
+            "b-alert",
+            {"B"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+        )
+
+        result = alerts_affecting_route([c_alert, a_alert, other_alert], route, now)
+        assert len(result) == 2
+        ids = {a.id for a in result}
+        assert "c-alert" in ids
+        assert "a-alert" in ids
+
+    def test_walking_leg_ignored(self) -> None:
+        """Walking legs do not match transit alerts."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        route = Route(
+            legs=[
+                TransitLeg(
+                    mode="WALKING",
+                    system=None,
+                    line=None,
+                    depart_at=now,
+                    arrive_at=now + timedelta(minutes=10),
+                    duration_seconds=600,
+                    summary="Walk to station",
+                ),
+                subway_leg("C", depart_at=now + timedelta(minutes=10), arrive_at=now + timedelta(minutes=40)),
+            ],
+            depart_at=now,
+            arrive_at=now + timedelta(minutes=40),
+            total_duration_seconds=2400,
+        )
+
+        # Only the C line leg matches
+        c_alert = alert_with_period(
+            "c-alert",
+            {"C"},
+            {"MTA Subway"},
+            datetime.now(NYC_TZ) - timedelta(hours=1),
+            datetime.now(NYC_TZ) + timedelta(hours=1),
+        )
+
+        result = alerts_affecting_route([c_alert], route, now)
+        assert len(result) == 1
+
+    def test_system_wide_alert_matches_all_routes_in_system(self) -> None:
+        """Alert with no specific route_id (empty) affects all routes in system."""
+        now = make_aware(datetime.now(NYC_TZ))
+
+        route = sample_route([
+            subway_leg("C", depart_at=now + timedelta(minutes=10), arrive_at=now + timedelta(minutes=40)),
+        ])
+
+        # Alert affects entire MTA Subway system (no specific routes)
+        alert = Alert(
+            id="system-wide-subway",
+            header="Subway system issue",
+            description="All lines affected",
+            affected_routes=set(),
+            affected_systems={"MTA Subway"},
+            active_periods=[(
+                make_aware(datetime.now(NYC_TZ) - timedelta(hours=1)),
+                make_aware(datetime.now(NYC_TZ) + timedelta(hours=1)),
+            )],
+            severity="WARNING",
+        )
+
+        result = alerts_affecting_route([alert], route, now)
+        assert len(result) == 1
+
+
+# ─── Time-overlap unit tests ──────────────────────────────────────────────────
+
+class TestTimeOverlap:
+    """Unit tests for _time_overlaps helper."""
+
+    def test_exact_overlap(self) -> None:
+        """Periods with same start/end overlap."""
+        now = make_aware(datetime.now(NYC_TZ))
+        assert _time_overlaps(
+            Alert(
+                id="x", header="", description="",
+                affected_routes=set(), affected_systems=set(),
+                active_periods=[(now, now + timedelta(hours=1))],
+            ),
+            Route(
+                legs=[subway_leg("C", depart_at=now, arrive_at=now + timedelta(hours=1))],
+                depart_at=now, arrive_at=now + timedelta(hours=1),
+                total_duration_seconds=3600,
+            ),
+            now,
+        )
+
+    def test_partial_overlap_at_start(self) -> None:
+        """Leg starts during alert period → overlap."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert_period_start = now - timedelta(minutes=30)
+        alert_period_end = now + timedelta(minutes=30)
+        leg_start = now - timedelta(minutes=10)  # leg started 10 min ago
+
+        alert = Alert(
+            id="x", header="", description="",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[(alert_period_start, alert_period_end)],
+        )
+        leg = subway_leg("C", depart_at=leg_start, arrive_at=leg_start + timedelta(minutes=30))
+        route = sample_route([leg])
+
+        assert _time_overlaps(alert, route, now)
+
+    def test_leg_starts_after_alert_ends_no_overlap(self) -> None:
+        """Leg starts after alert ends → no overlap."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert_period_end = now - timedelta(minutes=10)
+        leg_start = now + timedelta(minutes=30)  # starts 30 min from now
+
+        alert = Alert(
+            id="x", header="", description="",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[(now - timedelta(hours=2), alert_period_end)],
+        )
+        leg = subway_leg("C", depart_at=leg_start, arrive_at=leg_start + timedelta(minutes=30))
+        route = sample_route([leg])
+
+        result = _time_overlaps(alert, route, now)
+        assert result is False
+
+
+# ─── System/line overlap tests ─────────────────────────────────────────────────
+
+class TestSystemsLinesOverlap:
+    """Unit tests for _systems_lines_overlap."""
+
+    def test_exact_line_match(self) -> None:
+        """Leg line matches alert affected route."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "x", {"C"}, {"MTA Subway"},
+            now - timedelta(hours=1), now + timedelta(hours=1),
+        )
+        leg = subway_leg("C")
+        route = sample_route([leg])
+        assert _systems_lines_overlap(alert, route) is True
+
+    def test_no_line_match(self) -> None:
+        """Leg line does not match alert route."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "x", {"A"}, {"MTA Subway"},
+            now - timedelta(hours=1), now + timedelta(hours=1),
+        )
+        leg = subway_leg("C")
+        route = sample_route([leg])
+        assert _systems_lines_overlap(alert, route) is False
+
+    def test_line_substring_match(self) -> None:
+        """Alert route is a prefix of leg line."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "x", {"ABC"}, {"MTA Subway"},  # alert for "ABC" but route has "C"
+            now - timedelta(hours=1), now + timedelta(hours=1),
+        )
+        leg = subway_leg("C")
+        route = sample_route([leg])
+        # "C" does not contain "ABC" and "ABC" does not contain "C" — no match
+        assert _systems_lines_overlap(alert, route) is False
+
+    def test_wildcard_affected_routes(self) -> None:
+        """Wildcard in affected_routes matches any line in system."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = Alert(
+            id="wildcard", header="", description="",
+            affected_routes={"*"},
+            affected_systems={"MTA Subway"},
+            active_periods=[(now - timedelta(hours=1), now + timedelta(hours=1))],
+        )
+        leg = subway_leg("C")
+        route = sample_route([leg])
+        # System match + wildcard route → True
+        assert _systems_lines_overlap(alert, route) is True
+
+    def test_lirr_route_matched(self) -> None:
+        """LIRR route matches alert for that route."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "lirr-alert", {"Atlantic Branch"}, {"LIRR"},
+            now - timedelta(hours=1), now + timedelta(hours=1),
+            header="LIRR alert",
+        )
+        leg = subway_leg("Atlantic Branch", system="LIRR")
+        route = sample_route([leg])
+        assert _systems_lines_overlap(alert, route) is True
