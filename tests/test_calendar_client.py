@@ -71,8 +71,18 @@ def test_saved_credentials_have_restricted_permissions(
 ) -> None:
     """Saved tokens should have mode 0600."""
     client = CalendarClient(client_secret_json, token_path)
+    mock_creds = MagicMock()
+    mock_creds.to_json.return_value = json.dumps({
+        "token": "ya29.test",
+        "refresh_token": "refresh-token-value",
+        "client_id": "test-client-id",
+        "client_secret": "test-client-secret",
+    })
 
-    with patch.object(client, "_build_service"):
+    with patch("commutecop.calendar_client.InstalledAppFlow") as mock_flow_class:
+        mock_flow_instance = MagicMock()
+        mock_flow_instance.run_local_server.return_value = mock_creds
+        mock_flow_class.from_client_config.return_value = mock_flow_instance
         client.authorize_interactive()
 
     mode = token_path.stat().st_mode & 0o777
@@ -133,7 +143,6 @@ def _build_mock_service(items: list[dict]) -> MagicMock:
 def test_fetch_events_skips_cancelled(
     client_secret_json: str,
     token_path: Path,
-    calendar_specs: list[CalendarSpec],
 ) -> None:
     """Cancelled events must be excluded from results."""
     items = [
@@ -157,7 +166,7 @@ def test_fetch_events_skips_cancelled(
 
     with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
         events = client.fetch_events(
-            calendar_specs,
+            [CalendarSpec(id="cal-theatre", name="Theatre", enabled=True)],
             start=make_aware(datetime(2026, 5, 8, 0, 0, 0)),
             end=make_aware(datetime(2026, 5, 8, 23, 59, 59)),
         )
@@ -170,7 +179,6 @@ def test_fetch_events_skips_cancelled(
 def test_fetch_events_skips_all_day(
     client_secret_json: str,
     token_path: Path,
-    calendar_specs: list[CalendarSpec],
 ) -> None:
     """Events with no dateTime (all-day) must be excluded from results."""
     items = [
@@ -194,7 +202,7 @@ def test_fetch_events_skips_all_day(
 
     with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
         events = client.fetch_events(
-            calendar_specs,
+            [CalendarSpec(id="cal-theatre", name="Theatre", enabled=True)],
             start=make_aware(datetime(2026, 5, 8, 0, 0, 0)),
             end=make_aware(datetime(2026, 5, 8, 23, 59, 59)),
         )
@@ -330,27 +338,19 @@ def test_fetch_events_handles_pagination(
     ]
 
     service = MagicMock()
-    events_list_mock_page1 = MagicMock()
-    events_list_mock_page1.execute.return_value = {
-        "items": page1,
-        "nextPageToken": "token-page-2",
-    }
-    events_list_mock_page2 = MagicMock()
-    events_list_mock_page2.execute.return_value = {
-        "items": page2,
-        "nextPageToken": None,
-    }
 
-    def execute_side_effect():
-        if not hasattr(execute_side_effect, "_call_count"):
-            execute_side_effect._call_count = 0
-        execute_side_effect._call_count += 1
-        if execute_side_effect._call_count == 1:
-            return events_list_mock_page1.execute.return_value
-        return events_list_mock_page2.execute.return_value
+    def list_side_effect(**kwargs):
+        req = MagicMock()
+        if kwargs.get("pageToken") == "token-page-2":
+            req.execute.return_value = {"items": page2, "nextPageToken": None}
+        else:
+            req.execute.return_value = {
+                "items": page1,
+                "nextPageToken": "token-page-2",
+            }
+        return req
 
-    service.events.return_value.list.return_value.execute.side_effect = execute_side_effect
-    service.events.return_value.list.return_value = events_list_mock_page1
+    service.events.return_value.list.side_effect = list_side_effect
 
     client = CalendarClient(client_secret_json, token_path)
 
@@ -441,15 +441,18 @@ def test_fetch_events_queries_multiple_calendars(client_secret_json: str, token_
     service = MagicMock()
 
     # Return different events depending on which calendar was requested
-    def list_execute_side_effect(**kwargs):
+    def list_side_effect(**kwargs):
         calendar_id = kwargs.get("calendarId", "")
+        req = MagicMock()
         if calendar_id == "theatre-cal":
-            return {"items": [theatre_event], "nextPageToken": None}
+            req.execute.return_value = {"items": [theatre_event], "nextPageToken": None}
         elif calendar_id == "school-cal":
-            return {"items": [school_event], "nextPageToken": None}
-        return {"items": [], "nextPageToken": None}
+            req.execute.return_value = {"items": [school_event], "nextPageToken": None}
+        else:
+            req.execute.return_value = {"items": [], "nextPageToken": None}
+        return req
 
-    service.events.return_value.list.return_value.execute.side_effect = list_execute_side_effect
+    service.events.return_value.list.side_effect = list_side_effect
 
     client = CalendarClient(client_secret_json, token_path)
 
