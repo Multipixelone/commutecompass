@@ -75,10 +75,11 @@ in {
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
         StateDirectory = "commutecop";
-        ExecStart = "${cfg.package}/bin/commutecop --config /etc/commutecop/config.toml morning";
+        # Hardening: restrict filesystem access; commutecop reads /etc/commutecop/*
+        # and writes to dataDir (StateDirectory= lands under dataDir)
         NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
+        ProtectHome = "read-only";   # /home/commutecop ro; still allows home creation
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
@@ -104,9 +105,10 @@ in {
         EnvironmentFile = cfg.environmentFile;
         StateDirectory = "commutecop";
         ExecStart = "${cfg.package}/bin/commutecop --config /etc/commutecop/config.toml poll";
+        # Hardening: same policy as morning service
         NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
+        ProtectHome = "read-only";   # /home/commutecop ro; still allows home creation
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
