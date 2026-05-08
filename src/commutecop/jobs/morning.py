@@ -1,17 +1,219 @@
-"""Morning digest job."""
+"""Morning digest job.
 
-from commutecop.models import Config
+Sequence (§6.14):
+1. Compute [start, end] window: today 00:00 to today 23:59 NYC
+2. Fetch calendar events via calendar_client
+3. For each event: plan = plan_event(...); store.upsert_plan(plan)
+4. Cancel stale pings for events that no longer exist
+5. For each plan with non-None leave_at: schedule prep + leave pings
+   (skip fire_at < now — already past for late-morning runs)
+6. Pull MTA alerts affecting today's planned routes
+7. Build digest with format_digest; send via Telegram
+8. Log structured summary to journal
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime
+
+from commutecop.calendar_client import CalendarClient
+from commutecop.format import format_digest, format_leave_ping, format_prep_ping
+from commutecop.models import (
+    Alert,
+    Config,
+    Event,
+    PingEntry,
+    Plan,
+    Route,
+)
+from commutecop.mta import alerts_affecting_route, fetch_alerts
+from commutecop.notify import TelegramNotifier
+from commutecop.planner import plan_event
+from commutecop.store import Store
+from commutecop.timeutil import now_nyc
+from commutecop.venues import VenueRegistry
+
+logger = logging.getLogger(__name__)
 
 
-def run(config: Config) -> None:
+def run(config: Config) -> None:  # noqa: C901
     """Run the morning digest job.
 
-    Sequence:
-    1. Compute today's time window
-    2. Fetch calendar events
-    3. Plan each event
-    4. Persist plans and schedule pings
-    5. Pull MTA alerts affecting today's routes
-    6. Send digest via Telegram
+    Args:
+        config: Validated application configuration.
     """
-    raise NotImplementedError()
+    _now = now_nyc()
+    today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    # ── 1. Fetch today's calendar events ─────────────────────────────────────
+    calendar_client = CalendarClient(
+        client_secret_json=config.google_oauth_client_secret_json,
+        token_path=config.paths.oauth_token_path,
+    )
+    events: list[Event] = []
+    try:
+        events = calendar_client.fetch_events(
+            calendars=config.calendars,
+            start=today_start,
+            end=today_end,
+        )
+    except Exception as exc:
+        logger.error("Failed to fetch calendar events: %s", exc)
+        # Continue with empty events list — digest will reflect no events
+        events = []
+
+    logger.info("morning job: fetched %d events", len(events))
+
+    # ── 2. Plan each event ────────────────────────────────────────────────────
+    store = Store(config.paths.db_path)
+    store.init_schema()
+
+    venue_registry = VenueRegistry.load(config.paths.venues_file)
+
+    # Lazily create LLM client only if we have events with locations
+    from commutecop.llm import OpencodeGoClient
+    llm_client = OpencodeGoClient(
+        endpoint=config.opencode_go.endpoint,
+        token=config.opencode_go_token,
+        model=config.opencode_go.model,
+    )
+
+    plans: list[Plan] = []
+    for event in events:
+        plan = _plan_event_safe(event, config, venue_registry, store, llm_client)
+        store.upsert_plan(plan)
+        plans.append(plan)
+
+    logger.info("morning job: planned %d events", len(plans))
+
+    # ── 3. Cancel stale pings for events that no longer exist ─────────────────
+    event_ids_today = {e.id for e in events}
+    for existing_plan in store.today_plans():
+        if existing_plan.event.id not in event_ids_today:
+            cancelled = store.cancel_pings(existing_plan.event.id)
+            logger.debug(
+                "cancelled %d stale pings for removed event %s",
+                cancelled,
+                existing_plan.event.id,
+            )
+
+    # ── 4. Schedule future prep + leave pings ─────────────────────────────────
+    for plan in plans:
+        if plan.leave_at is None:
+            continue
+
+        # prep ping
+        if plan.prep_at and plan.prep_at > _now:
+            message = format_prep_ping(plan)
+            ping = PingEntry(
+                id=str(uuid.uuid4()),
+                event_id=plan.event.id,
+                kind="prep",
+                fire_at=plan.prep_at,
+                fired=False,
+                message=message,
+            )
+            store.schedule_ping(ping)
+            logger.debug(
+                "scheduled prep ping for event %s at %s",
+                plan.event.id,
+                plan.prep_at,
+            )
+
+        # leave ping
+        if plan.leave_at > _now:
+            message = format_leave_ping(plan)
+            ping = PingEntry(
+                id=str(uuid.uuid4()),
+                event_id=plan.event.id,
+                kind="leave",
+                fire_at=plan.leave_at,
+                fired=False,
+                message=message,
+            )
+            store.schedule_ping(ping)
+            logger.debug(
+                "scheduled leave ping for event %s at %s",
+                plan.event.id,
+                plan.leave_at,
+            )
+
+    # ── 5. Pull MTA alerts affecting today's routes ──────────────────────────
+    all_alerts: list[Alert] = []
+    try:
+        all_alerts = fetch_alerts(
+            subway_url=config.mta.subway_alerts_url,
+            lirr_url=config.mta.lirr_alerts_url,
+            bus_url=config.mta.bus_alerts_url,
+        )
+    except Exception as exc:
+        logger.warning("Failed to fetch MTA alerts: %s", exc)
+
+    # Filter to those affecting today's planned routes
+    affecting_alerts: list[Alert] = []
+    for plan in plans:
+        if plan.route and plan.leave_at:
+            affected = alerts_affecting_route(
+                all_alerts,
+                plan.route,
+                at_time=plan.leave_at,
+            )
+            for alert in affected:
+                if alert not in affecting_alerts:
+                    affecting_alerts.append(alert)
+
+    logger.info(
+        "morning job: %d affecting alerts out of %d total",
+        len(affecting_alerts),
+        len(all_alerts),
+    )
+
+    # ── 6. Build and send digest ──────────────────────────────────────────────
+    digest = format_digest(plans, affecting_alerts)
+    notifier = TelegramNotifier(
+        bot_token=config.telegram_bot_token,
+        chat_id=config.telegram_chat_id,
+    )
+    sent = notifier.send(digest)
+    if sent:
+        logger.info("morning job: digest sent successfully")
+    else:
+        logger.warning("morning job: digest send failed")
+
+    # ── 7. Log structured summary ────────────────────────────────────────────
+    logger.info(
+        "morning_run_summary: events=%d plans=%d alerts=%d digest_sent=%s",
+        len(events),
+        len(plans),
+        len(affecting_alerts),
+        sent,
+    )
+
+
+def _plan_event_safe(
+    event: Event,
+    config: Config,
+    venue_registry: VenueRegistry,
+    store: Store,
+    llm_client: "OpencodeGoClient",  # type: ignore[name-defined]
+) -> Plan:
+    """Call plan_event with error handling, returning an error Plan on failure."""
+    try:
+        return plan_event(
+            event,
+            config=config,
+            venues=venue_registry,
+            store=store,
+            llm=llm_client,
+        )
+    except Exception as exc:
+        logger.warning(
+            "plan_event failed for event %s (%s): %s",
+            event.id,
+            event.title,
+            exc,
+        )
+        return Plan(event=event, error=f"internal_error: {exc}")
