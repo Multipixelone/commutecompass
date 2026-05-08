@@ -1,5 +1,7 @@
 # commutecop — NYC commute orchestrator
 
+note: vibe coded to high heck and back. this is exclusively for me to have less adhd time blindness :)
+
 A self-hosted Python service that pulls events from Google Calendar, computes
 optimal departure times factoring NYC multimodal transit, and pushes daily
 digests and per-event notifications to Telegram.
