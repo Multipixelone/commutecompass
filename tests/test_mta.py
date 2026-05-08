@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecop.models import Alert, Route, TransitLeg, Event
-from commutecop.mta import (
+from commutecompass.models import Alert, Route, TransitLeg, Event
+from commutecompass.mta import (
     fetch_alerts,
     alerts_affecting_route,
     _parse_alert,
@@ -94,7 +94,7 @@ class TestFetchAlerts:
 
     def test_parses_valid_protobuf_fixture(self) -> None:
         """fetch_alerts parses the gtfs_rt_sample.pb fixture into Alert models."""
-        with patch("commutecop.mta.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.mta.httpx.Client") as mock_client_cls:
             # Read the real fixture bytes
             with open("tests/fixtures/gtfs_rt_sample.pb", "rb") as f:
                 fixture_bytes = f.read()
@@ -152,7 +152,7 @@ class TestFetchAlerts:
         mock_client.__exit__ = MagicMock(return_value=None)
 
         mock_client_cls = MagicMock(return_value=mock_client)
-        with patch("commutecop.mta.httpx.Client", mock_client_cls):
+        with patch("commutecompass.mta.httpx.Client", mock_client_cls):
             alerts = fetch_alerts(
                 "https://example.com/subway.pb",
                 "https://example.com/lirr.pb",
@@ -164,7 +164,7 @@ class TestFetchAlerts:
 
     def test_url_construction_with_empty_strings(self) -> None:
         """Empty strings fall back to canonical MTA URLs."""
-        with patch("commutecop.mta.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.mta.httpx.Client") as mock_client_cls:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.content = b""  # empty feed

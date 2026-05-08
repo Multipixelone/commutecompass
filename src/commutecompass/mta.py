@@ -14,8 +14,8 @@ from google.transit.gtfs_realtime_pb2 import (
     EntitySelector,
 )
 
-from commutecop.models import Alert, Route, TransitLeg
-from commutecop.timeutil import NYC_TZ
+from commutecompass.models import Alert, Route, TransitLeg
+from commutecompass.timeutil import NYC_TZ
 
 logger = logging.getLogger(__name__)
 

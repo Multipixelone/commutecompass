@@ -1,4 +1,4 @@
-# commutecop — NYC commute orchestrator
+# commutecompass — NYC commute orchestrator
 
 note: vibe coded to high heck and back. this is exclusively for me to have less adhd time blindness :)
 
@@ -13,16 +13,16 @@ digests and per-event notifications to Telegram.
 pip install -e .
 
 # First-time OAuth setup
-commutecop oauth
+commutecompass oauth
 
 # Initialize database
-commutecop init-db
+commutecompass init-db
 
 # Run morning digest
-commutecop morning
+commutecompass morning
 
 # Run poll loop (every minute)
-commutecop poll
+commutecompass poll
 ```
 
 ## Configuration

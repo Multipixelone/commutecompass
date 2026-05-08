@@ -9,8 +9,8 @@ from typing import Literal, Optional
 
 import httpx
 
-from commutecop.models import Origin, ResolvedLocation, Route, TransitLeg
-from commutecop.timeutil import NYC_TZ
+from commutecompass.models import Origin, ResolvedLocation, Route, TransitLeg
+from commutecompass.timeutil import NYC_TZ
 
 
 def _unix(dt: datetime) -> int:

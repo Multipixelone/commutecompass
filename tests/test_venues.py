@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from commutecop.venues import VenueRegistry, VenueEntry
+from commutecompass.venues import VenueRegistry, VenueEntry
 
 
 FIXTURE_PATH = Path(__file__).parent.parent / "data" / "known_venues.yaml"

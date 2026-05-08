@@ -6,7 +6,7 @@ from datetime import datetime, time, timedelta, timezone
 
 import pytest
 
-from commutecop.timeutil import (
+from commutecompass.timeutil import (
     NYC_TZ,
     is_within_quiet_hours,
     now_nyc,

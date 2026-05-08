@@ -1,28 +1,28 @@
 { config, lib, pkgs, ... }:
 let
-  cfg = config.services.commutecop;
+  cfg = config.services.commutecompass;
 in {
-  options.services.commutecop = {
-    enable = lib.mkEnableOption "commutecop NYC commute orchestrator";
+  options.services.commutecompass = {
+    enable = lib.mkEnableOption "commutecompass NYC commute orchestrator";
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The commutecop package.";
+      description = "The commutecompass package.";
     };
 
     user = lib.mkOption {
       type = lib.types.str;
-      default = "commutecop";
+      default = "commutecompass";
     };
 
     group = lib.mkOption {
       type = lib.types.str;
-      default = "commutecop";
+      default = "commutecompass";
     };
 
     configFile = lib.mkOption {
       type = lib.types.path;
-      description = "Path to commutecop config.toml.";
+      description = "Path to commutecompass config.toml.";
     };
 
     venuesFile = lib.mkOption {
@@ -49,7 +49,7 @@ in {
 
     dataDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/commutecop";
+      default = "/var/lib/commutecompass";
     };
   };
 
@@ -62,11 +62,11 @@ in {
     };
     users.groups.${cfg.group} = {};
 
-    environment.etc."commutecop/config.toml".source = cfg.configFile;
-    environment.etc."commutecop/known_venues.yaml".source = cfg.venuesFile;
+    environment.etc."commutecompass/config.toml".source = cfg.configFile;
+    environment.etc."commutecompass/known_venues.yaml".source = cfg.venuesFile;
 
-    systemd.services."commutecop-morning" = {
-      description = "commutecop morning digest";
+    systemd.services."commutecompass-morning" = {
+      description = "commutecompass morning digest";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
@@ -74,18 +74,18 @@ in {
         User = cfg.user;
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
-        StateDirectory = "commutecop";
-        # Hardening: restrict filesystem access; commutecop reads /etc/commutecop/*
+        StateDirectory = "commutecompass";
+        # Hardening: restrict filesystem access; commutecompass reads /etc/commutecompass/*
         # and writes to dataDir (StateDirectory= lands under dataDir)
         NoNewPrivileges = true;
         ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = "read-only";   # /home/commutecop ro; still allows home creation
+        ProtectHome = "read-only";   # /home/commutecompass ro; still allows home creation
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
     };
 
-    systemd.timers."commutecop-morning" = {
+    systemd.timers."commutecompass-morning" = {
       description = "Daily morning digest timer";
       wantedBy = [ "timers.target" ];
       timerConfig = {
@@ -94,8 +94,8 @@ in {
       };
     };
 
-    systemd.services."commutecop-poll" = {
-      description = "commutecop poll loop";
+    systemd.services."commutecompass-poll" = {
+      description = "commutecompass poll loop";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
@@ -103,18 +103,18 @@ in {
         User = cfg.user;
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
-        StateDirectory = "commutecop";
-        ExecStart = "${cfg.package}/bin/commutecop --config /etc/commutecop/config.toml poll";
+        StateDirectory = "commutecompass";
+        ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml poll";
         # Hardening: same policy as morning service
         NoNewPrivileges = true;
         ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = "read-only";   # /home/commutecop ro; still allows home creation
+        ProtectHome = "read-only";   # /home/commutecompass ro; still allows home creation
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
     };
 
-    systemd.timers."commutecop-poll" = {
+    systemd.timers."commutecompass-poll" = {
       description = "Poll timer";
       wantedBy = [ "timers.target" ];
       timerConfig = {

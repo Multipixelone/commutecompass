@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from commutecop.store import Store
-from commutecop.models import (
+from commutecompass.store import Store
+from commutecompass.models import (
     Alert,
     Event,
     Plan,
@@ -185,7 +185,7 @@ def test_today_plans_excludes_tomorrow(tmp_db_path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    from commutecop.timeutil import NYC_TZ
+    from commutecompass.timeutil import NYC_TZ
 
     # Create event starting tomorrow
     tomorrow = datetime.now(NYC_TZ) + timedelta(days=1)

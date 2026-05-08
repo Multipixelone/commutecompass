@@ -6,14 +6,14 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING, Callable, Optional
 
-from commutecop.models import Alert, Config, Plan, PingEntry
-from commutecop.timeutil import is_within_quiet_hours, now_nyc
+from commutecompass.models import Alert, Config, Plan, PingEntry
+from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
-    from commutecop.store import Store
-    from commutecop.mta import alerts_affecting_route, fetch_alerts
-    from commutecop.notify import TelegramNotifier
-    from commutecop.planner import plan_event
+    from commutecompass.store import Store
+    from commutecompass.mta import alerts_affecting_route, fetch_alerts
+    from commutecompass.notify import TelegramNotifier
+    from commutecompass.planner import plan_event
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,11 @@ def run(
         now_fn: Time provider (default: real now_nyc).
     """
     # Resolve deps
-    from commutecop.store import Store
-    from commutecop.mta import alerts_affecting_route as _affecting
-    from commutecop.mta import fetch_alerts as _fetch
-    from commutecop.notify import TelegramNotifier as _Notifier
-    from commutecop.planner import plan_event as _plan_event
+    from commutecompass.store import Store
+    from commutecompass.mta import alerts_affecting_route as _affecting
+    from commutecompass.mta import fetch_alerts as _fetch
+    from commutecompass.notify import TelegramNotifier as _Notifier
+    from commutecompass.planner import plan_event as _plan_event
 
     _store: Store = store or Store(config.paths.db_path)
     _fetch_alerts: Callable[..., list[Alert]] = fetch_alerts_fn or _fetch
@@ -135,7 +135,7 @@ def run(
 
             if route_changed:
                 # Send service update
-                from commutecop.format import format_service_update
+                from commutecompass.format import format_service_update
 
                 if new_plan.route is not None:
                     msg = format_service_update(plan, alert, new_plan.route)
@@ -184,8 +184,8 @@ def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
 
 def _schedule_pings_for_plan(plan: Plan, store: "Store", now: "datetime") -> None:  # type: ignore[name-defined]
     """Schedule prep and leave pings for a plan (skip if already past)."""
-    from commutecop.format import format_prep_ping, format_leave_ping
-    from commutecop.models import PingEntry
+    from commutecompass.format import format_prep_ping, format_leave_ping
+    from commutecompass.models import PingEntry
     from uuid import uuid4
 
     if plan.leave_at is not None and plan.leave_at > now:

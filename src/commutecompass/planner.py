@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional
 
-from commutecop.models import Config, Event, Plan
-from commutecop.venues import VenueRegistry
-from commutecop.llm import OpencodeGoClient
+from commutecompass.models import Config, Event, Plan
+from commutecompass.venues import VenueRegistry
+from commutecompass.llm import OpencodeGoClient
 
 
 def plan_event(
@@ -29,9 +29,9 @@ def plan_event(
 
     Returns a Plan with route and timing, or an error Plan on failure.
     """
-    from commutecop.resolver import resolve
-    from commutecop.routing import plan_route
-    from commutecop.geocode import geocode
+    from commutecompass.resolver import resolve
+    from commutecompass.routing import plan_route
+    from commutecompass.geocode import geocode
 
     # Determine travel mode
     mode: str = mode_override or event.mode_override or "transit"

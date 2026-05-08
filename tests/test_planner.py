@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 import pytest
 
-from commutecop.models import (
+from commutecompass.models import (
     Config,
     Event,
     Origin,
@@ -21,10 +21,10 @@ from commutecop.models import (
     OpencodeGoConfig,
     MtaConfig,
 )
-from commutecop.planner import plan_event
-from commutecop.venues import VenueRegistry
-from commutecop.llm import OpencodeGoClient
-from commutecop.timeutil import NYC_TZ
+from commutecompass.planner import plan_event
+from commutecompass.venues import VenueRegistry
+from commutecompass.llm import OpencodeGoClient
+from commutecompass.timeutil import NYC_TZ
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────────
@@ -155,8 +155,8 @@ def test_plan_event_resolves_location_and_computes_timings(
     nyc_now: datetime,
 ) -> None:
     """plan_event wires resolver + routing, computes leave_at/prep_at correctly."""
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
@@ -184,7 +184,7 @@ def test_plan_event_location_unresolved(
     nyc_now: datetime,
 ) -> None:
     """Returns error='location_unresolved' when resolve returns None."""
-    with patch("commutecop.resolver.resolve") as mock_resolve:
+    with patch("commutecompass.resolver.resolve") as mock_resolve:
         mock_resolve.return_value = None
 
         result = plan_event(
@@ -208,8 +208,8 @@ def test_plan_event_no_route(
     nyc_now: datetime,
 ) -> None:
     """Returns error='no_route' when plan_route returns None."""
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = None
 
@@ -235,8 +235,8 @@ def test_plan_event_mode_override(
     nyc_now: datetime,
 ) -> None:
     """mode_override parameter is passed through to plan_route."""
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
@@ -264,8 +264,8 @@ def test_plan_event_uses_event_mode_override(
     """Falls back to event.mode_override when no explicit override provided."""
     event.mode_override = "walking"  # type: ignore[assignment]
 
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
@@ -288,8 +288,8 @@ def test_plan_event_updates_event_with_resolved_location(
     mock_route: Route,
 ) -> None:
     """Returned Plan has event with location_resolved populated."""
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
@@ -332,8 +332,8 @@ def test_plan_event_timezone_aware_arithmetic(
         transfers=0,
     )
 
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = one_hour_route
 
@@ -362,8 +362,8 @@ def test_plan_event_default_mode_is_transit(
     """When neither override nor event mode is set, defaults to transit."""
     assert event.mode_override is None
 
-    with patch("commutecop.resolver.resolve") as mock_resolve, \
-         patch("commutecop.routing.plan_route") as mock_plan_route:
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 

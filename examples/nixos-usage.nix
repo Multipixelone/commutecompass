@@ -1,18 +1,18 @@
 { inputs, config, pkgs, ... }:
 let
-  commutecop = inputs.commutecop.packages.${pkgs.system}.default;
+  commutecompass = inputs.commutecompass.packages.${pkgs.system}.default;
 in {
-  imports = [ inputs.commutecop.nixosModules.default ];
+  imports = [ inputs.commutecompass.nixosModules.default ];
 
-  age.secrets.commutecop-env.file = ../secrets/commutecop-env.age;
+  age.secrets.commutecompass-env.file = ../secrets/commutecompass-env.age;
 
-  services.commutecop = {
+  services.commutecompass = {
     enable = true;
-    package = commutecop;
-    configFile = ../config/commutecop/config.toml;
-    venuesFile = ../config/commutecop/known_venues.yaml;
-    environmentFile = config.age.secrets.commutecop-env.path;
-    morningTime = "06:00:00";
+    package = commutecompass;
+    configFile = ../config/commutecompass/config.toml;
+    venuesFile = ../config/commutecompass/known_venues.yaml;
+    environmentFile = config.age.secrets.commutecompass-env.path;
+    morningTime = "0600:00";
     pollInterval = "1min";
   };
 }

@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from commutecop.models import Origin, ResolvedLocation, Route, TransitLeg
-from commutecop.routing import _parse_route, _unix, plan_route
-from commutecop.timeutil import NYC_TZ
+from commutecompass.models import Origin, ResolvedLocation, Route, TransitLeg
+from commutecompass.routing import _parse_route, _unix, plan_route
+from commutecompass.timeutil import NYC_TZ
 
 
 # ─── Helper fixtures ───────────────────────────────────────────────────────────

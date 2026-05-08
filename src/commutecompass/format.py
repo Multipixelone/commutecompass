@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from commutecop.models import Alert, Plan, Route
+from commutecompass.models import Alert, Plan, Route
 
 
 def escape_md(s: str) -> str:
@@ -27,7 +27,7 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
     Returns:
         Formatted digest string ready for Telegram.
     """
-    from commutecop.timeutil import now_nyc
+    from commutecompass.timeutil import now_nyc
 
     today = now_nyc()
     date_str = today.strftime("%A, %b %-d").replace("  ", " ")

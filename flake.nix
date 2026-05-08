@@ -1,5 +1,5 @@
 {
-  description = "commutecop — NYC commute orchestrator";
+  description = "commutecompass — NYC commute orchestrator";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -10,7 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        commutecop = pkgs.callPackage ./nix/package.nix {};
+        commutecompass = pkgs.callPackage ./nix/package.nix {};
         pythonEnv = pkgs.python312.withPackages (ps: with ps; [
           pip
           pytest
@@ -26,8 +26,8 @@
           tomli
         ]);
       in {
-        packages.default = commutecop;
-        packages.commutecop = commutecop;
+        packages.default = commutecompass;
+        packages.commutecompass = commutecompass;
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -39,10 +39,10 @@
       })
     // {
       nixosModules.default = import ./nix/module.nix;
-      nixosModules.commutecop = import ./nix/module.nix;
+      nixosModules.commutecompass = import ./nix/module.nix;
 
       overlays.default = final: prev: {
-        commutecop = final.callPackage ./nix/package.nix {};
+        commutecompass = final.callPackage ./nix/package.nix {};
       };
     };
 }

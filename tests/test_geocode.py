@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 import httpx
 
-from commutecop.geocode import geocode, GeocodeResult
+from commutecompass.geocode import geocode, GeocodeResult
 
 
 # ─────────── Mock response builders ───────────
@@ -42,7 +42,7 @@ class TestGeocode:
             lon=-74.0060,
             place_id="ChIJveryLongPlaceIdForTesting",
         )
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.json.return_value = payload
             mock_instance.get.return_value.raise_for_status.return_value = None
@@ -65,7 +65,7 @@ class TestGeocode:
             assert call.kwargs["params"]["bounds"] == "40.5,-74.3|41.0,-73.7"
 
     def test_zero_results_returns_none(self) -> None:
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.json.return_value = _zero_results_response()
             mock_instance.get.return_value.raise_for_status.return_value = None
@@ -77,7 +77,7 @@ class TestGeocode:
     def test_zero_results_empty_results_returns_none(self) -> None:
         """API may return OK but with empty results list."""
         payload = {"results": [], "status": "OK"}
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.json.return_value = payload
             mock_instance.get.return_value.raise_for_status.return_value = None
@@ -87,7 +87,7 @@ class TestGeocode:
 
     def test_transport_error_raises(self) -> None:
         """Connection errors, timeouts, and non-OK HTTP status raise RuntimeError."""
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "500 Server Error",
@@ -99,7 +99,7 @@ class TestGeocode:
                 geocode("200 Example St", api_key="test-key")
 
     def test_timeout_error_raises(self) -> None:
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.side_effect = httpx.TimeoutException("timed out")
 
@@ -107,7 +107,7 @@ class TestGeocode:
                 geocode("200 Example St", api_key="test-key")
 
     def test_connection_error_raises(self) -> None:
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.side_effect = httpx.ConnectError("connection refused")
 
@@ -117,7 +117,7 @@ class TestGeocode:
     def test_non_ok_non_zero_status_raises(self) -> None:
         """e.g. 'INVALID_REQUEST', 'OVER_QUERY_LIMIT', 'REQUEST_DENIED'"""
         payload = {"results": [], "status": "REQUEST_DENIED"}
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.json.return_value = payload
             mock_instance.get.return_value.raise_for_status.return_value = None
@@ -137,7 +137,7 @@ class TestGeocode:
             ],
             "status": "OK",
         }
-        with patch("commutecop.geocode.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.geocode.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.get.return_value.json.return_value = payload
             mock_instance.get.return_value.raise_for_status.return_value = None

@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecop.models import CalendarSpec, Event
-from commutecop.calendar_client import AuthError, CalendarClient
+from commutecompass.models import CalendarSpec, Event
+from commutecompass.calendar_client import AuthError, CalendarClient
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ def test_saved_credentials_have_restricted_permissions(
         "client_secret": "test-client-secret",
     })
 
-    with patch("commutecop.calendar_client.InstalledAppFlow") as mock_flow_class:
+    with patch("commutecompass.calendar_client.InstalledAppFlow") as mock_flow_class:
         mock_flow_instance = MagicMock()
         mock_flow_instance.run_local_server.return_value = mock_creds
         mock_flow_class.from_client_config.return_value = mock_flow_instance
@@ -107,7 +107,7 @@ def test_authorize_interactive_saves_token(
         "client_secret": "test-client-secret",
     })
 
-    with patch("commutecop.calendar_client.InstalledAppFlow") as mock_flow_class:
+    with patch("commutecompass.calendar_client.InstalledAppFlow") as mock_flow_class:
         mock_flow_instance = MagicMock()
         mock_flow_instance.run_local_server.return_value = mock_creds
         mock_flow_class.from_client_config.return_value = mock_flow_instance
@@ -404,7 +404,7 @@ def test_refresh_error_raises_auth_error(client_secret_json: str, token_path: Pa
 
     client = CalendarClient(client_secret_json, token_path)
 
-    with patch("commutecop.calendar_client.Credentials.from_authorized_user_info") as mock_from_info:
+    with patch("commutecompass.calendar_client.Credentials.from_authorized_user_info") as mock_from_info:
         mock_creds = MagicMock()
         mock_creds.expired = True
         mock_from_info.return_value = mock_creds

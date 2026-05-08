@@ -18,9 +18,9 @@ import logging
 import uuid
 from datetime import datetime
 
-from commutecop.calendar_client import CalendarClient
-from commutecop.format import format_digest, format_leave_ping, format_prep_ping
-from commutecop.models import (
+from commutecompass.calendar_client import CalendarClient
+from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
+from commutecompass.models import (
     Alert,
     Config,
     Event,
@@ -28,12 +28,12 @@ from commutecop.models import (
     Plan,
     Route,
 )
-from commutecop.mta import alerts_affecting_route, fetch_alerts
-from commutecop.notify import TelegramNotifier
-from commutecop.planner import plan_event
-from commutecop.store import Store
-from commutecop.timeutil import now_nyc
-from commutecop.venues import VenueRegistry
+from commutecompass.mta import alerts_affecting_route, fetch_alerts
+from commutecompass.notify import TelegramNotifier
+from commutecompass.planner import plan_event
+from commutecompass.store import Store
+from commutecompass.timeutil import now_nyc
+from commutecompass.venues import VenueRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def run(config: Config) -> None:  # noqa: C901
     venue_registry = VenueRegistry.load(config.paths.venues_file)
 
     # Lazily create LLM client only if we have events with locations
-    from commutecop.llm import OpencodeGoClient
+    from commutecompass.llm import OpencodeGoClient
     llm_client = OpencodeGoClient(
         endpoint=config.opencode_go.endpoint,
         token=config.opencode_go_token,

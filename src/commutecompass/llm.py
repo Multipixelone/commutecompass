@@ -9,7 +9,7 @@ from typing import Optional
 
 import httpx
 
-from commutecop.models import ResolvedLocation
+from commutecompass.models import ResolvedLocation
 
 log = logging.getLogger(__name__)
 

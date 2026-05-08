@@ -11,9 +11,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecop.jobs.morning import run as morning_run
-from commutecop.jobs.poll import run as poll_run
-from commutecop.models import (
+from commutecompass.jobs.morning import run as morning_run
+from commutecompass.jobs.poll import run as poll_run
+from commutecompass.models import (
     Alert,
     CalendarSpec,
     Config,
@@ -30,8 +30,8 @@ from commutecop.models import (
     MtaConfig,
     TransitLeg,
 )
-from commutecop.store import Store
-from commutecop.timeutil import NYC_TZ, now_nyc
+from commutecompass.store import Store
+from commutecompass.timeutil import NYC_TZ, now_nyc
 
 
 # ─────────── Fixtures ──────────────────────────────────────────────────────────
@@ -184,10 +184,10 @@ def test_morning_run_fetches_and_plans(
     sample_route: Route,
 ) -> None:
     """Verify the full morning sequence: fetch → plan → upsert → ping schedule → digest."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         # ── CalendarClient mock ─────────────────────────────────────────
         mock_cal = MagicMock()
@@ -219,7 +219,7 @@ def test_morning_run_fetches_and_plans(
                 return evt1_plan
             return evt2_plan
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         # ── Verify calendar_client was called ───────────────────────────
@@ -262,10 +262,10 @@ def test_morning_run_skips_past_pings(
     sample_route: Route,
 ) -> None:
     """Pings with fire_at in the past are not scheduled."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -289,7 +289,7 @@ def test_morning_run_skips_past_pings(
         def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
             return past_plan
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         store = Store(minimal_config.paths.db_path)
@@ -305,10 +305,10 @@ def test_morning_run_idempotent(
     sample_route: Route,
 ) -> None:
     """Re-running overwrites plans cleanly (idempotent)."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal_class.return_value = mock_cal
@@ -338,11 +338,11 @@ def test_morning_run_idempotent(
         # First run: fetch_events returns 2 events
         mock_cal.fetch_events.return_value = today_events
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         # Second run: same events — should overwrite cleanly
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         # plan_event should have been called 4 times total (2 events × 2 runs)
@@ -362,10 +362,10 @@ def test_morning_run_cancel_stale_pings(
     sample_route: Route,
 ) -> None:
     """Events removed from the calendar have their pings cancelled."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_fetch_alerts.return_value = []
@@ -428,7 +428,7 @@ def test_morning_run_cancel_stale_pings(
         def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
             return plan1
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         # Stale pings should be gone
@@ -444,10 +444,10 @@ def test_morning_run_with_affecting_alerts(
     sample_route: Route,
 ) -> None:
     """Digest includes affecting MTA alerts."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -485,7 +485,7 @@ def test_morning_run_with_affecting_alerts(
                 return plan1
             return plan2
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             morning_run(minimal_config)
 
         mock_notifier.send.assert_called_once()
@@ -500,10 +500,10 @@ def test_morning_run_telegram_failure_is_not_fatal(
     sample_route: Route,
 ) -> None:
     """Telegram send failure doesn't raise; it logs and continues."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -526,7 +526,7 @@ def test_morning_run_telegram_failure_is_not_fatal(
         def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
             return plan1
 
-        with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
+        with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
             # Should NOT raise
             morning_run(minimal_config)
 
@@ -540,10 +540,10 @@ def test_morning_run_empty_calendar(
     tmp_path: Path,
 ) -> None:
     """Empty calendar: digest sent with 'no events' message."""
-    with patch("commutecop.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecop.jobs.morning.fetch_alerts"
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecop.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.TelegramNotifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = []

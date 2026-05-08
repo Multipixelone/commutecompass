@@ -6,9 +6,9 @@ import logging
 import re
 from typing import Callable, Optional
 
-from commutecop.geocode import GeocodeResult
-from commutecop.models import ResolvedLocation
-from commutecop.venues import VenueRegistry
+from commutecompass.geocode import GeocodeResult
+from commutecompass.models import ResolvedLocation
+from commutecompass.venues import VenueRegistry
 
 log = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 { lib, python3Packages, fetchFromGitHub, ... }:
 
 python3Packages.buildPythonApplication rec {
-  pname = "commutecop";
+  pname = "commutecompass";
   version = "0.1.0";
   format = "pyproject";
 
@@ -22,5 +22,5 @@ python3Packages.buildPythonApplication rec {
     tomli
   ];
 
-  pythonImportsCheck = [ "commutecop" ];
+  pythonImportsCheck = [ "commutecompass" ];
 }

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from commutecop.notify import TelegramNotifier
+from commutecompass.notify import TelegramNotifier
 
 
 class TestTelegramNotifierSend:

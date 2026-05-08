@@ -12,7 +12,7 @@ from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from commutecop.models import CalendarSpec, Event
+from commutecompass.models import CalendarSpec, Event
 
 
 class AuthError(Exception):
@@ -38,7 +38,7 @@ class CalendarClient:
         if not self.token_path.exists():
             raise AuthError(
                 f"Token not found at {self.token_path}. "
-                "Run `commutecop oauth` first."
+                "Run `commutecompass oauth` first."
             )
 
         creds_data = json.loads(self.token_path.read_text())
@@ -52,7 +52,7 @@ class CalendarClient:
                 self._save_credentials(creds)
             except RefreshError as exc:
                 raise AuthError(
-                    "Token refresh failed. Please re-run `commutecop oauth`."
+                    "Token refresh failed. Please re-run `commutecompass oauth`."
                 ) from exc
 
         return creds
@@ -65,7 +65,7 @@ class CalendarClient:
         os.chmod(self.token_path, 0o600)
 
     def authorize_interactive(self) -> None:
-        """For first-run `commutecop oauth` — opens browser OAuth flow."""
+        """For first-run `commutecompass oauth` — opens browser OAuth flow."""
         # client_secret_json is the raw JSON string content, not a file path
         client_config = json.loads(self.client_secret_json)
 

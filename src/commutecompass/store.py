@@ -9,7 +9,7 @@ from typing import Optional
 
 import sqlite3
 
-from commutecop.models import Alert, Plan, PingEntry, ResolvedLocation
+from commutecompass.models import Alert, Plan, PingEntry, ResolvedLocation
 
 
 def _json_dumps(obj: object) -> str:
@@ -104,7 +104,7 @@ class Store:
 
     def today_plans(self) -> list[Plan]:
         """Return all plans for today (event_start is today in America/New_York)."""
-        from commutecop.timeutil import NYC_TZ
+        from commutecompass.timeutil import NYC_TZ
 
         today_start = datetime.now(NYC_TZ).replace(
             hour=0, minute=0, second=0, microsecond=0

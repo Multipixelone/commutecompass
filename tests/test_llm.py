@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from commutecop.llm import OpencodeGoClient
+from commutecompass.llm import OpencodeGoClient
 
 
 def _make_response(content: str) -> httpx.Response:
@@ -39,7 +39,7 @@ class TestResolveLocation:
     def _call(self, raw: str, content: str, hints: dict | None = None) -> Any:
         """Call client.resolve_location with a mocked HTTP response."""
         hints = hints or {}
-        with patch("commutecop.llm.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.post.return_value = _make_response(content)
             client = _make_client()
@@ -115,7 +115,7 @@ class TestResolveLocation:
         assert result is None
 
     def test_timeout_returns_none(self) -> None:
-        with patch("commutecop.llm.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.post.side_effect = httpx.TimeoutException("timed out")
             client = _make_client()
@@ -125,7 +125,7 @@ class TestResolveLocation:
     def test_http_error_returns_none(self) -> None:
         request = MagicMock(spec=httpx.Request)
         err_response = httpx.Response(500, json={"error": "server error"}, request=request)
-        with patch("commutecop.llm.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.post.return_value = err_response
             client = _make_client()
@@ -133,7 +133,7 @@ class TestResolveLocation:
             assert result is None
 
     def test_httpx_network_error_returns_none(self) -> None:
-        with patch("commutecop.llm.httpx.Client") as mock_client_cls:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
             mock_instance = mock_client_cls.return_value.__enter__.return_value
             mock_instance.post.side_effect = httpx.ConnectError("connection refused")
             client = _make_client()

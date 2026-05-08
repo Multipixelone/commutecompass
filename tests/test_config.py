@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from commutecop.config import (
+from commutecompass.config import (
     Config,
     ConfigError,
     load_config,
@@ -40,9 +40,9 @@ quiet_hours_start = "22:00"
 quiet_hours_end = "07:00"
 
 [paths]
-venues_file = "/etc/commutecop/known_venues.yaml"
-db_path = "/var/lib/commutecop/state.db"
-oauth_token_path = "/var/lib/commutecop/google_token.json"
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
 
 [opencode_go]
 endpoint = "https://opencode-go.example/v1/chat/completions"
@@ -193,9 +193,9 @@ morning_run_time = "06:00"
 poll_interval_seconds = 60
 
 [paths]
-venues_file = "/etc/commutecop/venues.yaml"
-db_path = "/var/lib/commutecop/state.db"
-oauth_token_path = "/var/lib/commutecop/token.json"
+venues_file = "/etc/commutecompass/venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/token.json"
 
 [opencode_go]
 endpoint = "https://opencode-go.example/v1/chat/completions"

@@ -6,14 +6,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from commutecop.format import (
+from commutecompass.format import (
     escape_md,
     format_digest,
     format_leave_ping,
     format_prep_ping,
     format_service_update,
 )
-from commutecop.models import (
+from commutecompass.models import (
     Alert,
     Event,
     Plan,

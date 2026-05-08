@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from commutecop.cli import cli
+from commutecompass.cli import cli
 
 
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
@@ -38,9 +38,9 @@ quiet_hours_start = "22:00"
 quiet_hours_end = "07:00"
 
 [paths]
-venues_file = "/etc/commutecop/known_venues.yaml"
-db_path = "/var/lib/commutecop/state.db"
-oauth_token_path = "/var/lib/commutecop/google_token.json"
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
 
 [opencode_go]
 endpoint = "https://opencode-go.example/v1/chat/completions"
@@ -107,8 +107,8 @@ class TestMainHelp:
         """--help shows the default config path."""
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        # The default is /etc/commutecop/config.toml
-        assert "/etc/commutecop/config.toml" in result.output
+        # The default is /etc/commutecompass/config.toml
+        assert "/etc/commutecompass/config.toml" in result.output
 
 
 # ─────────── Command help tests ───────────────────────────────────────────────
@@ -190,8 +190,8 @@ class TestInitDb:
         """init-db creates the database file and schema."""
         db_path = tmp_path / "test.db"
 
-        with mock.patch("commutecop.config.load_config") as mock_cfg:
-            from commutecop.config import Config
+        with mock.patch("commutecompass.config.load_config") as mock_cfg:
+            from commutecompass.config import Config
 
             cfg = Config(
                 origin={

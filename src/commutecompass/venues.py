@@ -9,7 +9,7 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel
 
-from commutecop.models import ResolvedLocation
+from commutecompass.models import ResolvedLocation
 
 
 def _normalize(s: str) -> str:

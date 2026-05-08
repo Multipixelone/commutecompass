@@ -1,4 +1,4 @@
-"""CLI entry point — commutecop operational commands."""
+"""CLI entry point — commutecompass operational commands."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 
 import click
 
-from commutecop.config import ConfigError  # noqa: F401
+from commutecompass.config import ConfigError  # noqa: F401
 
 # Default config path
-_CONFIG_DEFAULT = "/etc/commutecop/config.toml"
+_CONFIG_DEFAULT = "/etc/commutecompass/config.toml"
 
 _logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
 def _load_config(config_path: Path) -> Config:
     """Load and return the Config, exiting gracefully on error."""
     # Import module to allow patching at the right spot
-    from commutecop import config as config_mod
+    from commutecompass import config as config_mod
 
     try:
         return config_mod.load_config(config_path)
@@ -44,7 +44,7 @@ def _load_config(config_path: Path) -> Config:
 )
 @click.pass_context
 def cli(ctx: click.Context, config: Path) -> None:
-    """commutecop — NYC commute orchestrator."""
+    """commutecompass — NYC commute orchestrator."""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
 
@@ -59,7 +59,7 @@ def oauth(ctx: click.Context) -> None:
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecop.calendar_client import CalendarClient
+    from commutecompass.calendar_client import CalendarClient
 
     token_path = Path(cfg.paths.oauth_token_path)
     click.echo(f"Starting OAuth flow... Token will be saved to {token_path}")
@@ -86,7 +86,7 @@ def init_db(ctx: click.Context) -> None:
     db_path = Path(cfg.paths.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from commutecop.store import Store
+    from commutecompass.store import Store
 
     store = Store(db_path)
     store.init_schema()
@@ -103,7 +103,7 @@ def morning(ctx: click.Context) -> None:
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecop.jobs.morning import run as morning_run
+    from commutecompass.jobs.morning import run as morning_run
 
     morning_run(cfg)
 
@@ -118,7 +118,7 @@ def poll(ctx: click.Context) -> None:
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecop.jobs.poll import run as poll_run
+    from commutecompass.jobs.poll import run as poll_run
 
     poll_run(cfg)
 
@@ -134,12 +134,12 @@ def plan(ctx: click.Context, event_id: str) -> None:
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecop.calendar_client import CalendarClient
-    from commutecop.llm import OpencodeGoClient
-    from commutecop.planner import plan_event
-    from commutecop.store import Store
-    from commutecop.venues import VenueRegistry
-    from commutecop.timeutil import now_nyc
+    from commutecompass.calendar_client import CalendarClient
+    from commutecompass.llm import OpencodeGoClient
+    from commutecompass.planner import plan_event
+    from commutecompass.store import Store
+    from commutecompass.venues import VenueRegistry
+    from commutecompass.timeutil import now_nyc
 
     token_path = Path(cfg.paths.oauth_token_path)
     cal_client = CalendarClient(
@@ -199,14 +199,14 @@ def test_notify(ctx: click.Context) -> None:
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecop.notify import TelegramNotifier
+    from commutecompass.notify import TelegramNotifier
 
     notifier = TelegramNotifier(
         bot_token=cfg.telegram_bot_token,
         chat_id=cfg.telegram_chat_id,
     )
 
-    ok = notifier.send("🟢 commutecop is alive — test notification OK")
+    ok = notifier.send("🟢 commutecompass is alive — test notification OK")
     if ok:
         click.echo("Test message sent successfully.")
     else:
@@ -227,5 +227,5 @@ def bot() -> None:
 
 
 def main() -> None:
-    """CLI entry point registered as the `commutecop` console script."""
+    """CLI entry point registered as the `commutecompass` console script."""
     cli()

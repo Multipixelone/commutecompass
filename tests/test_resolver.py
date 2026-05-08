@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from commutecop.geocode import GeocodeResult
-from commutecop.models import ResolvedLocation
-from commutecop.resolver import looks_like_address, resolve
-from commutecop.venues import VenueEntry, VenueRegistry
+from commutecompass.geocode import GeocodeResult
+from commutecompass.models import ResolvedLocation
+from commutecompass.resolver import looks_like_address, resolve
+from commutecompass.venues import VenueEntry, VenueRegistry
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────────

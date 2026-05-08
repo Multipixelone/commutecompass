@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 import pytest
 
-from commutecop.models import (
+from commutecompass.models import (
     Origin,
     CalendarSpec,
     PrepConfig,
@@ -95,9 +95,9 @@ def test_config_full_construction() -> None:
         prep=PrepConfig(prep_minutes=25),
         scheduling=SchedulingConfig(morning_run_time="06:30"),
         paths=PathsConfig(
-            venues_file="/etc/commutecop/venues.yaml",
-            db_path="/var/lib/commutecop/state.db",
-            oauth_token_path="/var/lib/commutecop/token.json",
+            venues_file="/etc/commutecompass/venues.yaml",
+            db_path="/var/lib/commutecompass/state.db",
+            oauth_token_path="/var/lib/commutecompass/token.json",
         ),
         opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
         mta=MtaConfig(
