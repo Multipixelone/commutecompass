@@ -1,4 +1,140 @@
 {
-  "routes": [],
-  "status": "OK"
+  "routes": [
+    {
+      "legs": [
+        {
+          "steps": [
+            {
+              "travel_mode": "WALKING",
+              "duration": {
+                "value": 300
+              },
+              "departure_time": {
+                "value": 1746864000
+              },
+              "arrival_time": {
+                "value": 1746864300
+              },
+              "start_location": {
+                "lat": 40.6950,
+                "lng": -73.9890
+              },
+              "end_location": {
+                "lat": 40.6970,
+                "lng": -73.9870
+              },
+              "html_instructions": "Walk to Jay St-MetroTech"
+            },
+            {
+              "travel_mode": "TRANSIT",
+              "duration": {
+                "value": 1200
+              },
+              "departure_time": {
+                "value": 1746864300
+              },
+              "arrival_time": {
+                "value": 1746865500
+              },
+              "start_location": {
+                "lat": 40.6970,
+                "lng": -73.9870
+              },
+              "end_location": {
+                "lat": 40.7100,
+                "lng": -73.9100
+              },
+              "html_instructions": "Take the C train toward Euclid Av",
+              "transit_details": {
+                "line": {
+                  "name": "C",
+                  "short_name": "C",
+                  "vehicle": {
+                    "type": "SUBWAY",
+                    "name": "Subway",
+                    "locality": "NYC"
+                  },
+                  "agencies": [
+                    {
+                      "name": "MTA New York City Transit",
+                      "url": "http://www.mta.info"
+                    }
+                  ]
+                },
+                "departure_stop": {
+                  "name": "Jay St-MetroTech",
+                  "location": {
+                    "lat": 40.6970,
+                    "lng": -73.9870
+                  }
+                },
+                "arrival_stop": {
+                  "name": "Fulton St",
+                  "location": {
+                    "lat": 40.7100,
+                    "lng": -73.9100
+                  }
+                },
+                "headsign": "Euclid Av",
+                "num_stops": 4
+              }
+            },
+            {
+              "travel_mode": "WALKING",
+              "duration": {
+                "value": 180
+              },
+              "departure_time": {
+                "value": 1746865500
+              },
+              "arrival_time": {
+                "value": 1746865680
+              },
+              "start_location": {
+                "lat": 40.7100,
+                "lng": -73.9100
+              },
+              "end_location": {
+                "lat": 40.7120,
+                "lng": -73.9080
+              },
+              "html_instructions": "Walk to destination"
+            }
+          ],
+          "duration": {
+            "value": 1680
+          },
+          "departure_time": {
+            "value": 1746864000
+          },
+          "arrival_time": {
+            "value": 1746865680
+          },
+          "start_location": {
+            "lat": 40.6950,
+            "lng": -73.9890
+          },
+          "end_location": {
+            "lat": 40.7120,
+            "lng": -73.9080
+          }
+        }
+      ],
+      "duration": {
+        "value": 1680
+      },
+      "fare": {
+        "value": 2.90,
+        "currency": "USD"
+      },
+      "arrival_time": {
+        "value": 1746865680
+      },
+      "departure_time": {
+        "value": 1746864000
+      }
+    }
+  ],
+  "status": "OK",
+  "geocoded_waypoints": []
 }
