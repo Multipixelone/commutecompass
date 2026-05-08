@@ -11,24 +11,29 @@
       let
         pkgs = import nixpkgs { inherit system; };
         commutecop = pkgs.callPackage ./nix/package.nix {};
-        pythonCmd = pkgs.writeShellScriptBin "python" ''
-          exec ${pkgs.python312}/bin/python3 "$@"
-        '';
+        pythonEnv = pkgs.python312.withPackages (ps: with ps; [
+          pip
+          pytest
+          pydantic
+          click
+          pyyaml
+          rapidfuzz
+          httpx
+          google-api-python-client
+          google-auth-oauthlib
+          google-auth-httplib2
+          gtfs-realtime-bindings
+          tomli
+        ]);
       in {
         packages.default = commutecop;
         packages.commutecop = commutecop;
 
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            pythonCmd
-            python312
-            python312Packages.pip
-            python312Packages.pydantic
-            python312Packages.click
-            python312Packages.pyyaml
-            python312Packages.ruff
-            python312Packages.mypy
-            python312Packages.pytest
+          packages = with pkgs; [
+            pythonEnv
+            ruff
+            mypy
           ];
         };
       })
