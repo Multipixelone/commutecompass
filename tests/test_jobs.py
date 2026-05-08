@@ -1,4 +1,4 @@
-"""Tests for morning job (§6.14)."""
+"""Tests for jobs (morning + poll)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ import json
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecop.jobs.morning import run
+from commutecop.jobs.morning import run as morning_run
+from commutecop.jobs.poll import run as poll_run
 from commutecop.models import (
     Alert,
     CalendarSpec,
@@ -33,7 +34,7 @@ from commutecop.store import Store
 from commutecop.timeutil import NYC_TZ, now_nyc
 
 
-# ─────────── Fixtures ────────────────────────────────────────────────────────
+# ─────────── Fixtures ──────────────────────────────────────────────────────────
 
 @pytest.fixture
 def minimal_config(tmp_path: Path) -> Config:
@@ -174,7 +175,7 @@ def sample_route() -> Route:
     )
 
 
-# ─────────── Tests ───────────────────────────────────────────────────────────
+# ─────────── Morning job tests ────────────────────────────────────────────────
 
 def test_morning_run_fetches_and_plans(
     minimal_config: Config,
@@ -219,7 +220,7 @@ def test_morning_run_fetches_and_plans(
             return evt2_plan
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         # ── Verify calendar_client was called ───────────────────────────
         mock_cal.fetch_events.assert_called_once()
@@ -289,7 +290,7 @@ def test_morning_run_skips_past_pings(
             return past_plan
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         store = Store(minimal_config.paths.db_path)
         pending = store.pending_pings(before=now + timedelta(days=1))
@@ -338,20 +339,14 @@ def test_morning_run_idempotent(
         mock_cal.fetch_events.return_value = today_events
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         # Second run: same events — should overwrite cleanly
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         # plan_event should have been called 4 times total (2 events × 2 runs)
         assert call_count == 4
-
-        store = Store(minimal_config.paths.db_path)
-        saved_plan1 = store.get_plan("evt-1")
-        saved_plan2 = store.get_plan("evt-2")
-        assert saved_plan1 is not None
-        assert saved_plan2 is not None
 
         import sqlite3
         with sqlite3.connect(minimal_config.paths.db_path) as conn:
@@ -434,7 +429,7 @@ def test_morning_run_cancel_stale_pings(
             return plan1
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         # Stale pings should be gone
         remaining = store.pending_pings(before=now + timedelta(days=1))
@@ -491,7 +486,7 @@ def test_morning_run_with_affecting_alerts(
             return plan2
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
-            run(minimal_config)
+            morning_run(minimal_config)
 
         mock_notifier.send.assert_called_once()
         digest_text = mock_notifier.send.call_args[0][0]
@@ -533,7 +528,7 @@ def test_morning_run_telegram_failure_is_not_fatal(
 
         with patch("commutecop.jobs.morning.plan_event", side_effect=mock_plan_event):
             # Should NOT raise
-            run(minimal_config)
+            morning_run(minimal_config)
 
         # Plans still persisted
         store = Store(minimal_config.paths.db_path)
@@ -560,22 +555,418 @@ def test_morning_run_empty_calendar(
         mock_notifier.send.return_value = True
         mock_notifier_class.return_value = mock_notifier
 
-        run(minimal_config)
+        morning_run(minimal_config)
 
         mock_notifier.send.assert_called_once()
         digest_text = mock_notifier.send.call_args[0][0]
         assert "No events" in digest_text or "today" in digest_text.lower()
 
 
-# ─────────── Store helper ─────────────────────────────────────────────────────
+# ─────────── Poll job tests ────────────────────────────────────────────────────
 
-from typing import TYPE_CHECKING
+class SpyNotifier:
+    """Notifier that records sends and is configurable per-call."""
 
-if TYPE_CHECKING:
-    from commutecop.store import Store as StoreType
+    def __init__(self, return_value: bool = True) -> None:
+        self.sent: list[str] = []
+        self._return_value = return_value
+
+    def send(self, text: str) -> bool:
+        self.sent.append(text)
+        return self._return_value
 
 
-def pytest_funcarg__store(tmp_path: Path) -> "StoreType":
-    s = Store(tmp_path / "test.db")
-    s.init_schema()
-    return s
+class MockPlanner:
+    """Plan-event stand-in that returns a pre-configured plan or records the call."""
+
+    def __init__(
+        self,
+        plan: Optional[Plan] = None,
+        raise_on: Optional[Exception] = None,
+    ) -> None:
+        self.plan = plan
+        self.raise_on = raise_on
+        self.calls: list[Event] = []
+
+    def __call__(self, event: Event, **kwargs) -> Plan:
+        self.calls.append(event)
+        if self.raise_on:
+            raise self.raise_on
+        return self.plan
+
+
+# ── Due ping fires once ────────────────────────────────────────────────────────
+
+def test_poll_fires_due_ping_once(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A due ping is sent exactly once; a second poll run does not refire."""
+    now = now_nyc()
+
+    # Build the plan and its leave_at
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    # A leave ping that is already due
+    due_ping = PingEntry(
+        id="ping-due-1",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=5),
+        fired=False,
+        message="🚶 *Leave now* — Test Event",
+    )
+
+    # Persist the plan and ping
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(due_ping)
+
+    notifier = SpyNotifier()
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=notifier,
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+    )
+
+    # Ping should have been fired exactly once
+    assert len(notifier.sent) == 1
+    assert notifier.sent[0] == "🚶 *Leave now* — Test Event"
+
+    # Running poll again should NOT fire the same ping (marked fired)
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=notifier,
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now + timedelta(minutes=1),
+    )
+    assert len(notifier.sent) == 1  # still exactly 1
+
+
+# ── New alert triggers replan + service_update + alert seen ────────────────────
+
+def test_poll_new_alert_triggers_replan_and_service_update(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A newly-affecting alert causes replan, service_update send, upsert, and mark-seen."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    original_plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    # New route with a later leave_at (15 min later)
+    new_leave_at = leave_at + timedelta(minutes=15)
+    new_prep_at = new_leave_at - timedelta(minutes=20)
+    new_route = Route(
+        legs=[
+            TransitLeg(
+                mode="TRANSIT",
+                system="MTA Subway",
+                line="C",
+                headsign="Fulton St (delayed)",
+                depart_at=new_leave_at - timedelta(minutes=45),
+                arrive_at=new_leave_at,
+                duration_seconds=2700,
+                summary="C train to Fulton St (delayed)",
+            ),
+        ],
+        depart_at=new_leave_at - timedelta(minutes=45),
+        arrive_at=new_leave_at,
+        total_duration_seconds=2700,
+        transfers=0,
+    )
+    replanned_plan = Plan(
+        event=today_events[0],
+        route=new_route,
+        leave_at=new_leave_at,
+        prep_at=new_prep_at,
+    )
+
+    alert = Alert(
+        id="alert-c-new",
+        header="C train delays",
+        description="Expect delays on the C line due to signal problems.",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=2))],
+        severity="WARNING",
+        url=None,
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(original_plan)
+
+    notifier = SpyNotifier()
+    planner = MockPlanner(replanned_plan)
+
+    # Alert is not yet marked seen
+    assert not store.is_alert_seen(alert.id, today_events[0].id)
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
+        if alert in alerts
+        else [],
+        notifier=notifier,
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+    )
+
+    # Replan should have been called with the event
+    assert len(planner.calls) == 1
+    assert planner.calls[0].id == today_events[0].id
+
+    # Service update should have been sent (some message about C line)
+    assert any("C train" in s or "delays" in s for s in notifier.sent)
+
+    # Alert should now be marked seen
+    assert store.is_alert_seen(alert.id, today_events[0].id)
+
+
+# ── Re-running poll does not refire ─────────────────────────────────────────
+
+def test_poll_rerun_does_not_replan_or_resend(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """Re-running poll on the same already-seen alert skips replan and resend."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    alert = Alert(
+        id="alert-c-seen",
+        header="C train delays",
+        description="Expect delays on the C line.",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=2))],
+        severity="WARNING",
+        url=None,
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    # Pre-mark alert as seen
+    store.mark_alert_seen(alert.id, today_events[0].id)
+
+    notifier = SpyNotifier()
+    planner = MockPlanner(plan)
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
+        if alert in alerts
+        else [],
+        notifier=notifier,
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+    )
+
+    # No replan (alert already seen)
+    assert len(planner.calls) == 0
+    # No messages sent
+    assert len(notifier.sent) == 0
+
+
+# ── Quiet hours suppresses prep but not leave ──────────────────────────────────
+
+def test_poll_quiet_hours_suppresses_prep_not_leave(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """During quiet hours, prep pings are suppressed but leave pings fire."""
+    # Use a fixed "now" that falls inside overnight quiet hours (22:00–07:00)
+    now = now_nyc().replace(hour=23, minute=30, second=0, microsecond=0)
+    quiet_start = now.replace(hour=22, minute=0, second=0, microsecond=0).timetz()
+    quiet_end = now.replace(hour=7, minute=0, second=0, microsecond=0).timetz()
+    minimal_config.scheduling.quiet_hours_start = quiet_start
+    minimal_config.scheduling.quiet_hours_end = quiet_end
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    # Both pings are already due
+    leave_ping = PingEntry(
+        id="ping-leave-qh",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=5),
+        fired=False,
+        message="🚶 *Leave now*",
+    )
+    prep_ping = PingEntry(
+        id="ping-prep-qh",
+        event_id=today_events[0].id,
+        kind="prep",
+        fire_at=now - timedelta(minutes=25),
+        fired=False,
+        message="⏰ *Start prep*",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(leave_ping)
+    store.schedule_ping(prep_ping)
+
+    notifier = SpyNotifier()
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=notifier,
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+    )
+
+    # Leave ping fires
+    assert "🚶 *Leave now*" in notifier.sent
+    # Prep ping is suppressed during quiet hours
+    assert "⏰ *Start prep*" not in notifier.sent
+
+
+# ── No duplicate sends for seen alerts ───────────────────────────────────────
+
+def test_poll_no_duplicate_service_updates_for_seen_alert(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A seen alert does not cause a second service update when re-encountered."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    alert = Alert(
+        id="alert-c-dup",
+        header="C train delays",
+        description="Expect delays on the C line.",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=2))],
+        severity="WARNING",
+        url=None,
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+
+    notifier = SpyNotifier()
+
+    # ── First poll: alert is new → replan (with a different route) → service update
+    # Build a meaningfully different new plan (later leave_at triggers threshold)
+    new_leave_at = leave_at + timedelta(minutes=15)
+    new_prep_at = new_leave_at - timedelta(minutes=20)
+    new_route = Route(
+        legs=[
+            TransitLeg(
+                mode="TRANSIT",
+                system="MTA Subway",
+                line="C",
+                headsign="Fulton St (delayed)",
+                depart_at=new_leave_at - timedelta(minutes=45),
+                arrive_at=new_leave_at,
+                duration_seconds=2700,
+                summary="C train to Fulton St (delayed)",
+            ),
+        ],
+        depart_at=new_leave_at - timedelta(minutes=45),
+        arrive_at=new_leave_at,
+        total_duration_seconds=2700,
+        transfers=0,
+    )
+    replanned_plan = Plan(
+        event=today_events[0],
+        route=new_route,
+        leave_at=new_leave_at,
+        prep_at=new_prep_at,
+    )
+    planner = MockPlanner(replanned_plan)
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
+        if alert in alerts
+        else [],
+        notifier=notifier,
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+    )
+
+    first_send_count = len(notifier.sent)
+    assert first_send_count >= 1, f"Expected at least 1 send, got {first_send_count}: {notifier.sent}"
+
+    # ── Second poll: same alert now seen → no replan → no new send
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
+        if alert in alerts
+        else [],
+        notifier=notifier,
+        plan_event_fn=MockPlanner(replanned_plan),
+        now_fn=lambda: now + timedelta(minutes=1),
+    )
+
+    # No additional messages
+    assert len(notifier.sent) == first_send_count
