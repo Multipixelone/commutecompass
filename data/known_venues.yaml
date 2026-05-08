@@ -1,0 +1,21 @@
+# Known venues for commutecop
+# Add entries as you discover them. Aliases are matched exactly (after normalization).
+
+- aliases:
+    - "200 Example St"
+    - "Example School"
+    - "Studio 100"
+    - "404"
+  resolves_to:
+    kind: address
+    value: "200 Example St, New York, NY 10001"
+    lat: 40.7068
+    lon: -74.0087
+
+- aliases:
+    - "Example"
+    - "Example University"
+    - "Example Theater"
+  resolves_to:
+    kind: station
+    value: "Example LIRR Station, NY"

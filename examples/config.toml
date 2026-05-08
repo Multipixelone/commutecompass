@@ -1,0 +1,42 @@
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+safety_buffer_minutes = 5
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+quiet_hours_start = "22:00"
+quiet_hours_end = "07:00"
+
+[paths]
+venues_file = "/etc/commutecop/known_venues.yaml"
+db_path = "/var/lib/commutecop/state.db"
+oauth_token_path = "/var/lib/commutecop/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+model = "deepseek-v4-flash"
+
+[mta]
+subway_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.pb"
+lirr_alerts_url   = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Flirr-alerts"
+bus_alerts_url    = "https://gtfsrt.prod.obanyc.com/alerts"
+
+[[calendars]]
+id = "theatre-calendar@example.com"
+name = "Theatre"
+
+[[calendars]]
+id = "school-calendar@example.com"
+name = "School"
+
+[[calendars]]
+id = "personal-calendar@example.com"
+name = "Example User"
