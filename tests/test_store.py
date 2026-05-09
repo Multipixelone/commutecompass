@@ -340,6 +340,87 @@ def test_cancel_pings(tmp_db_path: Path) -> None:
     assert store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=2)) == []
 
 
+# ── Ping dedup / idempotency ─────────────────────────────────────────────────────
+
+def test_schedule_ping_dedup_same_event_id_kind(tmp_db_path: Path) -> None:
+    """Scheduling the same (event_id, kind) twice results in one row with the later values.
+
+    The runtime pattern is cancel-then-reschedule. After the second schedule call,
+    exactly one pending ping exists for that (event_id, kind) pair, holding the
+    latest fire_at and message — the original row is replaced, not duplicated.
+    """
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    now = datetime.now(timezone.utc)
+    base = now + timedelta(hours=3)
+
+    # First ping
+    ping_a = PingEntry(
+        id="ping-first",
+        event_id="evt-dedup",
+        kind="leave",
+        fire_at=base,
+        fired=False,
+        message="Leave now (original)",
+    )
+    store.schedule_ping(ping_a)
+
+    # Runtime dedup pattern: cancel then reschedule with updated values
+    store.cancel_pings("evt-dedup")
+    updated = base + timedelta(minutes=15)
+    ping_b = PingEntry(
+        id="ping-second",
+        event_id="evt-dedup",
+        kind="leave",
+        fire_at=updated,
+        fired=False,
+        message="Leave now (updated)",
+    )
+    store.schedule_ping(ping_b)
+
+    pending = store.pending_pings(now + timedelta(hours=5))
+    assert len(pending) == 1, "Expected exactly one pending ping after dedup"
+    assert pending[0].id == "ping-second"
+    assert pending[0].message == "Leave now (updated)"
+    assert pending[0].fire_at == updated
+
+
+def test_schedule_ping_same_event_different_kinds_both_coexist(tmp_db_path: Path) -> None:
+    """Different kinds (prep/leave) for the same event are independent and both remain.
+
+    This guards against accidental cross-kind dedup if the runtime ever tried to
+    key pings solely by event_id without considering kind.
+    """
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    now = datetime.now(timezone.utc)
+    prep_fire = now + timedelta(hours=1)
+    leave_fire = now + timedelta(hours=2)
+
+    store.schedule_ping(PingEntry(
+        id="ping-prep",
+        event_id="evt-xy",
+        kind="prep",
+        fire_at=prep_fire,
+        fired=False,
+        message="Start prep",
+    ))
+    store.schedule_ping(PingEntry(
+        id="ping-leave",
+        event_id="evt-xy",
+        kind="leave",
+        fire_at=leave_fire,
+        fired=False,
+        message="Head out",
+    ))
+
+    pending = store.pending_pings(now + timedelta(hours=3))
+    assert len(pending) == 2
+    assert {p.kind for p in pending} == {"prep", "leave"}
+
+
 def test_pending_pings_filters_fired(tmp_db_path: Path) -> None:
     """pending_pings excludes already-fired pings."""
     store = Store(tmp_db_path)
