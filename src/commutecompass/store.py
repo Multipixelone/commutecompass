@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
 import sqlite3
 
@@ -17,9 +17,12 @@ def _json_dumps(obj: object) -> str:
     return json.dumps(obj, default=_json_serializer)
 
 
-def _json_loads(raw: str) -> dict:
+def _json_loads(raw: str) -> dict[str, Any]:
     """Parse a JSON string."""
-    return json.loads(raw)
+    loaded = json.loads(raw)
+    if isinstance(loaded, dict):
+        return cast(dict[str, Any], loaded)
+    return {}
 
 
 def _json_serializer(obj: object) -> str:

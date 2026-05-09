@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 import httpx
 
@@ -51,7 +51,7 @@ class OpencodeGoClient:
         self.token = token
         self.model = model
 
-    def resolve_location(self, raw: str, hints: dict) -> Optional[ResolvedLocation]:
+    def resolve_location(self, raw: str, hints: dict[str, Any]) -> Optional[ResolvedLocation]:
         """Resolve a raw location string to a ResolvedLocation using the LLM.
 
         Returns None on failure, parse error, timeout, or kind=="unknown".
@@ -68,9 +68,9 @@ class OpencodeGoClient:
         location = self._parse_response(response)
         return location
 
-    def _call(self, raw: str, hints: dict) -> str:
+    def _call(self, raw: str, hints: dict[str, Any]) -> str:
         """Make the chat completion request and return the content string."""
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -78,7 +78,7 @@ class OpencodeGoClient:
             ],
             "temperature": 0.0,
         }
-        headers = {
+        headers: dict[str, str] = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
@@ -86,11 +86,23 @@ class OpencodeGoClient:
             resp = client.post(self.endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
+        if not isinstance(data, dict):
+            return ""
         # OpenAI-compatible chat completion shape
-        return data["choices"][0]["message"]["content"]
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first = choices[0]
+        if not isinstance(first, dict):
+            return ""
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
 
     def _chat_completion(self, system_prompt: str, user_content: str, *, timeout_seconds: float = 8.0) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -98,7 +110,7 @@ class OpencodeGoClient:
             ],
             "temperature": 0.0,
         }
-        headers = {
+        headers: dict[str, str] = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
@@ -106,7 +118,19 @@ class OpencodeGoClient:
             resp = client.post(self.endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first = choices[0]
+        if not isinstance(first, dict):
+            return ""
+        message = first.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
 
     def _parse_response(self, content: str) -> Optional[ResolvedLocation]:
         """Parse JSON from the response content, handling fenced JSON."""

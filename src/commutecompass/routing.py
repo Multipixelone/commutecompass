@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 
@@ -17,7 +17,7 @@ def _unix(dt: datetime) -> int:
     return int(dt.timestamp())
 
 
-def _parse_step(step: dict, nyc_tz: type) -> Optional[TransitLeg]:
+def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     """Parse a single step from a Directions leg into a TransitLeg.
 
     Returns None for unsupported travel modes.
@@ -123,7 +123,7 @@ def _parse_step(step: dict, nyc_tz: type) -> Optional[TransitLeg]:
     )
 
 
-def _parse_route(response: dict) -> Optional[Route]:
+def _parse_route(response: dict[str, Any]) -> Optional[Route]:
     """Parse a Google Directions API response into a Route.
 
     Returns None if no valid routes found.
@@ -268,4 +268,6 @@ def plan_route(
     except httpx.HTTPError:
         return None
 
+    if not isinstance(data, dict):
+        return None
     return _parse_route(data)

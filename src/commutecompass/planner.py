@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
+from commutecompass.config import Config
 from commutecompass.geocode import GeocodeResult
-from commutecompass.models import Config, Event, Plan
+from commutecompass.models import Event, Origin, Plan
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
+
+if TYPE_CHECKING:
+    from commutecompass.store import Store
 
 
 def get_effective_location(
@@ -30,10 +34,10 @@ def plan_event(
     event: Event,
     config: Config,
     venues: VenueRegistry,
-    store: "Store",  # type: ignore[name-defined]  # noqa: F821
+    store: "Store",
     llm: OpencodeGoClient,
     *,
-    mode_override: Optional[str] = None,
+    mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None,
 ) -> Plan:
     """Compute optimal departure time for an event.
 
@@ -50,12 +54,14 @@ def plan_event(
     from commutecompass.geocode import geocode
 
     # Determine travel mode
-    mode: str = mode_override or event.mode_override or "transit"
+    mode: Literal["transit", "driving", "walking", "bicycling"] = (
+        mode_override or event.mode_override or "transit"
+    )
 
     # Step 1: resolve location (override applied first)
     raw_location = get_effective_location(event, config)
 
-    def geocoder(addr: str) -> Optional[GeocodeResult]:  # type: ignore[name-defined]
+    def geocoder(addr: str) -> Optional[GeocodeResult]:
         return geocode(addr, config.google_maps_api_key)
 
     resolved = resolve(
@@ -69,11 +75,19 @@ def plan_event(
         return Plan(event=event, error="location_unresolved")
 
     # Step 2: plan route
+    route_origin = Origin(
+        address=config.origin.address,
+        lat=config.origin.lat,
+        lon=config.origin.lon,
+        subway_station=config.origin.subway_station,
+        lirr_station=config.origin.lirr_station,
+    )
+
     route = plan_route(
-        origin=config.origin,
+        origin=route_origin,
         destination=resolved,
         arrival_time=event.start,
-        mode=mode,  # type: ignore[arg-type]
+        mode=mode,
         api_key=config.google_maps_api_key,
     )
     if route is None:

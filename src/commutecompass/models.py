@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -115,7 +115,7 @@ class Route(BaseModel):
     total_duration_seconds: int
     transfers: int = 0
     fare_estimate_cents: Optional[int] = None
-    raw_provider_payload: Optional[dict] = None
+    raw_provider_payload: Optional[dict[str, Any]] = None
 
 
 class Plan(BaseModel):

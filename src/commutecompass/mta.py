@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
-from google.transit.gtfs_realtime_pb2 import (
+from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
     FeedMessage,
     Alert as GtfsAlert,
 )
@@ -131,7 +131,7 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str) -> Optional[Alert]:
             affected_routes.add(entity.route_id)
 
     # Parse active periods
-    active_periods: list[tuple[datetime, datetime]] = []
+    active_periods: list[tuple[datetime, datetime | None]] = []
     for period in gtfs_alert.active_period:
         start = _parse_timestamp(period.start)
         end = _parse_timestamp(period.end) if period.HasField("end") else None
@@ -144,7 +144,7 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str) -> Optional[Alert]:
         active_periods.append((now, None))
 
     # Derive severity from GTFS-RT severity_level field
-    severity = "INFO"
+    severity: Literal["INFO", "WARNING", "SEVERE"] = "INFO"
     if gtfs_alert.HasField("severity_level"):
         sev_val = gtfs_alert.severity_level
         # Enum values: UNKNOWN=0, INFO=1, WARNING=2, SEVERE=3
@@ -189,13 +189,13 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str) -> Optional[Alert]:
     )
 
 
-def _extract_text(text_proto) -> str:
+def _extract_text(text_proto: Any) -> str:
     """Extract string from a TranslatedString proto."""
     if not text_proto.translation:
         return ""
     for trans in text_proto.translation:
         if trans.text:
-            return trans.text
+            return str(trans.text)
     return ""
 
 

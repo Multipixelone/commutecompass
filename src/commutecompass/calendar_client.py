@@ -6,16 +6,16 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 
 from commutecompass.models import CalendarSpec, Event
 
 if TYPE_CHECKING:
-    import googleapiclient.discovery
+    import googleapiclient.discovery  # type: ignore[import-untyped]
 
 
 class AuthError(Exception):
@@ -45,7 +45,10 @@ class CalendarClient:
             )
 
         creds_data = json.loads(self.token_path.read_text())
-        creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
+        creds = cast(
+            Credentials,
+            Credentials.from_authorized_user_info(creds_data, SCOPES),  # type: ignore[no-untyped-call]
+        )
 
         if creds.expired:
             try:
@@ -63,7 +66,7 @@ class CalendarClient:
     def _save_credentials(self, creds: Credentials) -> None:
         """Persist credentials to token file with restricted permissions."""
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
-        creds_data = creds.to_json()
+        creds_data = creds.to_json()  # type: ignore[no-untyped-call]
         self.token_path.write_text(creds_data)
         os.chmod(self.token_path, 0o600)
 

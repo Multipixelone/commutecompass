@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
-from commutecompass.models import Alert, Config, Plan, PingEntry
+from commutecompass.config import Config
+from commutecompass.models import Alert, Plan, PingEntry
 from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
@@ -126,6 +127,8 @@ def run(
 
     for plan in today_plans:
         if plan.route is None:
+            continue
+        if plan.leave_at is None:
             continue
 
         affecting = _select_alerts(

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import click
 
 from commutecompass.config import ConfigError  # noqa: F401
+from commutecompass.models import CalendarSpec
 
 if TYPE_CHECKING:
     from commutecompass.config import Config
@@ -163,7 +164,11 @@ def plan(ctx: click.Context, event_id: str) -> None:
     if existing is None:
         click.echo(f"No plan found for event {event_id}. Trying to fetch from calendar...")
         now = now_nyc()
-        events = cal_client.fetch_events(cfg.calendars, now, now)
+        events = cal_client.fetch_events(
+            [CalendarSpec(id=cal.id, name=cal.name, enabled=cal.enabled) for cal in cfg.calendars],
+            now,
+            now,
+        )
         if not events:
             click.echo(f"Event {event_id} not found in today's calendars.")
             sys.exit(1)

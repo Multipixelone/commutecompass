@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from commutecompass.calendar_client import CalendarClient
+from commutecompass.config import Config
 from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
 from commutecompass.mta import fetch_alerts
 from commutecompass.notify import TelegramNotifier
@@ -32,7 +34,7 @@ if TYPE_CHECKING:
 
 from commutecompass.models import (
     Alert,
-    Config,
+    CalendarSpec,
     Event,
     PingEntry,
     Plan,
@@ -58,7 +60,10 @@ def run(config: Config) -> None:  # noqa: C901
     events: list[Event] = []
     try:
         events = calendar_client.fetch_events(
-            calendars=config.calendars,
+            calendars=[
+                CalendarSpec(id=cal.id, name=cal.name, enabled=cal.enabled)
+                for cal in config.calendars
+            ],
             start=today_start,
             end=today_end,
         )
@@ -73,7 +78,7 @@ def run(config: Config) -> None:  # noqa: C901
     store = Store(config.paths.db_path)
     store.init_schema()
 
-    venue_registry = VenueRegistry.load(config.paths.venues_file)
+    venue_registry = VenueRegistry.load(Path(config.paths.venues_file))
 
     # Lazily create LLM client only if we have events with locations
     from commutecompass.llm import OpencodeGoClient
