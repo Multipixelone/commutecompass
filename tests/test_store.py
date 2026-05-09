@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from commutecompass.store import Store
 from commutecompass.models import (
+    CurrentLocation,
     Event,
     Plan,
     PingEntry,
@@ -604,3 +605,69 @@ def test_full_plan_with_nested_route_round_trip(tmp_db_path: Path) -> None:
     assert retrieved.route.legs[0].line == "Atlantic Branch"
     assert retrieved.route.legs[1].mode == "WALKING"
     assert retrieved.route.total_duration_seconds == 3120
+
+
+# ── current_location tests ────────────────────────────────────────────────────
+
+
+class TestCurrentLocation:
+    def test_get_when_empty_returns_none(self, tmp_db_path: Path) -> None:
+        store = Store(tmp_db_path)
+        store.init_schema()
+        assert store.get_current_location() is None
+
+    def test_upsert_then_get_returns_row(self, tmp_db_path: Path) -> None:
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        captured = now_nyc()
+        loc = CurrentLocation(
+            lat=40.7128,
+            lon=-74.006,
+            zone="not_home",
+            captured_at=captured,
+            source="home_assistant",
+        )
+        store.upsert_current_location(loc)
+
+        got = store.get_current_location()
+        assert got is not None
+        assert got.lat == 40.7128
+        assert got.lon == -74.006
+        assert got.zone == "not_home"
+        assert got.source == "home_assistant"
+
+    def test_upsert_overwrites_singleton(self, tmp_db_path: Path) -> None:
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        store.upsert_current_location(
+            CurrentLocation(lat=1.0, lon=2.0, zone="home", captured_at=now_nyc())
+        )
+        store.upsert_current_location(
+            CurrentLocation(lat=3.0, lon=4.0, zone="not_home", captured_at=now_nyc())
+        )
+
+        got = store.get_current_location()
+        assert got is not None
+        assert got.lat == 3.0
+        assert got.lon == 4.0
+        assert got.zone == "not_home"
+
+    def test_stale_returns_none_when_max_age_exceeded(self, tmp_db_path: Path) -> None:
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        old = now_nyc() - timedelta(hours=2)
+        store.upsert_current_location(
+            CurrentLocation(lat=1.0, lon=2.0, zone="not_home", captured_at=old)
+        )
+
+        assert store.get_current_location(max_age_minutes=30) is None
+        # No TTL → still returns the row
+        fresh = store.get_current_location(max_age_minutes=None)
+        assert fresh is not None
+        assert fresh.lat == 1.0

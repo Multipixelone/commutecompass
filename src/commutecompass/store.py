@@ -9,7 +9,7 @@ from typing import Any, Optional, cast
 
 import sqlite3
 
-from commutecompass.models import Plan, PingEntry, ResolvedLocation
+from commutecompass.models import CurrentLocation, Plan, PingEntry, ResolvedLocation
 
 
 def _json_dumps(obj: object) -> str:
@@ -70,6 +70,14 @@ class Store:
                     event_id TEXT NOT NULL,
                     seen_at TEXT NOT NULL,
                     PRIMARY KEY (alert_id, event_id)
+                );
+                CREATE TABLE IF NOT EXISTS current_location (
+                    id TEXT PRIMARY KEY DEFAULT 'singleton',
+                    lat REAL NOT NULL,
+                    lon REAL NOT NULL,
+                    zone TEXT,
+                    captured_at TEXT NOT NULL,
+                    source TEXT NOT NULL
                 );
             """)
 
@@ -262,3 +270,57 @@ class Store:
                 (alert_id, event_id),
             ).fetchone()
         return row is not None
+
+    # ── Current location (singleton) ────────────────────────────────────────────
+
+    def upsert_current_location(self, loc: CurrentLocation) -> None:
+        """Insert or replace the singleton current_location row."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO current_location (id, lat, lon, zone, captured_at, source)
+                VALUES ('singleton', ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    lat = excluded.lat,
+                    lon = excluded.lon,
+                    zone = excluded.zone,
+                    captured_at = excluded.captured_at,
+                    source = excluded.source
+                """,
+                (
+                    loc.lat,
+                    loc.lon,
+                    loc.zone,
+                    loc.captured_at.isoformat(),
+                    loc.source,
+                ),
+            )
+
+    def get_current_location(
+        self, max_age_minutes: Optional[int] = None
+    ) -> Optional[CurrentLocation]:
+        """Return the singleton current_location if it exists.
+
+        When max_age_minutes is set, return None if the row is older than that.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT lat, lon, zone, captured_at, source "
+                "FROM current_location WHERE id = 'singleton'"
+            ).fetchone()
+        if row is None:
+            return None
+        captured_at = datetime.fromisoformat(row[3])
+        if max_age_minutes is not None:
+            from commutecompass.timeutil import now_nyc
+
+            age = now_nyc() - captured_at
+            if age.total_seconds() > max_age_minutes * 60:
+                return None
+        return CurrentLocation(
+            lat=row[0],
+            lon=row[1],
+            zone=row[2],
+            captured_at=captured_at,
+            source=row[4],
+        )
