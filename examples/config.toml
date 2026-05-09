@@ -29,6 +29,21 @@ subway_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/cams
 lirr_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Flirr-alerts"
 bus_alerts_url = "https://gtfsrt.prod.obanyc.com/alerts"
 
+# ── Home Assistant integration (optional) ─────────────────────────────────────
+# When enabled, each poll-tick pulls the device_tracker entity's latest state
+# from Home Assistant. If that location is fresher than max_age_minutes and the
+# tracker is not in the home_zone, planning uses it as the trip origin instead
+# of [origin] above. Within replan_window_minutes of an event's leave time, the
+# poll job also re-plans against the live location and pushes a Telegram update
+# if the route shifts by ≥ 5 min. Requires HOME_ASSISTANT_TOKEN in the env.
+[home_assistant]
+enabled = false
+base_url = "http://homeassistant.local:8123"
+entity_id = "device_tracker.example_iphone"
+home_zone = "home"
+max_age_minutes = 30
+replan_window_minutes = 30
+
 [[calendars]]
 id = "theatre-calendar@example.com"
 name = "Theatre"

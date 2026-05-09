@@ -91,6 +91,9 @@ in {
         Path to env file (e.g. agenix-decrypted secrets). Must define
         GOOGLE_MAPS_API_KEY, GOOGLE_OAUTH_CLIENT_SECRET, TELEGRAM_BOT_TOKEN,
         TELEGRAM_CHAT_ID, and OPENCODE_GO_TOKEN.
+
+        When [home_assistant].enabled = true in config.toml, must also define
+        HOME_ASSISTANT_TOKEN (long-lived access token from HA).
       '';
     };
 
