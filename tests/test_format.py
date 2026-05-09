@@ -7,6 +7,7 @@ from typing import Literal
 
 
 from commutecompass.format import (
+    _route_summary,
     _summarize_route_mode,
     escape_md,
     format_digest,
@@ -971,7 +972,6 @@ class TestSummarizeRouteMode:
 
     def test_route_summary_uses_new_label(self) -> None:
         """_route_summary uses _summarize_route_mode output."""
-        from commutecompass.format import _route_summary
         depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
         arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
         legs = [
@@ -997,3 +997,62 @@ class TestSummarizeRouteMode:
         # Must contain the new label, not "C train"
         assert "Subway (C)" in summary
         assert "C train" not in summary
+
+    def test_route_summary_omits_zero_transfer_text(self) -> None:
+        """_route_summary does not include transfer text when transfers is 0."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=3),
+                duration_seconds=180, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=3), arrive_at=depart + timedelta(minutes=43),
+                duration_seconds=2400, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=43), arrive_at=arrive,
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2880, transfers=0)
+
+        summary = _route_summary(route)
+        assert summary == "Subway (C) (48 min)"
+
+    def test_route_summary_includes_transfer_text_when_present(self) -> None:
+        """_route_summary includes transfer text when transfers are present."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 45, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=3),
+                duration_seconds=180, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="A", headsign="Inwood",
+                depart_at=depart + timedelta(minutes=3), arrive_at=depart + timedelta(minutes=20),
+                duration_seconds=1020, summary="A train",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=21), arrive_at=depart + timedelta(minutes=42),
+                duration_seconds=1260, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=42), arrive_at=arrive,
+                duration_seconds=180, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2640, transfers=1)
+
+        summary = _route_summary(route)
+        assert summary == "Multiple subways (A, C) (44 min, 1 transfer)"

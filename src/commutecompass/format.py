@@ -267,16 +267,16 @@ def _route_summary(route: Route) -> str:
     total_min = route.total_duration_seconds // 60
     mode_label = _summarize_route_mode(route)
 
-    # Transfer count suffix
+    # Include transfer count only when there are transfers.
     xfers = route.transfers
-    if xfers == 0:
-        transfer_str = "no transfers"
-    elif xfers == 1:
-        transfer_str = "1 transfer"
+    if xfers == 1:
+        transfer_suffix = ", 1 transfer"
+    elif xfers > 1:
+        transfer_suffix = f", {xfers} transfers"
     else:
-        transfer_str = f"{xfers} transfers"
+        transfer_suffix = ""
 
-    return f"{mode_label} ({total_min} min, {transfer_str})"
+    return f"{mode_label} ({total_min} min{transfer_suffix})"
 
 
 def _route_summary_detailed(route: Route) -> str:
