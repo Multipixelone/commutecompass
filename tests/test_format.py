@@ -12,6 +12,7 @@ from commutecompass.format import (
     escape_md,
     format_digest,
     format_leave_ping,
+    format_location_update,
     format_prep_ping,
     format_service_update,
 )
@@ -1056,3 +1057,42 @@ class TestSummarizeRouteMode:
 
         summary = _route_summary(route)
         assert summary == "Multiple subways (A, C) (44 min, 1 transfer)"
+
+
+# ── format_location_update ────────────────────────────────────────────────────
+
+
+def test_format_location_update_includes_old_and_new_leave_times() -> None:
+    """When leave_at shifts, both old and new times appear in the message."""
+    start = datetime(2026, 5, 9, 14, 30, tzinfo=timezone.utc)
+    event = Event(
+        id="evt-1",
+        calendar_id="c",
+        calendar_name="Test",
+        title="Doctor appointment",
+        start=start,
+        end=start + timedelta(hours=1),
+        location_raw="200 Example St",
+    )
+    old_plan = Plan(event=event, route=None, leave_at=start - timedelta(minutes=45), prep_at=None)
+    new_plan = Plan(event=event, route=None, leave_at=start - timedelta(minutes=30), prep_at=None)
+
+    msg = format_location_update(old_plan, new_plan)
+    assert "📍 *Location update*" in msg
+    assert "Doctor appointment" in msg
+    # MarkdownV2 escapes parentheses
+    assert "\\(was" in msg
+
+
+def test_format_location_update_with_error_renders_warning() -> None:
+    """An error plan still produces a sane message (errors are escape_md'd)."""
+    start = datetime(2026, 5, 9, 14, 30, tzinfo=timezone.utc)
+    event = Event(
+        id="evt-2", calendar_id="c", calendar_name="Test",
+        title="Class", start=start, end=start + timedelta(hours=1),
+    )
+    old_plan = Plan(event=event)
+    new_plan = Plan(event=event, error="no_route")
+    msg = format_location_update(old_plan, new_plan)
+    assert "no\\_route" in msg
+    assert "📍" in msg

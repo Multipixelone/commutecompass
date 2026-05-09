@@ -368,6 +368,44 @@ def format_leave_ping(plan: Plan) -> str:
     return "\n".join(lines)
 
 
+def format_location_update(old_plan: Plan, new_plan: Plan) -> str:
+    """Format a location-driven replan message.
+
+    Args:
+        old_plan: The plan as it stood before the replan.
+        new_plan: The freshly computed plan from the user's current location.
+
+    Returns:
+        MarkdownV2-safe Telegram message.
+    """
+    title = escape_md(new_plan.event.title)
+    start_str = new_plan.event.start.strftime("%-I:%M %p")
+
+    lines = [
+        "📍 *Location update*",
+        f"{title} at {start_str}",
+    ]
+
+    if new_plan.error:
+        lines.append(f"⚠️ {escape_md(new_plan.error)}")
+        return "\n".join(lines)
+
+    if old_plan.leave_at and new_plan.leave_at:
+        old_str = old_plan.leave_at.strftime("%-I:%M %p")
+        new_str = new_plan.leave_at.strftime("%-I:%M %p")
+        if old_str != new_str:
+            lines.append(f"Leave by {new_str} \\(was {old_str}\\)")
+        else:
+            lines.append(f"Leave by {new_str}")
+    elif new_plan.leave_at:
+        lines.append(f"Leave by {new_plan.leave_at.strftime('%-I:%M %p')}")
+
+    if new_plan.route:
+        lines.append(escape_md(_route_summary(new_plan.route)))
+
+    return "\n".join(lines)
+
+
 def format_service_update(plan: Plan, alert: Alert, new_route: Route) -> str:
     """Format a service change update.
 
