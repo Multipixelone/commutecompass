@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -95,13 +96,13 @@ def make_ping(event_id: str = "evt-001", fire_offset_minutes: int = -10) -> Ping
 
 # ── Schema init tests ──────────────────────────────────────────────────────────
 
-def test_store_init(tmp_db_path) -> None:
+def test_store_init(tmp_db_path: Path) -> None:
     """Store can be instantiated."""
     store = Store(tmp_db_path)
     assert store.db_path == tmp_db_path
 
 
-def test_store_init_schema_creates_tables(tmp_db_path) -> None:
+def test_store_init_schema_creates_tables(tmp_db_path: Path) -> None:
     """init_schema creates all four tables without raising."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -114,7 +115,7 @@ def test_store_init_schema_creates_tables(tmp_db_path) -> None:
             assert result is not None, f"Table {table} not created"
 
 
-def test_store_init_schema_idempotent(tmp_db_path) -> None:
+def test_store_init_schema_idempotent(tmp_db_path: Path) -> None:
     """Calling init_schema twice does not raise."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -123,7 +124,7 @@ def test_store_init_schema_idempotent(tmp_db_path) -> None:
 
 # ── Plan CRUD tests ────────────────────────────────────────────────────────────
 
-def test_upsert_plan_insert(tmp_db_path) -> None:
+def test_upsert_plan_insert(tmp_db_path: Path) -> None:
     """upsert_plan inserts a new plan."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -140,7 +141,7 @@ def test_upsert_plan_insert(tmp_db_path) -> None:
     assert retrieved.prep_at is not None
 
 
-def test_upsert_plan_replace(tmp_db_path) -> None:
+def test_upsert_plan_replace(tmp_db_path: Path) -> None:
     """upsert_plan replaces an existing plan for the same event_id."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -157,14 +158,14 @@ def test_upsert_plan_replace(tmp_db_path) -> None:
     assert retrieved.event.start.isoformat() == event2.start.isoformat()
 
 
-def test_get_plan_missing(tmp_db_path) -> None:
+def test_get_plan_missing(tmp_db_path: Path) -> None:
     """get_plan returns None for non-existent event."""
     store = Store(tmp_db_path)
     store.init_schema()
     assert store.get_plan("nonexistent") is None
 
 
-def test_today_plans_returns_today(tmp_db_path) -> None:
+def test_today_plans_returns_today(tmp_db_path: Path) -> None:
     """today_plans returns plans with event_start today in NYC."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -179,7 +180,7 @@ def test_today_plans_returns_today(tmp_db_path) -> None:
     assert any(p.event.id == "evt-today" for p in plans)
 
 
-def test_today_plans_excludes_tomorrow(tmp_db_path) -> None:
+def test_today_plans_excludes_tomorrow(tmp_db_path: Path) -> None:
     """today_plans excludes events starting tomorrow."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -204,7 +205,7 @@ def test_today_plans_excludes_tomorrow(tmp_db_path) -> None:
     assert not any(p.event.id == "evt-tomorrow" for p in plans)
 
 
-def test_today_plans_before_2am_includes_0130_as_previous_day(tmp_db_path) -> None:
+def test_today_plans_before_2am_includes_0130_as_previous_day(tmp_db_path: Path) -> None:
     """When now is before 2AM NYC, an event at 01:30 NYC belongs to the previous logical day."""
     from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc
 
@@ -235,7 +236,7 @@ def test_today_plans_before_2am_includes_0130_as_previous_day(tmp_db_path) -> No
         assert any(p.event.id == "evt-0130" for p in plans)
 
 
-def test_today_plans_after_2am_includes_0230_as_current_day(tmp_db_path) -> None:
+def test_today_plans_after_2am_includes_0230_as_current_day(tmp_db_path: Path) -> None:
     """When now is after 2AM NYC, an event at 02:30 NYC belongs to the current logical day."""
     from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc
 
@@ -265,7 +266,7 @@ def test_today_plans_after_2am_includes_0230_as_current_day(tmp_db_path) -> None
         assert any(p.event.id == "evt-0230" for p in plans)
 
 
-def test_delete_old_plans(tmp_db_path) -> None:
+def test_delete_old_plans(tmp_db_path: Path) -> None:
     """delete_old_plans removes plans with event_start before the given datetime."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -297,7 +298,7 @@ def test_delete_old_plans(tmp_db_path) -> None:
 
 # ── Ping CRUD tests ────────────────────────────────────────────────────────────
 
-def test_schedule_ping_insert(tmp_db_path) -> None:
+def test_schedule_ping_insert(tmp_db_path: Path) -> None:
     """schedule_ping inserts a ping entry."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -309,7 +310,7 @@ def test_schedule_ping_insert(tmp_db_path) -> None:
     assert any(p.id == "ping-001" for p in pending)
 
 
-def test_cancel_pings(tmp_db_path) -> None:
+def test_cancel_pings(tmp_db_path: Path) -> None:
     """cancel_pings removes all pings for an event."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -338,7 +339,7 @@ def test_cancel_pings(tmp_db_path) -> None:
     assert store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=2)) == []
 
 
-def test_pending_pings_filters_fired(tmp_db_path) -> None:
+def test_pending_pings_filters_fired(tmp_db_path: Path) -> None:
     """pending_pings excludes already-fired pings."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -357,7 +358,7 @@ def test_pending_pings_filters_fired(tmp_db_path) -> None:
     assert not any(p.id == "ping-001" for p in after_mark)
 
 
-def test_mark_fired(tmp_db_path) -> None:
+def test_mark_fired(tmp_db_path: Path) -> None:
     """mark_fired sets fired=1 and fired_at timestamp."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -371,7 +372,7 @@ def test_mark_fired(tmp_db_path) -> None:
     assert not any(p.id == "ping-001" for p in pending)
 
 
-def test_pending_pings_respects_before_bound(tmp_db_path) -> None:
+def test_pending_pings_respects_before_bound(tmp_db_path: Path) -> None:
     """pending_pings only returns pings with fire_at <= before."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -394,7 +395,7 @@ def test_pending_pings_respects_before_bound(tmp_db_path) -> None:
 
 # ── Geocode cache tests ────────────────────────────────────────────────────────
 
-def test_cache_geocode_insert_and_retrieve(tmp_db_path) -> None:
+def test_cache_geocode_insert_and_retrieve(tmp_db_path: Path) -> None:
     """cache_geocode and get_geocode round-trip a ResolvedLocation."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -414,7 +415,7 @@ def test_cache_geocode_insert_and_retrieve(tmp_db_path) -> None:
     assert cached.lat == 40.7128
 
 
-def test_get_geocode_expired(tmp_db_path) -> None:
+def test_get_geocode_expired(tmp_db_path: Path) -> None:
     """get_geocode returns None for stale cache entries."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -432,7 +433,7 @@ def test_get_geocode_expired(tmp_db_path) -> None:
     assert cached is None
 
 
-def test_get_geocode_miss(tmp_db_path) -> None:
+def test_get_geocode_miss(tmp_db_path: Path) -> None:
     """get_geocode returns None for uncached raw strings."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -441,7 +442,7 @@ def test_get_geocode_miss(tmp_db_path) -> None:
 
 # ── Alert ledger tests ─────────────────────────────────────────────────────────
 
-def test_mark_alert_seen_and_is_alert_seen(tmp_db_path) -> None:
+def test_mark_alert_seen_and_is_alert_seen(tmp_db_path: Path) -> None:
     """mark_alert_seen and is_alert_seen round-trip."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -452,7 +453,7 @@ def test_mark_alert_seen_and_is_alert_seen(tmp_db_path) -> None:
     assert store.is_alert_seen("alert-xyz", "evt-001") is False
 
 
-def test_mark_alert_seen_idempotent(tmp_db_path) -> None:
+def test_mark_alert_seen_idempotent(tmp_db_path: Path) -> None:
     """mark_alert_seen is idempotent — calling twice does not raise."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -462,7 +463,7 @@ def test_mark_alert_seen_idempotent(tmp_db_path) -> None:
 
 # ── Round-trip integrity tests ─────────────────────────────────────────────────
 
-def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path) -> None:
+def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path: Path) -> None:
     """Plan JSON round-trips with timezone-aware datetimes preserved."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -488,7 +489,7 @@ def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path) -> None:
     assert "+" in stored_data["event"]["start"] or "Z" in stored_data["event"]["start"]
 
 
-def test_ping_entry_round_trip_with_datetime(tmp_db_path) -> None:
+def test_ping_entry_round_trip_with_datetime(tmp_db_path: Path) -> None:
     """PingEntry round-trips with fired_at preserved as ISO-8601."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -502,6 +503,7 @@ def test_ping_entry_round_trip_with_datetime(tmp_db_path) -> None:
         message="Leave now",
     )
     store.schedule_ping(ping)
+    assert ping.fired_at is not None
     store.mark_fired("ping-rt", ping.fired_at)
 
     pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
@@ -517,7 +519,7 @@ def test_ping_entry_round_trip_with_datetime(tmp_db_path) -> None:
     datetime.fromisoformat(row[0])  # should not raise
 
 
-def test_resolved_location_round_trip(tmp_db_path) -> None:
+def test_resolved_location_round_trip(tmp_db_path: Path) -> None:
     """ResolvedLocation JSON round-trips with all fields including None fields."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -539,7 +541,7 @@ def test_resolved_location_round_trip(tmp_db_path) -> None:
     assert cached.source == "llm"
 
 
-def test_full_plan_with_nested_route_round_trip(tmp_db_path) -> None:
+def test_full_plan_with_nested_route_round_trip(tmp_db_path: Path) -> None:
     """A Plan with a Route containing multiple TransitLegs round-trips fully."""
     store = Store(tmp_db_path)
     store.init_schema()
@@ -597,6 +599,7 @@ def test_full_plan_with_nested_route_round_trip(tmp_db_path) -> None:
 
     retrieved = store.get_plan("evt-full")
     assert retrieved is not None
+    assert retrieved.route is not None
     assert len(retrieved.route.legs) == 2
     assert retrieved.route.legs[0].line == "Atlantic Branch"
     assert retrieved.route.legs[1].mode == "WALKING"

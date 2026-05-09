@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,7 +123,7 @@ def test_authorize_interactive_saves_token(
 # fetch_events — cancelled / all-day skip behavior
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_mock_service(items: list[dict]) -> MagicMock:
+def _build_mock_service(items: list[dict[str, Any]]) -> MagicMock:
     """Build a fully-mocked Google Calendar service."""
     service = MagicMock()
 
@@ -339,7 +340,7 @@ def test_fetch_events_handles_pagination(
 
     service = MagicMock()
 
-    def list_side_effect(**kwargs):
+    def list_side_effect(**kwargs: Any) -> Any:
         req = MagicMock()
         if kwargs.get("pageToken") == "token-page-2":
             req.execute.return_value = {"items": page2, "nextPageToken": None}
@@ -409,7 +410,7 @@ def test_refresh_error_raises_auth_error(client_secret_json: str, token_path: Pa
         mock_creds.expired = True
         mock_from_info.return_value = mock_creds
 
-        with patch.object(mock_creds, "refresh", side_effect=GoogleRefreshError("Token expired")):
+        with patch.object(mock_creds, "refresh", side_effect=GoogleRefreshError("Token expired")):  # type: ignore[no-untyped-call]
             with pytest.raises(AuthError, match="Token refresh failed"):
                 client._load_credentials()
 
@@ -441,7 +442,7 @@ def test_fetch_events_queries_multiple_calendars(client_secret_json: str, token_
     service = MagicMock()
 
     # Return different events depending on which calendar was requested
-    def list_side_effect(**kwargs):
+    def list_side_effect(**kwargs: Any) -> Any:
         calendar_id = kwargs.get("calendarId", "")
         req = MagicMock()
         if calendar_id == "theatre-cal":

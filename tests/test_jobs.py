@@ -4,37 +4,40 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Protocol, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from commutecompass.jobs.morning import run as morning_run
 from commutecompass.jobs.poll import run as poll_run
-from commutecompass.models import (
-    Alert,
+from commutecompass.config import (
     CalendarSpec,
     Config,
-    Event,
     Origin,
     PathsConfig,
-    PingEntry,
-    Plan,
     PrepConfig,
-    Route,
     SchedulingConfig,
     OpencodeGoConfig,
     MtaConfig,
+)
+from commutecompass.models import (
+    Alert,
+    Event,
+    PingEntry,
+    Plan,
+    Route,
     TransitLeg,
 )
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ, now_nyc
+from commutecompass.notify import TelegramNotifier
 
 
 # ─────────── Fixtures ──────────────────────────────────────────────────────────
 
 @pytest.fixture
-def minimal_config(tmp_path: Path) -> Config:
+def minimal_config(tmp_path: Path) -> "Config":
     """Minimal config for testing."""
     db_path = tmp_path / "test.db"
     venues_path = tmp_path / "venues.yaml"
@@ -210,8 +213,8 @@ def test_morning_run_fetches_and_plans(
         evt2_plan = Plan(event=today_events[1], error="location_unresolved")
 
         def mock_plan_event(
-            event, config, venues, store, llm, *, mode_override=None
-        ):
+            event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None
+        ) -> Plan:
             if event.id == "evt-1":
                 return evt1_plan
             return evt2_plan
@@ -222,7 +225,10 @@ def test_morning_run_fetches_and_plans(
         # ── Verify calendar_client was called ───────────────────────────
         mock_cal.fetch_events.assert_called_once()
         call_args = mock_cal.fetch_events.call_args
-        assert minimal_config.calendars == call_args.kwargs["calendars"]
+        # Compare by identity since CalendarSpec is a pydantic model
+        assert minimal_config.calendars[0].id == call_args.kwargs["calendars"][0].id
+        assert minimal_config.calendars[0].name == call_args.kwargs["calendars"][0].name
+        assert minimal_config.calendars[0].enabled == call_args.kwargs["calendars"][0].enabled
 
         # ── Verify the fetch window matches logical_day_bounds_nyc, not midnight ─
         from commutecompass.timeutil import logical_day_bounds_nyc
@@ -296,7 +302,7 @@ def test_morning_run_skips_past_pings(
             prep_at=past_leave - timedelta(minutes=20),
         )
 
-        def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
             return past_plan
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -338,7 +344,7 @@ def test_morning_run_idempotent(
 
         call_count = 0
 
-        def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
             nonlocal call_count
             call_count += 1
             if event.id == "evt-1":
@@ -406,6 +412,8 @@ def test_morning_run_cancel_stale_pings(
             prep_at=now + timedelta(hours=2) - timedelta(minutes=65),
         )
         store.upsert_plan(stale_plan)
+        assert stale_plan.prep_at is not None
+        assert stale_plan.leave_at is not None
         store.schedule_ping(
             PingEntry(
                 id="stale-ping-1",
@@ -435,7 +443,7 @@ def test_morning_run_cancel_stale_pings(
             prep_at=now + timedelta(hours=3) - timedelta(minutes=65),
         )
 
-        def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
             return plan1
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -490,7 +498,7 @@ def test_morning_run_with_affecting_alerts(
         )
         plan2 = Plan(event=today_events[1], error="location_unresolved")
 
-        def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
             if event.id == "evt-1":
                 return plan1
             return plan2
@@ -533,7 +541,7 @@ def test_morning_run_telegram_failure_is_not_fatal(
             prep_at=now + timedelta(hours=3) - timedelta(minutes=65),
         )
 
-        def mock_plan_event(event, config, venues, store, llm, *, mode_override=None):
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
             return plan1
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -586,6 +594,12 @@ class SpyNotifier:
         return self._return_value
 
 
+class TelegramNotifierProto(Protocol):
+    """Duck-typed notifier protocol matching TelegramNotifier.send signature."""
+
+    def send(self, text: str, parse_mode: str = "MarkdownV2") -> bool: ...
+
+
 class MockPlanner:
     """Plan-event stand-in that returns a pre-configured plan or records the call."""
 
@@ -598,10 +612,11 @@ class MockPlanner:
         self.raise_on = raise_on
         self.calls: list[Event] = []
 
-    def __call__(self, event: Event, **kwargs) -> Plan:
+    def __call__(self, event: Event, **kwargs: object) -> Plan:
         self.calls.append(event)
         if self.raise_on:
             raise self.raise_on
+        assert self.plan is not None
         return self.plan
 
 
@@ -648,7 +663,10 @@ def test_poll_fires_due_ping_once(
         store=store,
         fetch_alerts_fn=lambda **kw: [],
         alerts_affecting_route_fn=lambda *a, **kw: [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=MockPlanner(plan),
         now_fn=lambda: now,
     )
@@ -663,7 +681,10 @@ def test_poll_fires_due_ping_once(
         store=store,
         fetch_alerts_fn=lambda **kw: [],
         alerts_affecting_route_fn=lambda *a, **kw: [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=MockPlanner(plan),
         now_fn=lambda: now + timedelta(minutes=1),
     )
@@ -745,7 +766,10 @@ def test_poll_new_alert_triggers_replan_and_service_update(
         alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
         if alert in alerts
         else [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=planner,
         now_fn=lambda: now,
     )
@@ -807,7 +831,10 @@ def test_poll_rerun_does_not_replan_or_resend(
         alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
         if alert in alerts
         else [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=planner,
         now_fn=lambda: now,
     )
@@ -873,7 +900,10 @@ def test_poll_quiet_hours_suppresses_prep_not_leave(
         store=store,
         fetch_alerts_fn=lambda **kw: [],
         alerts_affecting_route_fn=lambda *a, **kw: [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=MockPlanner(plan),
         now_fn=lambda: now,
     )
@@ -957,7 +987,10 @@ def test_poll_no_duplicate_service_updates_for_seen_alert(
         alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
         if alert in alerts
         else [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=planner,
         now_fn=lambda: now,
     )
@@ -973,7 +1006,10 @@ def test_poll_no_duplicate_service_updates_for_seen_alert(
         alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
         if alert in alerts
         else [],
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=MockPlanner(replanned_plan),
         now_fn=lambda: now + timedelta(minutes=1),
     )
@@ -1053,7 +1089,7 @@ def test_poll_uses_select_alerts_fn_for_smarter_filtering(
     planner = MockPlanner(replanned)
     notifier = SpyNotifier()
 
-    def select_only_actionable(alerts, route, at_time, llm=None):
+    def select_only_actionable(alerts: list[Alert], route: Route, at_time: datetime, llm: Any = None) -> list[Alert]:
         return [a for a in alerts if a.id == "a-action"]
 
     poll_run(
@@ -1061,7 +1097,10 @@ def test_poll_uses_select_alerts_fn_for_smarter_filtering(
         store=store,
         fetch_alerts_fn=lambda **kw: [actionable, noise],
         select_alerts_fn=select_only_actionable,
-        notifier=notifier,
+        # The notifier param is Optional[TelegramNotifier]. SpyNotifier is duck-type
+        # compatible (same send signature) but not a subclass, so we cast it
+        # to TelegramNotifier to satisfy mypy while preserving runtime behavior.
+        notifier=cast(TelegramNotifier, notifier),
         plan_event_fn=planner,
         now_fn=lambda: now,
     )

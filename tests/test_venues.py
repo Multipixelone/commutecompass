@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
+from commutecompass.models import ResolvedLocation
 from commutecompass.venues import VenueRegistry, VenueEntry
 
 
@@ -95,11 +96,11 @@ def test_venue_entry_model() -> None:
     """VenueEntry constructs correctly with ResolvedLocation."""
     entry = VenueEntry(
         aliases=["Test Place", "Test"],
-        resolves_to={
-            "kind": "address",
-            "value": "123 Main St",
-            "source": "known_venues",
-        },
+        resolves_to=ResolvedLocation(
+            kind="address",
+            value="123 Main St",
+            source="known_venues",
+        ),
     )
     assert entry.aliases == ["Test Place", "Test"]
     assert entry.resolves_to.value == "123 Main St"

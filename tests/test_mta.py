@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from typing import Literal, Protocol, cast
+
+from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.mta import (
     _fetch_feed,
@@ -74,7 +77,7 @@ def alert_with_period(
     affected_systems: set[str],
     period_start: datetime,
     period_end: datetime | None,
-    severity: str = "WARNING",
+    severity: Literal["INFO", "WARNING", "SEVERE"] = "WARNING",
     header: str = "Test alert",
 ) -> Alert:
     """Build an Alert with a single active period."""
@@ -132,7 +135,10 @@ class TestFetchAlerts:
 
     def test_filters_entities_without_alerts(self) -> None:
         """Feed entities without alert payload are ignored."""
-        from google.transit.gtfs_realtime_pb2 import FeedMessage, FeedEntity
+        from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
+            FeedMessage,
+            FeedEntity,
+        )
 
         # Build a feed with one alert entity and one trip-update entity
         feed = FeedMessage()
@@ -622,6 +628,14 @@ class _StubLLM:
         return self.decision
 
 
+class _LLMClientProto(Protocol):
+    """Minimal protocol for the llm parameter accepted by select_actionable_alerts."""
+
+    calls: int
+
+    def classify_alert_relevance(self, alert: Alert, route: Route, *, at_time: datetime) -> bool | None: ...
+
+
 class TestSelectActionableAlerts:
     def test_filters_non_commute_advisory(self) -> None:
         now = make_aware(datetime.now(NYC_TZ))
@@ -674,7 +688,7 @@ class TestSelectActionableAlerts:
         )
         llm = _StubLLM(True)
 
-        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=llm)
+        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=cast(OpencodeGoClient, llm))
         assert [a.id for a in result] == ["ambig-1"]
         assert llm.calls == 1
 
@@ -694,7 +708,7 @@ class TestSelectActionableAlerts:
         )
         llm = _StubLLM(False)
 
-        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=llm)
+        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=cast(OpencodeGoClient, llm))
         assert result == []
         assert llm.calls == 1
 

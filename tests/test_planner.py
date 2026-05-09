@@ -6,20 +6,22 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 import pytest
 
-from commutecompass.models import (
+from commutecompass.config import (
     Config,
-    Event,
+    CalendarSpec,
+    LocationOverride,
+    MtaConfig,
+    OpencodeGoConfig,
     Origin,
+    PathsConfig,
     PrepConfig,
+    SchedulingConfig,
+)
+from commutecompass.models import (
+    Event,
     ResolvedLocation,
     Route,
     TransitLeg,
-    CalendarSpec,
-    SchedulingConfig,
-    PathsConfig,
-    OpencodeGoConfig,
-    MtaConfig,
-    LocationOverride,
 )
 from commutecompass.planner import plan_event, get_effective_location
 from commutecompass.venues import VenueRegistry
@@ -51,7 +53,7 @@ def prep_config() -> PrepConfig:
 
 
 @pytest.fixture
-def config(origin, prep_config) -> Config:
+def config(origin: Origin, prep_config: PrepConfig) -> Config:
     return Config(
         origin=origin,
         calendars=[
@@ -78,7 +80,7 @@ def config(origin, prep_config) -> Config:
 
 
 @pytest.fixture
-def event(nyc_now) -> Event:
+def event(nyc_now: datetime) -> Event:
     return Event(
         id="evt-1",
         calendar_id="test-cal",
@@ -102,7 +104,7 @@ def resolved_location() -> ResolvedLocation:
 
 
 @pytest.fixture
-def mock_route(nyc_now) -> Route:
+def mock_route(nyc_now: datetime) -> Route:
     depart = nyc_now.replace(hour=13, minute=45)
     arrive = nyc_now.replace(hour=14, minute=30)
     return Route(
@@ -262,7 +264,7 @@ def test_plan_event_uses_event_mode_override(
     mock_route: Route,
 ) -> None:
     """Falls back to event.mode_override when no explicit override provided."""
-    event.mode_override = "walking"  # type: ignore[assignment]
+    event.mode_override = "walking"
 
     with patch("commutecompass.resolver.resolve") as mock_resolve, \
          patch("commutecompass.routing.plan_route") as mock_plan_route:
