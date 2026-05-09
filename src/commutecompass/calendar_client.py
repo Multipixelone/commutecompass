@@ -28,9 +28,9 @@ SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 class CalendarClient:
     """Google Calendar API client with OAuth and event fetching."""
 
-    def __init__(self, client_secret_json: str, token_path: Path) -> None:
+    def __init__(self, client_secret_json: str, token_path: Path | str) -> None:
         self.client_secret_json = client_secret_json
-        self.token_path = token_path
+        self.token_path = Path(token_path)
         self._creds: Optional[Credentials] = None
 
     def _load_credentials(self) -> Credentials:

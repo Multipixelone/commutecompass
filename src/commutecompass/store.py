@@ -33,11 +33,12 @@ def _json_serializer(obj: object) -> str:
 class Store:
     """SQLite store for plans, pings, geocode cache, and alert ledger."""
 
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = Path(db_path)
 
     def init_schema(self) -> None:
         """Create all tables if they don't exist."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS plans (

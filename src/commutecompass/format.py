@@ -34,7 +34,8 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
     lines = [f"*Today — {date_str}*\n"]
 
     if not plans:
-        lines.append("No events scheduled for today.")
+        # Keep this MarkdownV2-safe ('.' must be escaped otherwise)
+        lines.append("No events scheduled for today")
     else:
         for plan in plans:
             lines.append(_format_plan_summary(plan))
@@ -149,7 +150,11 @@ def format_prep_ping(plan: Plan) -> str:
     """
     if plan.error:
         title = plan.event.title
-        return f"⏰ *Start getting ready*\n{escape_md(title)}\n⚠️ Could not compute route: {plan.error}"
+        return (
+            f"⏰ *Start getting ready*\n"
+            f"{escape_md(title)}\n"
+            f"⚠️ Could not compute route: {escape_md(plan.error)}"
+        )
 
     leave_str = ""
     if plan.leave_at:
@@ -179,7 +184,7 @@ def format_leave_ping(plan: Plan) -> str:
     """
     if plan.error:
         title = plan.event.title
-        return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {plan.error}"
+        return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {escape_md(plan.error)}"
 
     title = escape_md(plan.event.title)
     start_str = plan.event.start.strftime("%-I:%M %p")
