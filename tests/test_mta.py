@@ -13,6 +13,7 @@ from commutecompass.models import Alert, Route, TransitLeg, Event
 from commutecompass.mta import (
     fetch_alerts,
     alerts_affecting_route,
+    _fetch_feed,
     _parse_alert,
     _time_overlaps,
     _systems_lines_overlap,
@@ -181,6 +182,64 @@ class TestFetchAlerts:
             # Verify all three feeds were requested
             calls = mock_client.get.call_args_list
             assert len(calls) == 3
+
+class TestFetchFeedDiagnostics:
+    """Unit tests for _fetch_feed payload diagnostics."""
+
+    @pytest.fixture
+    def mock_client(self) -> MagicMock:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=None)
+        return mock_client
+
+    def test_rejects_empty_body(self, mock_client: MagicMock) -> None:
+        """Empty response body raises ValueError with diagnostics."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b""
+        mock_response.headers = {"content-type": "application/octet-stream"}
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="Empty response body") as exc_info:
+            _fetch_feed("https://example.com/subway.pb", "MTA Subway", mock_client)
+        assert "status=200" in str(exc_info.value)
+        assert "application/octet-stream" in str(exc_info.value)
+
+    def test_rejects_xml_payload(self, mock_client: MagicMock) -> None:
+        """XML/HTML payload raises ValueError with diagnostics."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b'<?xml version="1.0"?><Error>Not found</Error>'
+        mock_response.headers = {"content-type": "text/xml"}
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="XML/HTML") as exc_info:
+            _fetch_feed("https://example.com/subway.pb", "MTA Subway", mock_client)
+        assert "text/xml" in str(exc_info.value)
+
+    def test_rejects_json_payload(self, mock_client: MagicMock) -> None:
+        """JSON payload raises ValueError with diagnostics."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b'{"error": "bad request"}'
+        mock_response.headers = {"content-type": "application/json"}
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="JSON") as exc_info:
+            _fetch_feed("https://example.com/subway.pb", "MTA Subway", mock_client)
+        assert "application/json" in str(exc_info.value)
+
+    def test_rejects_error_xml_lowercase(self, mock_client: MagicMock) -> None:
+        """XML payload starting with <error> (lowercase) is rejected."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.content = b"<error>Internal error</error>"
+        mock_response.headers = {"content-type": "text/html"}
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(ValueError, match="XML/HTML"):
+            _fetch_feed("https://example.com/subway.pb", "MTA Subway", mock_client)
 
 
 # ─── alerts_affecting_route tests ────────────────────────────────────────────

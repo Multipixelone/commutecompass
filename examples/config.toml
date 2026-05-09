@@ -25,9 +25,9 @@ endpoint = "https://opencode-go.example/v1/chat/completions"
 model = "deepseek-v4-flash"
 
 [mta]
-subway_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.pb"
-lirr_alerts_url   = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Flirr-alerts"
-bus_alerts_url    = "https://gtfsrt.prod.obanyc.com/alerts"
+subway_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts"
+lirr_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Flirr-alerts"
+bus_alerts_url = "https://gtfsrt.prod.obanyc.com/alerts"
 
 [[calendars]]
 id = "theatre-calendar@example.com"
@@ -38,5 +38,5 @@ id = "school-calendar@example.com"
 name = "School"
 
 [[calendars]]
-id = "personal-calendar@example.com"
+id = "noreply@example.com"
 name = "Example User"

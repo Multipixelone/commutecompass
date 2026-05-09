@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical MTA GTFS-RT alert feed URLs (verify against https://api.mta.info)
 MTA_SUBWAY_ALERTS_URL = (
-    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.pb"
+    "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts"
 )
 MTA_LIRR_ALERTS_URL = (
     "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Flirr-alerts"
@@ -80,7 +80,30 @@ def _fetch_feed(url: str, system: str, client: httpx.Client) -> list[Alert]:
     """Fetch and parse a single GTFS-RT feed."""
     response = client.get(url)
     response.raise_for_status()
-    feed = FeedMessage.FromString(response.content)
+
+    # Diagnostic: detect non-protobuf payloads before attempting parse
+    content = response.content
+    if not content:
+        raise ValueError(
+            f"Empty response body from {system} feed ({url}): "
+            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}"
+        )
+
+    preview = content[:200]
+    if content.startswith(b"<?xml") or content.startswith(b"<Error") or content.startswith(b"<error"):
+        raise ValueError(
+            f"MTA feed {system} ({url}) returned XML/HTML instead of protobuf: "
+            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}, "
+            f"preview={preview[:80]!r}"
+        )
+    if content.startswith((b"{", b"[")):
+        raise ValueError(
+            f"MTA feed {system} ({url}) returned JSON instead of protobuf: "
+            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}, "
+            f"preview={preview[:80]!r}"
+        )
+
+    feed = FeedMessage.FromString(content)
 
     alerts: list[Alert] = []
     for entity in feed.entity:
