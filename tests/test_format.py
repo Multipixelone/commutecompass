@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from commutecompass.format import (
+    _summarize_route_mode,
     escape_md,
     format_digest,
     format_leave_ping,
@@ -198,8 +199,8 @@ class TestFormatDigest:
         # Times should be present
         assert "Start prep" in result
         assert "Leave" in result
-        # Route summary should include "C train"
-        assert "C train" in result
+        # Route summary should include the dominant-mode label (parentheses are escaped in MD2)
+        assert r"Subway \(C\)" in result
         # Calendar name wrapped in escaped literal parens so '(' and ')' never appear raw in output
         assert r"\(Theatre\)" in result
         # Should start with today header
@@ -516,7 +517,8 @@ class TestFormatLeavePing:
 
         result = format_leave_ping(plan)
 
-        # Should include the route summary
+        # format_leave_ping uses _route_summary_detailed (actual times), not _route_summary
+        # It should include "C train" from the leg summary
         assert "C train" in result
 
     def test_format_leave_ping_special_chars(self) -> None:
@@ -679,3 +681,227 @@ class TestFormatServiceUpdate:
 
         # Should contain the header content safely escaped
         assert "C/D line" in result
+
+
+# ── Modality labeling tests ───────────────────────────────────────────────────
+
+class TestSummarizeRouteMode:
+    """Tests for dominant mode labeling."""
+
+    def test_walk_only(self) -> None:
+        """All-walking route => Walking."""
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
+                arrive_at=datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc),
+                duration_seconds=900, summary="Walk",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc),
+                arrive_at=datetime(2026, 5, 12, 8, 20, tzinfo=timezone.utc),
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = make_route(legs)
+        assert _summarize_route_mode(route) == "Walking"
+
+    def test_single_subway_majority(self) -> None:
+        """Subway >= 50% with one line => Subway (line)."""
+        # 40 min subway (C), 5 min walk, 5 min walk => 50 min total, 80% subway
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=3),
+                duration_seconds=180, summary="Walk to station",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=3), arrive_at=depart + timedelta(minutes=43),
+                duration_seconds=2400, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=43), arrive_at=arrive,
+                duration_seconds=300, summary="Walk to venue",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2880, transfers=0)
+        assert _summarize_route_mode(route) == "Subway (C)"
+
+    def test_multi_line_subway_majority(self) -> None:
+        """Subway >= 50% with multiple lines => Multiple subways (line, ...)."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 55, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=3),
+                duration_seconds=180, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="A", headsign="Inwood",
+                depart_at=depart + timedelta(minutes=3), arrive_at=depart + timedelta(minutes=18),
+                duration_seconds=900, summary="A train",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=20), arrive_at=depart + timedelta(minutes=43),
+                duration_seconds=1380, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=43), arrive_at=arrive,
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2760, transfers=1)
+        assert _summarize_route_mode(route) == "Multiple subways (A, C)"
+
+    def test_bus_majority(self) -> None:
+        """Bus >= 50% => Bus."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=2),
+                duration_seconds=120, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Bus", line="B43", headsign="Crown Heights",
+                depart_at=depart + timedelta(minutes=2), arrive_at=depart + timedelta(minutes=32),
+                duration_seconds=1800, summary="B43 bus",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=32), arrive_at=arrive,
+                duration_seconds=120, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2040, transfers=0)
+        assert _summarize_route_mode(route) == "Bus (B43)"
+
+    def test_rail_majority(self) -> None:
+        """Rail >= 50% => Rail."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="TRANSIT", system="LIRR", line="Atlantic Branch",
+                headsign="Atlantic Terminal", depart_at=depart + timedelta(minutes=5),
+                arrive_at=depart + timedelta(minutes=35),
+                duration_seconds=1800, summary="LIRR Atlantic",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=5),
+                duration_seconds=300, summary="Walk to station",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=35), arrive_at=arrive,
+                duration_seconds=300, summary="Walk to venue",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2400, transfers=0)
+        assert _summarize_route_mode(route) == "Rail (Atlantic Branch)"
+
+    def test_mixed_transit_no_majority(self) -> None:
+        """Transit exists but no mode >= 50% => Mixed transit."""
+        # 15 min A subway + 20 min bus = 35 min transit; 15 min walk = 30% share each
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=5),
+                duration_seconds=300, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="A", headsign="Inwood",
+                depart_at=depart + timedelta(minutes=5), arrive_at=depart + timedelta(minutes=20),
+                duration_seconds=900, summary="A train",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Bus", line="B43", headsign="Crown Heights",
+                depart_at=depart + timedelta(minutes=20), arrive_at=depart + timedelta(minutes=40),
+                duration_seconds=1200, summary="B43 bus",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=40), arrive_at=arrive,
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2700, transfers=1)
+        assert _summarize_route_mode(route) == "Mixed transit"
+
+    def test_no_legs_returns_walking(self) -> None:
+        """Route with no legs => Walking."""
+        route = Route(legs=[], depart_at=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
+                      arrive_at=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
+                      total_duration_seconds=0, transfers=0)
+        assert _summarize_route_mode(route) == "Walking"
+
+    def test_subway_exactly_50_percent(self) -> None:
+        """Subway exactly 50% => still Subway."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 40, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=5),
+                duration_seconds=300, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=5), arrive_at=depart + timedelta(minutes=35),
+                duration_seconds=1800, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=35), arrive_at=arrive,
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2400, transfers=0)
+        assert _summarize_route_mode(route) == "Subway (C)"
+
+    def test_route_summary_uses_new_label(self) -> None:
+        """_route_summary uses _summarize_route_mode output."""
+        from commutecompass.format import _route_summary
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 50, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart, arrive_at=depart + timedelta(minutes=3),
+                duration_seconds=180, summary="Walk",
+            ),
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart + timedelta(minutes=3), arrive_at=depart + timedelta(minutes=43),
+                duration_seconds=2400, summary="C train",
+            ),
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=depart + timedelta(minutes=43), arrive_at=arrive,
+                duration_seconds=300, summary="Walk",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2880, transfers=0)
+        summary = _route_summary(route)
+        # Must contain the new label, not "C train"
+        assert "Subway (C)" in summary
+        assert "C train" not in summary

@@ -88,31 +88,113 @@ def _format_plan_summary(plan: Plan) -> str:
     return "\n".join(lines)
 
 
+def _summarize_route_mode(route: Route) -> str:
+    """Compute the dominant mode label for a route.
+
+    Aggregates duration by mode and subway line, then applies precedence:
+      - no transit legs         => Walking
+      - subway >= 50% share    => Subway (line) or Multiple subways (line, ...)
+      - bus >= 50% share       => Bus
+      - rail >= 50% share      => Rail
+      - transit exists but no single mode >= 50% => Mixed transit
+    """
+    if not route.legs:
+        return "Walking"
+
+    total = route.total_duration_seconds
+    if total == 0:
+        return "Walking"
+
+    subway_seconds = 0
+    subway_lines: set[str] = set()
+    bus_seconds = 0
+    bus_lines: set[str] = set()
+    rail_seconds = 0
+    rail_lines: set[str] = set()
+    transit_seconds = 0
+
+    for leg in route.legs:
+        dur = leg.duration_seconds
+        if leg.mode == "WALKING":
+            continue
+        if leg.mode != "TRANSIT":
+            # Driving / bicycling treated as its own category
+            transit_seconds += dur
+            continue
+
+        transit_seconds += dur
+        system = leg.system or ""
+        line = leg.line or ""
+
+        if system == "MTA Subway":
+            subway_seconds += dur
+            if line:
+                subway_lines.add(line)
+        elif system == "MTA Bus":
+            bus_seconds += dur
+            if line:
+                bus_lines.add(line)
+        elif system in ("LIRR", "Rail"):
+            rail_seconds += dur
+            if line:
+                rail_lines.add(line)
+        else:
+            # Generic transit — treat as rail for share purposes
+            rail_seconds += dur
+            if line:
+                rail_lines.add(line)
+
+    # No transit at all => Walking
+    if transit_seconds == 0:
+        return "Walking"
+
+    subway_share = subway_seconds / total
+    bus_share = bus_seconds / total
+    rail_share = rail_seconds / total
+
+    if subway_share >= 0.5:
+        if len(subway_lines) == 0:
+            return "Subway"
+        if len(subway_lines) == 1:
+            return f"Subway ({next(iter(subway_lines))})"
+        return f"Multiple subways ({', '.join(sorted(subway_lines))})"
+
+    if bus_share >= 0.5:
+        if len(bus_lines) == 0:
+            return "Bus"
+        if len(bus_lines) == 1:
+            return f"Bus ({next(iter(bus_lines))})"
+        return f"Multiple buses ({', '.join(sorted(bus_lines))})"
+
+    if rail_share >= 0.5:
+        if len(rail_lines) == 0:
+            return "Rail"
+        if len(rail_lines) == 1:
+            return f"Rail ({next(iter(rail_lines))})"
+        return f"Multiple rail lines ({', '.join(sorted(rail_lines))})"
+
+    # Transit exists but no mode dominates
+    return "Mixed transit"
+
+
 def _route_summary(route: Route) -> str:
     """Build a one-line route summary string for digest."""
     if not route.legs:
         return "Route unavailable"
 
     total_min = route.total_duration_seconds // 60
-    parts = []
+    mode_label = _summarize_route_mode(route)
 
-    # First leg: origin mode + line
-    first = route.legs[0]
-    if first.mode == "TRANSIT" and first.system and first.line:
-        line_name = f"{first.line} train" if first.system == "MTA Subway" else first.line
-        parts.append(f"{line_name} from {first.system}")
-    elif first.mode == "WALKING":
-        parts.append("Walking")
-    elif first.mode == "DRIVING":
-        parts.append("Driving")
+    # Transfer count suffix
+    xfers = route.transfers
+    if xfers == 0:
+        transfer_str = "no transfers"
+    elif xfers == 1:
+        transfer_str = "1 transfer"
+    else:
+        transfer_str = f"{xfers} transfers"
 
-    # Last leg: destination
-    last = route.legs[-1]
-    if last.mode == "TRANSIT" and last.headsign:
-        parts.append(f"→ {last.headsign}")
-
-    parts.append(f"({total_min} min, {route.transfers} transfer{'s' if route.transfers != 1 else ''})")
-    return " ".join(parts)
+    return f"{mode_label} ({total_min} min, {transfer_str})"
 
 
 def _route_summary_detailed(route: Route) -> str:
