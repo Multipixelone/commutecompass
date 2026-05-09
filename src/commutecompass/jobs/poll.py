@@ -11,9 +11,10 @@ from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
     from commutecompass.store import Store
-    from commutecompass.mta import alerts_affecting_route, fetch_alerts
+    from commutecompass.mta import alerts_affecting_route, fetch_alerts, select_actionable_alerts
     from commutecompass.notify import TelegramNotifier
     from commutecompass.planner import plan_event
+    from commutecompass.llm import OpencodeGoClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ def run(
     store: Optional[Store] = None,
     fetch_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
     alerts_affecting_route_fn: Optional[Callable[..., list[Alert]]] = None,
+    select_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
     notifier: Optional[TelegramNotifier] = None,
     plan_event_fn: Optional[Callable[..., Plan]] = None,
     now_fn: Optional[Callable[[], "datetime"]] = None,
@@ -58,17 +60,36 @@ def run(
     from commutecompass.store import Store
     from commutecompass.mta import alerts_affecting_route as _affecting
     from commutecompass.mta import fetch_alerts as _fetch
+    from commutecompass.mta import select_actionable_alerts as _select_actionable
     from commutecompass.notify import TelegramNotifier as _Notifier
     from commutecompass.planner import plan_event as _plan_event
+    from commutecompass.llm import OpencodeGoClient
 
     _store: Store = store or Store(config.paths.db_path)
     _fetch_alerts: Callable[..., list[Alert]] = fetch_alerts_fn or _fetch
     _alerts_affecting: Callable[..., list[Alert]] = alerts_affecting_route_fn or _affecting
+    _select_alerts: Callable[..., list[Alert]]
+    if select_alerts_fn is not None:
+        _select_alerts = select_alerts_fn
+    elif alerts_affecting_route_fn is not None:
+        # Backward-compatible test injection path.
+        _select_alerts = lambda alerts, route, at_time, llm=None: _alerts_affecting(  # noqa: E731
+            alerts, route, at_time
+        )
+    else:
+        _select_alerts = _select_actionable
     _notifier: TelegramNotifier = notifier or _Notifier(
         config.telegram_bot_token, config.telegram_chat_id
     )
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
     _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
+    llm_client: OpencodeGoClient | None = None
+    if select_alerts_fn is None and alerts_affecting_route_fn is None:
+        llm_client = OpencodeGoClient(
+            endpoint=config.opencode_go.endpoint,
+            token=config.opencode_go_token,
+            model=config.opencode_go.model,
+        )
 
     # ── Phase 1: quiet-hours check ─────────────────────────────────────────────
     now = _now_fn()
@@ -109,7 +130,12 @@ def run(
         if plan.route is None:
             continue
 
-        affecting = _alerts_affecting(alerts, plan.route, at_time=plan.leave_at)
+        affecting = _select_alerts(
+            alerts,
+            plan.route,
+            at_time=plan.leave_at,
+            llm=llm_client,
+        )
 
         for alert in affecting:
             if _store.is_alert_seen(alert.id, plan.event.id):

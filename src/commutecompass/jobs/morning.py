@@ -28,7 +28,7 @@ from commutecompass.models import (
     Plan,
     Route,
 )
-from commutecompass.mta import alerts_affecting_route, fetch_alerts
+from commutecompass.mta import fetch_alerts
 from commutecompass.notify import TelegramNotifier
 from commutecompass.planner import plan_event
 from commutecompass.store import Store
@@ -153,13 +153,23 @@ def run(config: Config) -> None:  # noqa: C901
         logger.warning("Failed to fetch MTA alerts: %s", exc)
 
     # Filter to those affecting today's planned routes
+    from commutecompass.llm import OpencodeGoClient
+    from commutecompass.mta import select_actionable_alerts
+
+    llm_client = OpencodeGoClient(
+        endpoint=config.opencode_go.endpoint,
+        token=config.opencode_go_token,
+        model=config.opencode_go.model,
+    )
+
     affecting_alerts: list[Alert] = []
     for plan in plans:
         if plan.route and plan.leave_at:
-            affected = alerts_affecting_route(
+            affected = select_actionable_alerts(
                 all_alerts,
                 plan.route,
                 at_time=plan.leave_at,
+                llm=llm_client,
             )
             for alert in affected:
                 if alert not in affecting_alerts:

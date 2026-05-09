@@ -190,7 +190,8 @@ def _parse_route(response: dict) -> Optional[Route]:
         else:
             arrive_at = datetime.now(NYC_TZ)
 
-        total_duration = route.get("duration", {}).get("value", 0)
+        # Sum leg durations for total (primary approach for legacy Directions schema)
+        total_duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
         fare = route.get("fare", {})
         fare_cents = None
         if fare:

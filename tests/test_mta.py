@@ -13,6 +13,7 @@ from commutecompass.models import Alert, Route, TransitLeg, Event
 from commutecompass.mta import (
     fetch_alerts,
     alerts_affecting_route,
+    select_actionable_alerts,
     _fetch_feed,
     _parse_alert,
     _time_overlaps,
@@ -609,3 +610,90 @@ class TestSystemsLinesOverlap:
         leg = subway_leg("Atlantic Branch", system="LIRR")
         route = sample_route([leg])
         assert _systems_lines_overlap(alert, route) is True
+
+
+class _StubLLM:
+    def __init__(self, decision: bool | None) -> None:
+        self.decision = decision
+        self.calls = 0
+
+    def classify_alert_relevance(self, alert: Alert, route: Route, *, at_time: datetime) -> bool | None:
+        self.calls += 1
+        return self.decision
+
+
+class TestSelectActionableAlerts:
+    def test_filters_non_commute_advisory(self) -> None:
+        now = make_aware(datetime.now(NYC_TZ))
+        route = sample_route([
+            subway_leg("C", depart_at=now + timedelta(minutes=10), arrive_at=now + timedelta(minutes=40)),
+        ])
+
+        elevator_alert = alert_with_period(
+            "elevator-1",
+            {"C"},
+            {"MTA Subway"},
+            now - timedelta(hours=1),
+            now + timedelta(hours=1),
+            header="Elevator unavailable at 50 St station",
+        )
+
+        result = select_actionable_alerts([elevator_alert], route, at_time=now)
+        assert result == []
+
+    def test_keeps_disruption_alert_without_llm(self) -> None:
+        now = make_aware(datetime.now(NYC_TZ))
+        route = sample_route([
+            subway_leg("C", depart_at=now + timedelta(minutes=20), arrive_at=now + timedelta(minutes=50)),
+        ])
+        disruption = alert_with_period(
+            "delay-1",
+            {"C"},
+            {"MTA Subway"},
+            now - timedelta(hours=1),
+            now + timedelta(hours=2),
+            header="C train delays",
+        )
+
+        result = select_actionable_alerts([disruption], route, at_time=now)
+        assert [a.id for a in result] == ["delay-1"]
+
+    def test_ambiguous_alert_uses_llm_true(self) -> None:
+        now = make_aware(datetime.now(NYC_TZ))
+        route = sample_route([
+            subway_leg("A", depart_at=now + timedelta(minutes=20), arrive_at=now + timedelta(minutes=50)),
+        ])
+        ambiguous = alert_with_period(
+            "ambig-1",
+            {"A"},
+            {"MTA Subway"},
+            now - timedelta(hours=1),
+            now + timedelta(hours=2),
+            header="A train advisory",
+            severity="INFO",
+        )
+        llm = _StubLLM(True)
+
+        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=llm)
+        assert [a.id for a in result] == ["ambig-1"]
+        assert llm.calls == 1
+
+    def test_ambiguous_alert_uses_llm_false(self) -> None:
+        now = make_aware(datetime.now(NYC_TZ))
+        route = sample_route([
+            subway_leg("A", depart_at=now + timedelta(minutes=20), arrive_at=now + timedelta(minutes=50)),
+        ])
+        ambiguous = alert_with_period(
+            "ambig-2",
+            {"A"},
+            {"MTA Subway"},
+            now - timedelta(hours=1),
+            now + timedelta(hours=2),
+            header="A train advisory",
+            severity="INFO",
+        )
+        llm = _StubLLM(False)
+
+        result = select_actionable_alerts([ambiguous], route, at_time=now, llm=llm)
+        assert result == []
+        assert llm.calls == 1

@@ -206,6 +206,127 @@ class TestParseRoute:
         assert route is not None
         assert route.transfers == 1
 
+    def test_total_duration_from_legs_when_route_duration_missing(self) -> None:
+        """total_duration_seconds is computed from leg durations when route-level duration is absent.
+
+        Regression test: legacy Directions responses may not include route.duration,
+        so we fall back to summing each leg's duration.value.
+        """
+        response = {
+            "routes": [
+                {
+                    "legs": [
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "WALKING",
+                                    "duration": {"value": 300},
+                                    "departure_time": {"value": 1746864000},
+                                    "arrival_time": {"value": 1746864300},
+                                },
+                            ],
+                            "duration": {"value": 300},
+                            "departure_time": {"value": 1746864000},
+                            "arrival_time": {"value": 1746864300},
+                        },
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "TRANSIT",
+                                    "duration": {"value": 1200},
+                                    "departure_time": {"value": 1746864300},
+                                    "arrival_time": {"value": 1746865500},
+                                    "transit_details": {
+                                        "line": {
+                                            "name": "C",
+                                            "vehicle": {"type": "SUBWAY"},
+                                            "agencies": [{"name": "MTA NYC Transit"}],
+                                        },
+                                        "departure_stop": {"name": "Stop A"},
+                                        "arrival_stop": {"name": "Stop B"},
+                                    },
+                                },
+                            ],
+                            "duration": {"value": 1200},
+                            "departure_time": {"value": 1746864300},
+                            "arrival_time": {"value": 1746865500},
+                        },
+                    ],
+                    # Note: no "duration" key at route level
+                }
+            ],
+            "status": "OK",
+        }
+        route = _parse_route(response)
+        assert route is not None
+        # Total should be sum of leg durations: 300 + 1200 = 1500
+        assert route.total_duration_seconds == 1500
+
+    def test_total_duration_from_legs_multi_leg_route(self) -> None:
+        """Multi-leg route total_duration_seconds is sum of all leg durations."""
+        response = {
+            "routes": [
+                {
+                    "legs": [
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "WALKING",
+                                    "duration": {"value": 180},
+                                    "departure_time": {"value": 1746864000},
+                                    "arrival_time": {"value": 1746864180},
+                                },
+                            ],
+                            "duration": {"value": 180},
+                            "departure_time": {"value": 1746864000},
+                            "arrival_time": {"value": 1746864180},
+                        },
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "TRANSIT",
+                                    "duration": {"value": 900},
+                                    "departure_time": {"value": 1746864180},
+                                    "arrival_time": {"value": 1746865080},
+                                    "transit_details": {
+                                        "line": {
+                                            "name": "1",
+                                            "vehicle": {"type": "SUBWAY"},
+                                            "agencies": [{"name": "MTA NYC Transit"}],
+                                        },
+                                        "departure_stop": {"name": "A"},
+                                        "arrival_stop": {"name": "B"},
+                                    },
+                                },
+                            ],
+                            "duration": {"value": 900},
+                            "departure_time": {"value": 1746864180},
+                            "arrival_time": {"value": 1746865080},
+                        },
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "WALKING",
+                                    "duration": {"value": 120},
+                                    "departure_time": {"value": 1746865080},
+                                    "arrival_time": {"value": 1746865200},
+                                },
+                            ],
+                            "duration": {"value": 120},
+                            "departure_time": {"value": 1746865080},
+                            "arrival_time": {"value": 1746865200},
+                        },
+                    ],
+                    # No route-level duration
+                }
+            ],
+            "status": "OK",
+        }
+        route = _parse_route(response)
+        assert route is not None
+        # 180 + 900 + 120 = 1200
+        assert route.total_duration_seconds == 1200
+
 
 # ─── Test plan_route ──────────────────────────────────────────────────────────
 

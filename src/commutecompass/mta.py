@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -239,6 +240,127 @@ def alerts_affecting_route(
             affected.append(alert)
 
     return affected
+
+
+_DISRUPTION_PATTERNS = (
+    r"\bdelay(?:ed|s)?\b",
+    r"\bservice\s+change\b",
+    r"\bno\s+service\b",
+    r"\bsuspend(?:ed|sion)?\b",
+    r"\bpart(?:ial)?\s+suspend(?:ed|sion)?\b",
+    r"\bslow(?:\s+zones?)?\b",
+    r"\bplanned\s+work\b",
+    r"\bre-rout(?:e|ed|ing)\b",
+    r"\bskip(?:ping)?\s+stops?\b",
+    r"\bexpress(?:\s+service)?\b",
+    r"\blocal(?:\s+service)?\b",
+    r"\bsignal\s+problem\b",
+    r"\btrack\s+problem\b",
+)
+
+_NON_COMMUTE_PATTERNS = (
+    r"\belevator\b",
+    r"\bescalator\b",
+    r"\baccessibil(?:ity|ities)\b",
+    r"\bstation\s+agent\b",
+    r"\bbooth\b",
+    r"\bparking\b",
+    r"\bticket\s+office\b",
+)
+
+
+def select_actionable_alerts(
+    alerts: list[Alert],
+    route: Route,
+    at_time: datetime,
+    *,
+    llm: Optional["OpencodeGoClient"] = None,  # type: ignore[name-defined]
+) -> list[Alert]:
+    """Return the subset of affecting alerts likely to impact this commute.
+
+    This keeps route/time matching strict (via ``alerts_affecting_route``), then
+    removes common non-commute alerts (e.g., elevator/escalator advisories), and
+    optionally asks the LLM only for ambiguous cases.
+    """
+    affecting = alerts_affecting_route(alerts, route, at_time)
+    selected: list[Alert] = []
+
+    route_lines = {
+        leg.line.lower().strip()
+        for leg in route.legs
+        if leg.mode == "TRANSIT" and leg.line
+    }
+
+    for alert in affecting:
+        if _is_non_commute_alert(alert):
+            logger.debug("Filtered non-commute alert %s", alert.id)
+            continue
+
+        decision = _heuristic_relevance_decision(alert, route_lines)
+        if decision is True:
+            selected.append(alert)
+            continue
+        if decision is False:
+            continue
+
+        if llm is not None:
+            llm_decision = llm.classify_alert_relevance(alert, route, at_time=at_time)
+            if llm_decision is True:
+                selected.append(alert)
+                continue
+            if llm_decision is False:
+                continue
+
+        # Conservative fallback for ambiguous alerts when no LLM decision.
+        if alert.severity in {"WARNING", "SEVERE"}:
+            selected.append(alert)
+
+    return selected
+
+
+def _alert_text(alert: Alert) -> str:
+    return f"{alert.header}\n{alert.description}".lower()
+
+
+def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pat, text) is not None for pat in patterns)
+
+
+def _is_non_commute_alert(alert: Alert) -> bool:
+    text = _alert_text(alert)
+    if not _contains_any(text, _NON_COMMUTE_PATTERNS):
+        return False
+    # If it simultaneously contains disruption language, keep it.
+    return not _contains_any(text, _DISRUPTION_PATTERNS)
+
+
+def _heuristic_relevance_decision(alert: Alert, route_lines: set[str]) -> Optional[bool]:
+    """Return True/False when heuristic is confident, else None.
+
+    - True: explicit disruption wording that references route lines, or severe alert.
+    - False: explicit non-commute advisory.
+    - None: uncertain/ambiguous.
+    """
+    text = _alert_text(alert)
+
+    if _is_non_commute_alert(alert):
+        return False
+
+    severe = alert.severity == "SEVERE"
+    has_disruption_words = _contains_any(text, _DISRUPTION_PATTERNS)
+    route_mentioned = any(line in text for line in route_lines) if route_lines else False
+
+    if severe and has_disruption_words:
+        return True
+
+    if has_disruption_words and route_mentioned:
+        return True
+
+    if has_disruption_words and alert.affected_routes:
+        # Already route-matched upstream; disruption + explicit route IDs is enough.
+        return True
+
+    return None
 
 
 def _alert_affects_route(alert: Alert, route: Route, at_time: datetime) -> bool:

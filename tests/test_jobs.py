@@ -970,3 +970,92 @@ def test_poll_no_duplicate_service_updates_for_seen_alert(
 
     # No additional messages
     assert len(notifier.sent) == first_send_count
+
+
+def test_poll_uses_select_alerts_fn_for_smarter_filtering(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=2)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    original_plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    # Build changed plan so a selected alert causes a service update.
+    new_leave_at = leave_at + timedelta(minutes=20)
+    new_route = Route(
+        legs=[
+            TransitLeg(
+                mode="TRANSIT",
+                system="MTA Subway",
+                line="C",
+                headsign="Delayed",
+                depart_at=new_leave_at - timedelta(minutes=45),
+                arrive_at=new_leave_at,
+                duration_seconds=2700,
+                summary="C delayed",
+            ),
+        ],
+        depart_at=new_leave_at - timedelta(minutes=45),
+        arrive_at=new_leave_at,
+        total_duration_seconds=2700,
+        transfers=0,
+    )
+    replanned = Plan(
+        event=today_events[0],
+        route=new_route,
+        leave_at=new_leave_at,
+        prep_at=new_leave_at - timedelta(minutes=20),
+    )
+
+    actionable = Alert(
+        id="a-action",
+        header="C train delays",
+        description="Serious delays",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=1))],
+        severity="WARNING",
+        url=None,
+    )
+    noise = Alert(
+        id="a-noise",
+        header="Elevator unavailable",
+        description="Use stairs",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=1))],
+        severity="INFO",
+        url=None,
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(original_plan)
+
+    planner = MockPlanner(replanned)
+    notifier = SpyNotifier()
+
+    def select_only_actionable(alerts, route, at_time, llm=None):
+        return [a for a in alerts if a.id == "a-action"]
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [actionable, noise],
+        select_alerts_fn=select_only_actionable,
+        notifier=notifier,
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+    )
+
+    assert len(planner.calls) == 1
+    assert store.is_alert_seen("a-action", today_events[0].id)
+    assert not store.is_alert_seen("a-noise", today_events[0].id)

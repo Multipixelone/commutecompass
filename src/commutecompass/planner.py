@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional
 
+from commutecompass.geocode import GeocodeResult
 from commutecompass.models import Config, Event, Plan
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
@@ -53,11 +54,15 @@ def plan_event(
 
     # Step 1: resolve location (override applied first)
     raw_location = get_effective_location(event, config)
+
+    def geocoder(addr: str) -> Optional[GeocodeResult]:  # type: ignore[name-defined]
+        return geocode(addr, config.google_maps_api_key)
+
     resolved = resolve(
         raw_location,
         venues=venues,
         store=store,
-        geocoder=geocode,
+        geocoder=geocoder,
         llm=llm,
     )
     if resolved is None:

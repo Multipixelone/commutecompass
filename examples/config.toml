@@ -54,8 +54,8 @@ name = "Job"
 # placeholder/LLM resolution. Useful when a calendar always meets at the
 # same location even if the event text says "Location available once RSVP'd".
 #
-# [[location_overrides]]
-# calendar_id = "job-calendar@example.com"
-# location = "200 Example St, New York, NY 10001"
+[[location_overrides]]
+calendar_id = "job-calendar@example.com"
+location = "200 Example St, New York, NY 10001"
 # # title_contains is optional — omit to override ALL events in that calendar.
 # # title_contains = "Office Hours"

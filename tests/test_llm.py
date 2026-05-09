@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
 
 from commutecompass.llm import OpencodeGoClient
+from commutecompass.models import Alert, Route, TransitLeg
+from commutecompass.timeutil import NYC_TZ
 
 
 def _make_response(content: str) -> httpx.Response:
@@ -138,4 +141,74 @@ class TestResolveLocation:
             mock_instance.post.side_effect = httpx.ConnectError("connection refused")
             client = _make_client()
             result = client.resolve_location("any location", {})
+            assert result is None
+
+
+class TestClassifyAlertRelevance:
+    def _sample_route(self) -> Route:
+        now = datetime.now(NYC_TZ)
+        leg = TransitLeg(
+            mode="TRANSIT",
+            system="MTA Subway",
+            line="C",
+            headsign="Downtown",
+            depart_at=now + timedelta(minutes=10),
+            arrive_at=now + timedelta(minutes=40),
+            duration_seconds=1800,
+            summary="C train",
+        )
+        return Route(
+            legs=[leg],
+            depart_at=leg.depart_at,
+            arrive_at=leg.arrive_at,
+            total_duration_seconds=1800,
+            transfers=0,
+        )
+
+    def _sample_alert(self) -> Alert:
+        now = datetime.now(NYC_TZ)
+        return Alert(
+            id="a1",
+            header="C train advisory",
+            description="Check before travel",
+            affected_routes={"C"},
+            affected_systems={"MTA Subway"},
+            active_periods=[(now - timedelta(hours=1), now + timedelta(hours=2))],
+            severity="INFO",
+        )
+
+    def test_returns_true_when_model_says_true(self) -> None:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
+            mock_instance = mock_client_cls.return_value.__enter__.return_value
+            mock_instance.post.return_value = _make_response('{"relevant": true, "reason": "delay likely"}')
+            client = _make_client()
+            result = client.classify_alert_relevance(
+                self._sample_alert(),
+                self._sample_route(),
+                at_time=datetime.now(NYC_TZ),
+            )
+            assert result is True
+
+    def test_returns_false_when_model_says_false(self) -> None:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
+            mock_instance = mock_client_cls.return_value.__enter__.return_value
+            mock_instance.post.return_value = _make_response('{"relevant": false, "reason": "elevator"}')
+            client = _make_client()
+            result = client.classify_alert_relevance(
+                self._sample_alert(),
+                self._sample_route(),
+                at_time=datetime.now(NYC_TZ),
+            )
+            assert result is False
+
+    def test_returns_none_on_invalid_payload(self) -> None:
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls:
+            mock_instance = mock_client_cls.return_value.__enter__.return_value
+            mock_instance.post.return_value = _make_response('{"foo": "bar"}')
+            client = _make_client()
+            result = client.classify_alert_relevance(
+                self._sample_alert(),
+                self._sample_route(),
+                at_time=datetime.now(NYC_TZ),
+            )
             assert result is None
