@@ -1,6 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.commutecompass;
+  stateDirName = lib.removePrefix "/var/lib/" cfg.dataDir;
 in {
   options.services.commutecompass = {
     enable = lib.mkEnableOption "commutecompass NYC commute orchestrator";
@@ -50,15 +51,22 @@ in {
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
+      description = ''
+        State directory. Must live under /var/lib/ so systemd's
+        StateDirectory= can manage ownership and permissions.
+      '';
     };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = lib.hasPrefix "/var/lib/" cfg.dataDir;
+      message = "services.commutecompass.dataDir must be under /var/lib/ (got: ${cfg.dataDir})";
+    }];
+
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;
-      home = cfg.dataDir;
-      createHome = true;
     };
     users.groups.${cfg.group} = {};
 
@@ -74,14 +82,14 @@ in {
         User = cfg.user;
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
-        StateDirectory = "commutecompass";
+        StateDirectory = stateDirName;
         ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
         ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml morning";
         # Hardening: restrict filesystem access; commutecompass reads /etc/commutecompass/*
         # and writes to dataDir (StateDirectory= lands under dataDir)
         NoNewPrivileges = true;
         ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = "read-only";   # /home/commutecompass ro; still allows home creation
+        ProtectHome = true;
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
@@ -105,13 +113,13 @@ in {
         User = cfg.user;
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
-        StateDirectory = "commutecompass";
+        StateDirectory = stateDirName;
         ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
         ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml poll";
         # Hardening: same policy as morning service
         NoNewPrivileges = true;
         ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = "read-only";   # /home/commutecompass ro; still allows home creation
+        ProtectHome = true;
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
