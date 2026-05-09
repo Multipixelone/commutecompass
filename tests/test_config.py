@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -216,3 +215,166 @@ name = "Test Calendar"
         assert cfg.opencode_go.model == "deepseek-v4-flash"
         assert cfg.prep.prep_minutes == 20
         assert cfg.prep.safety_buffer_minutes == 5
+
+
+class TestLocationOverrides:
+    def test_backward_compat_no_overrides_section(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
+        """Config without location_overrides section yields empty list."""
+        _apply_env(required_env)
+        cfg = load_config(minimal_toml)
+        assert cfg.location_overrides == []
+
+    def test_override_with_title_contains(self, tmp_path: Path, required_env: dict[str, str]) -> None:
+        """Override with title_contains populates correctly."""
+        _apply_env(required_env)
+        toml = """
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+
+[paths]
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+
+[mta]
+subway_alerts_url = "https://example.com/subway"
+lirr_alerts_url   = "https://example.com/lirr"
+bus_alerts_url    = "https://example.com/bus"
+
+[[calendars]]
+id = "job-cal"
+name = "Job"
+
+[[location_overrides]]
+calendar_id = "job-cal"
+title_contains = "Office Hours"
+location = "200 Example St, New York, NY 10001"
+"""
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(p)
+
+        assert len(cfg.location_overrides) == 1
+        ov = cfg.location_overrides[0]
+        assert ov.calendar_id == "job-cal"
+        assert ov.title_contains == "Office Hours"
+        assert ov.location == "200 Example St, New York, NY 10001"
+
+    def test_override_without_title_contains(self, tmp_path: Path, required_env: dict[str, str]) -> None:
+        """Override with only calendar_id applies to all events in that calendar."""
+        _apply_env(required_env)
+        toml = """
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+
+[paths]
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+
+[mta]
+subway_alerts_url = "https://example.com/subway"
+lirr_alerts_url   = "https://example.com/lirr"
+bus_alerts_url    = "https://example.com/bus"
+
+[[calendars]]
+id = "job-cal"
+name = "Job"
+
+[[location_overrides]]
+calendar_id = "job-cal"
+location = "200 Example St, New York, NY 10001"
+"""
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(p)
+
+        assert len(cfg.location_overrides) == 1
+        ov = cfg.location_overrides[0]
+        assert ov.calendar_id == "job-cal"
+        assert ov.title_contains is None
+        assert ov.location == "200 Example St, New York, NY 10001"
+
+    def test_multiple_overrides(self, tmp_path: Path, required_env: dict[str, str]) -> None:
+        """Multiple overrides with different calendars are all parsed."""
+        _apply_env(required_env)
+        toml = """
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+
+[paths]
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+
+[mta]
+subway_alerts_url = "https://example.com/subway"
+lirr_alerts_url   = "https://example.com/lirr"
+bus_alerts_url    = "https://example.com/bus"
+
+[[calendars]]
+id = "cal-a"
+name = "Calendar A"
+
+[[calendars]]
+id = "cal-b"
+name = "Calendar B"
+
+[[location_overrides]]
+calendar_id = "cal-a"
+title_contains = "Morning"
+location = "1 Park Ave, New York, NY 10016"
+
+[[location_overrides]]
+calendar_id = "cal-b"
+location = "100 Main St, New York, NY 10001"
+"""
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(p)
+
+        assert len(cfg.location_overrides) == 2
+        assert cfg.location_overrides[0].calendar_id == "cal-a"
+        assert cfg.location_overrides[1].calendar_id == "cal-b"

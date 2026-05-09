@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -53,6 +53,12 @@ class MtaConfig(BaseModel):
     bus_alerts_url: str
 
 
+class LocationOverride(BaseModel):
+    calendar_id: str
+    title_contains: Optional[str] = None
+    location: str
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -61,6 +67,7 @@ class Config(BaseModel):
     paths: PathsConfig
     opencode_go: OpencodeGoConfig
     mta: MtaConfig
+    location_overrides: list[LocationOverride] = []
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
     telegram_bot_token: str = ""

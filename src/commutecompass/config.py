@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 import tomllib
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -56,6 +58,12 @@ class MtaConfig(BaseModel):
     bus_alerts_url: str
 
 
+class LocationOverride(BaseModel):
+    calendar_id: str
+    title_contains: Optional[str] = None
+    location: str
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -64,6 +72,7 @@ class Config(BaseModel):
     paths: PathsConfig
     opencode_go: OpencodeGoConfig
     mta: MtaConfig
+    location_overrides: list[LocationOverride] = []
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""

@@ -10,11 +10,26 @@ from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 
 
+def get_effective_location(
+    event: Event,
+    config: Config,
+) -> str:
+    """Apply location overrides if event matches calendar_id and title_contains."""
+    for ov in config.location_overrides:
+        if ov.calendar_id != event.calendar_id:
+            continue
+        if ov.title_contains is None:
+            return ov.location
+        if ov.title_contains.lower() in event.title.lower():
+            return ov.location
+    return event.location_raw or ""
+
+
 def plan_event(
     event: Event,
     config: Config,
     venues: VenueRegistry,
-    store: "Store",  # type: ignore[name-defined]
+    store: "Store",  # type: ignore[name-defined]  # noqa: F821
     llm: OpencodeGoClient,
     *,
     mode_override: Optional[str] = None,
@@ -36,9 +51,10 @@ def plan_event(
     # Determine travel mode
     mode: str = mode_override or event.mode_override or "transit"
 
-    # Step 1: resolve location
+    # Step 1: resolve location (override applied first)
+    raw_location = get_effective_location(event, config)
     resolved = resolve(
-        event.location_raw,
+        raw_location,
         venues=venues,
         store=store,
         geocoder=geocode,

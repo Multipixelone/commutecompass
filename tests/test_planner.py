@@ -10,7 +10,6 @@ from commutecompass.models import (
     Config,
     Event,
     Origin,
-    Plan,
     PrepConfig,
     ResolvedLocation,
     Route,
@@ -20,8 +19,9 @@ from commutecompass.models import (
     PathsConfig,
     OpencodeGoConfig,
     MtaConfig,
+    LocationOverride,
 )
-from commutecompass.planner import plan_event
+from commutecompass.planner import plan_event, get_effective_location
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.timeutil import NYC_TZ
@@ -269,7 +269,7 @@ def test_plan_event_uses_event_mode_override(
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
-        result = plan_event(
+        plan_event(
             event,
             config,
             MagicMock(spec=VenueRegistry),
@@ -377,3 +377,150 @@ def test_plan_event_default_mode_is_transit(
 
     _, kwargs = mock_plan_route.call_args
     assert kwargs["mode"] == "transit"
+
+
+# ── Location Override tests ─────────────────────────────────────────────────────
+
+def test_get_effective_location_no_overrides(event: Event, config: Config) -> None:
+    """When no overrides exist, returns event.location_raw."""
+    assert config.location_overrides == []
+    result = get_effective_location(event, config)
+    assert result == event.location_raw
+
+
+def test_get_effective_location_calendar_only_match(event: Event, config: Config) -> None:
+    """Override applies when calendar_id matches and no title_contains set."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == "200 Example St, New York, NY 10001"
+
+
+def test_get_effective_location_title_contains_match(event: Event, config: Config) -> None:
+    """Override applies when calendar_id matches AND title contains substring."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            title_contains="Example",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == "200 Example St, New York, NY 10001"
+
+
+def test_get_effective_location_title_contains_case_insensitive(event: Event, config: Config) -> None:
+    """title_contains match is case-insensitive."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            title_contains="example class",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == "200 Example St, New York, NY 10001"
+
+
+def test_get_effective_location_no_override_calendar_mismatch(event: Event, config: Config) -> None:
+    """No override when calendar_id does not match."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="other-cal",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == event.location_raw
+
+
+def test_get_effective_location_no_override_title_mismatch(event: Event, config: Config) -> None:
+    """No override when title_contains is set but title does not contain it."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            title_contains="Yoga",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == event.location_raw
+
+
+def test_get_effective_location_first_matching_override_wins(event: Event, config: Config) -> None:
+    """When multiple overrides match, the first one in the list applies."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            title_contains="Example",
+            location="First Match",
+        ),
+        LocationOverride(
+            calendar_id="test-cal",
+            location="Second Match",
+        ),
+    ]
+    result = get_effective_location(event, config)
+    assert result == "First Match"
+
+
+def test_plan_event_uses_location_override(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+) -> None:
+    """plan_event passes override location to resolver when match is found."""
+    config.location_overrides = [
+        LocationOverride(
+            calendar_id="test-cal",
+            title_contains="Example",
+            location="200 Example St, New York, NY 10001",
+        ),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    mock_resolve.assert_called_once()
+    call_args = mock_resolve.call_args
+    assert call_args[0][0] == "200 Example St, New York, NY 10001"
+
+
+def test_plan_event_no_override_uses_event_location(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+) -> None:
+    """Without a matching override, plan_event uses event.location_raw."""
+    assert config.location_overrides == []
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route:
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    mock_resolve.assert_called_once()
+    call_args = mock_resolve.call_args
+    assert call_args[0][0] == event.location_raw
