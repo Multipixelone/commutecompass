@@ -78,6 +78,25 @@ def run(config: Config) -> None:  # noqa: C901
     store = Store(config.paths.db_path)
     store.init_schema()
 
+    # Refresh current location once so plan_event can pick it up via effective_origin.
+    if config.home_assistant.enabled:
+        from commutecompass.ha_client import fetch_location as _ha_fetch
+
+        try:
+            loc = _ha_fetch(
+                config.home_assistant.base_url,
+                config.home_assistant.entity_id,
+                config.home_assistant_token,
+            )
+        except Exception as exc:
+            logger.warning("HA fetch raised in morning: %s", exc)
+            loc = None
+        if loc is not None:
+            store.upsert_current_location(loc)
+            logger.debug(
+                "morning ha_pull: ok lat=%.5f lon=%.5f zone=%s", loc.lat, loc.lon, loc.zone
+            )
+
     venue_registry = VenueRegistry.load(Path(config.paths.venues_file))
 
     # Lazily create LLM client only if we have events with locations

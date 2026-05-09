@@ -1108,3 +1108,182 @@ def test_poll_uses_select_alerts_fn_for_smarter_filtering(
     assert len(planner.calls) == 1
     assert store.is_alert_seen("a-action", today_events[0].id)
     assert not store.is_alert_seen("a-noise", today_events[0].id)
+
+
+# ── Home Assistant pull + location-driven replan ───────────────────────────────
+
+
+def _ha_enabled(cfg: Config) -> Config:
+    from commutecompass.config import HomeAssistantConfig
+
+    return cfg.model_copy(
+        update={
+            "home_assistant": HomeAssistantConfig(
+                enabled=True,
+                base_url="http://ha",
+                entity_id="device_tracker.iphone",
+                home_zone="home",
+                max_age_minutes=30,
+                replan_window_minutes=30,
+            ),
+            "home_assistant_token": "tok",
+        }
+    )
+
+
+def test_poll_calls_ha_fetch_when_enabled_and_skips_when_disabled(
+    minimal_config: Config,
+) -> None:
+    """ha_fetch_fn is invoked once when enabled; not called when disabled."""
+    from commutecompass.models import CurrentLocation
+
+    now = now_nyc()
+    cfg_on = _ha_enabled(minimal_config)
+    store = Store(cfg_on.paths.db_path)
+    store.init_schema()
+
+    fetch_calls: list[tuple[str, str, str]] = []
+
+    def _fetch(base_url: str, entity_id: str, token: str) -> CurrentLocation:
+        fetch_calls.append((base_url, entity_id, token))
+        return CurrentLocation(
+            lat=40.7128, lon=-74.006, zone="not_home", captured_at=now
+        )
+
+    poll_run(
+        cfg_on,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, SpyNotifier()),
+        plan_event_fn=MockPlanner(plan=Plan(event=Event(
+            id="evt-x", calendar_id="c", calendar_name="C",
+            title="t", start=now, end=now,
+        ))),
+        now_fn=lambda: now,
+        ha_fetch_fn=_fetch,
+    )
+
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0] == ("http://ha", "device_tracker.iphone", "tok")
+    # Latest location persisted
+    cl = store.get_current_location()
+    assert cl is not None and cl.lat == 40.7128
+
+    # When disabled, no fetch should happen
+    fetch_calls.clear()
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, SpyNotifier()),
+        plan_event_fn=MockPlanner(plan=Plan(event=Event(
+            id="evt-x", calendar_id="c", calendar_name="C",
+            title="t", start=now, end=now,
+        ))),
+        now_fn=lambda: now,
+        ha_fetch_fn=_fetch,
+    )
+    assert fetch_calls == []
+
+
+def test_poll_location_replan_sends_update_when_route_shifts(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """Within replan window, a shifted leave_at triggers a location update."""
+    cfg = _ha_enabled(minimal_config)
+    now = now_nyc()
+
+    # leave_at is 10 min from now → inside the 30-min replan window
+    old_leave = now + timedelta(minutes=10)
+    old_prep = old_leave - timedelta(minutes=20)
+    old_plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=old_leave,
+        prep_at=old_prep,
+    )
+
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(old_plan)
+
+    # New plan has leave_at 15 min later → significant shift
+    new_leave = old_leave + timedelta(minutes=15)
+    new_prep = new_leave - timedelta(minutes=20)
+    new_route = Route(
+        legs=[
+            TransitLeg(
+                mode="WALKING", system=None, line=None, headsign=None,
+                depart_at=new_leave, arrive_at=new_leave + timedelta(minutes=10),
+                duration_seconds=600, summary="Walk",
+            ),
+        ],
+        depart_at=new_leave,
+        arrive_at=new_leave + timedelta(minutes=10),
+        total_duration_seconds=600,
+        transfers=0,
+    )
+    new_plan = Plan(event=today_events[0], route=new_route, leave_at=new_leave, prep_at=new_prep)
+
+    notifier = SpyNotifier()
+    planner = MockPlanner(plan=new_plan)
+
+    poll_run(
+        cfg,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    # Update was sent
+    assert any("Location update" in m for m in notifier.sent)
+    # Plan was upserted (new leave_at persisted)
+    saved = store.get_plan(today_events[0].id)
+    assert saved is not None and saved.leave_at == new_leave
+
+
+def test_poll_location_replan_outside_window_is_noop(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """Plans whose leave_at is far in the future are not replanned by phase 5."""
+    cfg = _ha_enabled(minimal_config)
+    now = now_nyc()
+
+    # leave_at 2 hours from now → outside default 30 min window
+    far_leave = now + timedelta(hours=2)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=far_leave,
+        prep_at=far_leave - timedelta(minutes=20),
+    )
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+
+    notifier = SpyNotifier()
+    planner = MockPlanner(plan=plan)
+
+    poll_run(
+        cfg,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    assert planner.calls == []  # no replan attempted
+    assert notifier.sent == []

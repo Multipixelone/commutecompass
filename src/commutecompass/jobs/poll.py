@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.config import Config
-from commutecompass.models import Alert, Plan, PingEntry
+from commutecompass.models import Alert, CurrentLocation, Plan, PingEntry
 from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
@@ -31,6 +31,7 @@ def run(
     notifier: Optional[TelegramNotifier] = None,
     plan_event_fn: Optional[Callable[..., Plan]] = None,
     now_fn: Optional[Callable[[], "datetime"]] = None,
+    ha_fetch_fn: Optional[Callable[..., Optional[CurrentLocation]]] = None,
 ) -> None:
     """Run the poll loop job.
 
@@ -82,6 +83,11 @@ def run(
     )
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
     _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
+    if ha_fetch_fn is None:
+        from commutecompass.ha_client import fetch_location as _ha_fetch
+        _ha_fetch_fn: Callable[..., Optional[CurrentLocation]] = _ha_fetch
+    else:
+        _ha_fetch_fn = ha_fetch_fn
     llm_client: OpencodeGoClient | None = None
     if select_alerts_fn is None and alerts_affecting_route_fn is None:
         llm_client = OpencodeGoClient(
@@ -89,6 +95,23 @@ def run(
             token=config.opencode_go_token,
             model=config.opencode_go.model,
         )
+
+    # ── Phase 0: refresh current location from Home Assistant ──────────────────
+    if config.home_assistant.enabled:
+        try:
+            loc = _ha_fetch_fn(
+                config.home_assistant.base_url,
+                config.home_assistant.entity_id,
+                config.home_assistant_token,
+            )
+        except Exception as exc:
+            logger.warning("HA fetch raised: %s", exc)
+            loc = None
+        if loc is not None:
+            _store.upsert_current_location(loc)
+            logger.debug(
+                "ha_pull: ok lat=%.5f lon=%.5f zone=%s", loc.lat, loc.lon, loc.zone
+            )
 
     # ── Phase 1: quiet-hours check ─────────────────────────────────────────────
     now = _now_fn()
@@ -186,6 +209,41 @@ def run(
                 )
 
             _store.mark_alert_seen(alert.id, plan.event.id)
+
+    # ── Phase 5: location-driven replan close to leave time ──────────────────
+    if config.home_assistant.enabled and not in_quiet_hours:
+        from commutecompass.format import format_location_update
+
+        window_seconds = config.home_assistant.replan_window_minutes * 60
+        for plan in _store.today_plans():
+            if plan.leave_at is None or plan.leave_at <= now:
+                continue
+            if (plan.leave_at - now).total_seconds() > window_seconds:
+                continue
+            try:
+                new_plan = _plan_event_fn(
+                    plan.event,
+                    config=config,
+                    venues=None,
+                    store=_store,
+                    llm=None,
+                )
+            except Exception as exc:
+                logger.warning("Location replan failed for %s: %s", plan.event.id, exc)
+                continue
+
+            if not _route_significantly_different(plan, new_plan):
+                continue
+
+            msg = format_location_update(plan, new_plan)
+            if _notifier.send(msg):
+                logger.info("Sent location update for event %s", plan.event.id)
+            else:
+                logger.warning("Location update send failed for event %s", plan.event.id)
+
+            _store.upsert_plan(new_plan)
+            _store.cancel_pings(plan.event.id)
+            _schedule_pings_for_plan(new_plan, _store, now)
 
 
 def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
