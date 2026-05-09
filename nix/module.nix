@@ -60,6 +60,8 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
+      default = pkgs.callPackage ./package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "The commutecompass package.";
     };
 
@@ -85,19 +87,33 @@ in {
 
     environmentFile = lib.mkOption {
       type = lib.types.path;
-      description = "Path to env file (e.g. agenix-decrypted secrets).";
+      description = ''
+        Path to env file (e.g. agenix-decrypted secrets). Must define
+        GOOGLE_MAPS_API_KEY, GOOGLE_OAUTH_CLIENT_SECRET, TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID, and OPENCODE_GO_TOKEN.
+      '';
     };
 
     morningTime = lib.mkOption {
       type = lib.types.str;
       default = "06:00:00";
-      description = "OnCalendar spec for morning digest.";
+      description = ''
+        OnCalendar spec for the morning digest timer.
+
+        The TOML key scheduling.morning_run_time is ignored when running under
+        systemd; this option is the source of truth.
+      '';
     };
 
     pollInterval = lib.mkOption {
       type = lib.types.str;
       default = "1min";
-      description = "OnUnitActiveSec for polling.";
+      description = ''
+        OnUnitActiveSec for the poll timer.
+
+        The TOML key scheduling.poll_interval_seconds is ignored when running
+        under systemd; this option is the source of truth.
+      '';
     };
 
     pollOnBootSec = lib.mkOption {
