@@ -12,6 +12,7 @@ import pytest
 
 from commutecompass.models import CalendarSpec
 from commutecompass.calendar_client import AuthError, CalendarClient
+from commutecompass.timeutil import NYC_TZ
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -496,3 +497,74 @@ def test_fetch_events_location_raw_optional(
 
     assert len(events) == 1
     assert events[0].location_raw is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timezone conversion tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fetch_events_converts_explicit_offset_to_nyc(
+    client_secret_json: str,
+    token_path: Path,
+) -> None:
+    """An event with an explicit offset in dateTime must be converted to NYC wall time.
+
+    2026-05-09T14:00:00+01:00  →  09:00 America/New_York (EDT, UTC-4)
+    """
+    items = [
+        {
+            "id": "event-offset",
+            "status": "confirmed",
+            "summary": "Offset Event",
+            "start": {"dateTime": "2026-05-09T14:00:00+01:00"},
+            "end": {"dateTime": "2026-05-09T16:00:00+01:00"},
+        },
+    ]
+
+    client = CalendarClient(client_secret_json, token_path)
+
+    with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
+        events = client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            start=make_aware(datetime(2026, 5, 9, 0, 0, 0)),
+            end=make_aware(datetime(2026, 5, 9, 23, 59, 59)),
+        )
+
+    assert len(events) == 1
+    # 14:00+01:00 == 13:00 UTC; in NYC (EDT, UTC-4) that is 09:00
+    assert events[0].start == datetime(2026, 5, 9, 9, 0, tzinfo=NYC_TZ)
+    assert events[0].end == datetime(2026, 5, 9, 11, 0, tzinfo=NYC_TZ)
+
+
+def test_fetch_events_converts_naive_datetime_with_timezone_field_to_nyc(
+    client_secret_json: str,
+    token_path: Path,
+) -> None:
+    """A naive dateTime with a separate timeZone field must be converted to NYC.
+
+    dateTime=14:00, timeZone=Europe/London (BST=UTC+1 in May)
+      → 13:00 UTC → 09:00 America/New_York (EDT, UTC-4)
+    """
+    items = [
+        {
+            "id": "event-tz-field",
+            "status": "confirmed",
+            "summary": "TZ Field Event",
+            "start": {"dateTime": "2026-05-09T14:00:00", "timeZone": "Europe/London"},
+            "end": {"dateTime": "2026-05-09T16:00:00", "timeZone": "Europe/London"},
+        },
+    ]
+
+    client = CalendarClient(client_secret_json, token_path)
+
+    with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
+        events = client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            start=make_aware(datetime(2026, 5, 9, 0, 0, 0)),
+            end=make_aware(datetime(2026, 5, 9, 23, 59, 59)),
+        )
+
+    assert len(events) == 1
+    # 14:00 BST (UTC+1) = 13:00 UTC = 09:00 EDT in NYC
+    assert events[0].start == datetime(2026, 5, 9, 9, 0, tzinfo=NYC_TZ)
+    assert events[0].end == datetime(2026, 5, 9, 11, 0, tzinfo=NYC_TZ)

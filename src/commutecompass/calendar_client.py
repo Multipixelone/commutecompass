@@ -7,12 +7,14 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, cast
+from zoneinfo import ZoneInfo
 
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 
 from commutecompass.models import CalendarSpec, Event
+from commutecompass.timeutil import to_nyc
 
 if TYPE_CHECKING:
     import googleapiclient.discovery  # type: ignore[import-untyped]
@@ -88,6 +90,22 @@ class CalendarClient:
         creds = self._load_credentials()
         return discovery.build("calendar", "v3", credentials=creds)
 
+    @staticmethod
+    def _parse_event_datetime(dt_str: str, tz_name: str | None = None) -> datetime:
+        """Parse Google Calendar datetime and normalize to NYC timezone.
+
+        Google may provide a timezone-aware ISO string (with Z/offset), or a
+        naive datetime paired with a separate ``timeZone`` field.
+        """
+        parsed = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            if tz_name:
+                parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
+            else:
+                # Defensive fallback for malformed payloads with no tz info.
+                parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        return to_nyc(parsed)
+
     def fetch_events(
         self,
         calendars: list[CalendarSpec],
@@ -146,11 +164,11 @@ class CalendarClient:
                         calendar_id=cal.id,
                         calendar_name=cal.name,
                         title=item.get("summary", "(No title)"),
-                        start=datetime.fromisoformat(
-                            start_info["dateTime"].replace("Z", "+00:00")
+                        start=self._parse_event_datetime(
+                            start_info["dateTime"], start_info.get("timeZone")
                         ),
-                        end=datetime.fromisoformat(
-                            end_info["dateTime"].replace("Z", "+00:00")
+                        end=self._parse_event_datetime(
+                            end_info["dateTime"], end_info.get("timeZone")
                         ),
                         location_raw=item.get("location"),
                         location_resolved=None,
