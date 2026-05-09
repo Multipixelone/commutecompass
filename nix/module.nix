@@ -144,8 +144,26 @@ in {
     };
     users.groups.${cfg.group} = {};
 
-    environment.etc."commutecompass/config.toml".source = cfg.configFile;
-    environment.etc."commutecompass/known_venues.yaml".source = cfg.venuesFile;
+    environment.etc."commutecompass/config.toml" = {
+      source = cfg.configFile;
+      user = cfg.user;
+      group = cfg.group;
+      mode = "0640";
+    };
+    environment.etc."commutecompass/known_venues.yaml" = {
+      source = cfg.venuesFile;
+      user = cfg.user;
+      group = cfg.group;
+      mode = "0640";
+    };
+
+    # /etc/commutecompass/ itself; environment.etc only manages the files inside.
+    # The z lines also chown pre-existing dirs from earlier (mis-)deploys.
+    systemd.tmpfiles.rules = [
+      "d /etc/commutecompass 0750 ${cfg.user} ${cfg.group} -"
+      "z /etc/commutecompass 0750 ${cfg.user} ${cfg.group} -"
+      "z ${cfg.dataDir}      0750 ${cfg.user} ${cfg.group} -"
+    ];
 
     systemd.services."commutecompass-morning" = mkService "morning" "commutecompass morning digest";
     systemd.services."commutecompass-poll"    = mkService "poll"    "commutecompass poll tick";
