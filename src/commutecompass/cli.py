@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import click
 
@@ -133,14 +133,20 @@ def poll(ctx: click.Context) -> None:
 
 @cli.command()
 @click.argument("event_id")
+@click.option(
+    "--here",
+    is_flag=True,
+    help="Use the latest stored current location as origin (regardless of staleness).",
+)
 @click.pass_context
-def plan(ctx: click.Context, event_id: str) -> None:
+def plan(ctx: click.Context, event_id: str, here: bool) -> None:
     """Replan a single event (debug)."""
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
     from commutecompass.calendar_client import CalendarClient
     from commutecompass.llm import OpencodeGoClient
+    from commutecompass.models import Origin
     from commutecompass.planner import plan_event
     from commutecompass.store import Store
     from commutecompass.venues import VenueRegistry
@@ -158,6 +164,18 @@ def plan(ctx: click.Context, event_id: str) -> None:
         token=cfg.opencode_go_token,
         model=cfg.opencode_go.model,
     )
+
+    origin_override: Optional[Origin] = None
+    if here:
+        cl = store.get_current_location(max_age_minutes=None)
+        if cl is None:
+            click.echo("No stored current location. Run `poll` first or check Home Assistant.", err=True)
+            sys.exit(1)
+        origin_override = Origin(
+            address=f"{cl.lat:.6f},{cl.lon:.6f}",
+            lat=cl.lat,
+            lon=cl.lon,
+        )
 
     # Fetch the event from the store first (today's planned event)
     existing = store.get_plan(event_id)
@@ -182,6 +200,7 @@ def plan(ctx: click.Context, event_id: str) -> None:
         venues=venues,
         store=store,
         llm=llm,
+        origin_override=origin_override,
     )
 
     store.upsert_plan(new_plan)
@@ -221,6 +240,29 @@ def test_notify(ctx: click.Context) -> None:
     else:
         click.echo("Failed to send test message (see stderr for logs).", err=True)
         sys.exit(1)
+
+
+# ─────────── where ───────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.pass_context
+def where(ctx: click.Context) -> None:
+    """Print the latest stored current location and its age."""
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    from commutecompass.store import Store
+    from commutecompass.timeutil import now_nyc
+
+    store = Store(Path(cfg.paths.db_path))
+    cl = store.get_current_location(max_age_minutes=None)
+    if cl is None:
+        click.echo("No current location stored.")
+        return
+
+    age_seconds = int((now_nyc() - cl.captured_at).total_seconds())
+    click.echo(f"lat={cl.lat:.6f} lon={cl.lon:.6f} zone={cl.zone or '-'} age={age_seconds}s source={cl.source}")
 
 
 # ─────────── bot (stub) ──────────────────────────────────────────────────────
