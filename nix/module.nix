@@ -1,7 +1,59 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.commutecompass;
+
+  configPath = "/etc/commutecompass/config.toml";
+  exe = "${cfg.package}/bin/commutecompass --config ${configPath}";
+
   stateDirName = lib.removePrefix "/var/lib/" cfg.dataDir;
+
+  serviceDefaults = {
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = cfg.user;
+      Group = cfg.group;
+      EnvironmentFile = cfg.environmentFile;
+      StateDirectory = stateDirName;
+      StateDirectoryMode = "0750";
+      # init-db is idempotent (CREATE TABLE IF NOT EXISTS); cheap to run every tick
+      ExecStartPre = "${exe} init-db";
+
+      # Hardening — network-only Python app, no caps, no devices
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      PrivateDevices = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+      ProtectProc = "invisible";
+      ProcSubset = "pid";
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      RestrictNamespaces = true;
+      RestrictRealtime = true;
+      RestrictSUIDSGID = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      SystemCallArchitectures = "native";
+      SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+      CapabilityBoundingSet = [ "" ];
+      AmbientCapabilities = [ "" ];
+      UMask = "0077";
+      ReadWritePaths = [ cfg.dataDir ];
+    };
+  };
+
+  mkService = subcommand: description:
+    lib.recursiveUpdate serviceDefaults {
+      inherit description;
+      serviceConfig.ExecStart = "${exe} ${subcommand}";
+    };
 in {
   options.services.commutecompass = {
     enable = lib.mkEnableOption "commutecompass NYC commute orchestrator";
@@ -48,6 +100,12 @@ in {
       description = "OnUnitActiveSec for polling.";
     };
 
+    pollOnBootSec = lib.mkOption {
+      type = lib.types.str;
+      default = "1min";
+      description = "OnBootSec delay before the first poll fires after boot.";
+    };
+
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
@@ -73,27 +131,8 @@ in {
     environment.etc."commutecompass/config.toml".source = cfg.configFile;
     environment.etc."commutecompass/known_venues.yaml".source = cfg.venuesFile;
 
-    systemd.services."commutecompass-morning" = {
-      description = "commutecompass morning digest";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        User = cfg.user;
-        Group = cfg.group;
-        EnvironmentFile = cfg.environmentFile;
-        StateDirectory = stateDirName;
-        ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
-        ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml morning";
-        # Hardening: restrict filesystem access; commutecompass reads /etc/commutecompass/*
-        # and writes to dataDir (StateDirectory= lands under dataDir)
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = true;
-        PrivateTmp = true;
-        ReadWritePaths = [ cfg.dataDir ];
-      };
-    };
+    systemd.services."commutecompass-morning" = mkService "morning" "commutecompass morning digest";
+    systemd.services."commutecompass-poll"    = mkService "poll"    "commutecompass poll tick";
 
     systemd.timers."commutecompass-morning" = {
       description = "Daily morning digest timer";
@@ -104,32 +143,11 @@ in {
       };
     };
 
-    systemd.services."commutecompass-poll" = {
-      description = "commutecompass poll loop";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        User = cfg.user;
-        Group = cfg.group;
-        EnvironmentFile = cfg.environmentFile;
-        StateDirectory = stateDirName;
-        ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
-        ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml poll";
-        # Hardening: same policy as morning service
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";   # ro /usr/lib, /nix, /bin, /sbin, /etc; rw /var
-        ProtectHome = true;
-        PrivateTmp = true;
-        ReadWritePaths = [ cfg.dataDir ];
-      };
-    };
-
     systemd.timers."commutecompass-poll" = {
       description = "Poll timer";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "1min";
+        OnBootSec = cfg.pollOnBootSec;
         OnUnitActiveSec = cfg.pollInterval;
       };
     };
