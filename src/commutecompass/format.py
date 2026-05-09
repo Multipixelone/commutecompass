@@ -2,7 +2,39 @@
 
 from __future__ import annotations
 
+import re
+
 from commutecompass.models import Alert, Plan, Route
+
+# Tuning knob — raise to require stricter subway share before using subway label
+SUBWAY_MAJORITY_THRESHOLD = 0.5
+
+_SUBWAY_VERBOSE = re.compile(r"^([A-Za-z]{1,3})\s+Train", re.IGNORECASE)
+
+
+def _normalize_line(line: str) -> str:
+    """Extract concise line ID from a potentially verbose Google Directions line name.
+
+    Google Directions sometimes returns verbose names like "C Train (8 Av Local)"
+    or "B Bus (Crosstown)" instead of just the short route ID "C".  This tries to
+    extract the shortest meaningful identifier.
+
+    Strategy:
+      - If the line matches the common pattern "X Train (desc)" or "X Bus (desc)",
+        strip the description and return just the letter/number.
+      - For LIRR/rail branch names, return the line unchanged (they're already short).
+      - Subway lines are always a single letter + digit (e.g. "C", "G", "FS").
+    """
+    line = line.strip()
+    if not line:
+        return line
+
+    # Verbose subway pattern: "C Train (8 Av Local)" → "C"
+    m = _SUBWAY_VERBOSE.match(line)
+    if m:
+        return m.group(1)
+
+    return line
 
 
 def escape_md(s: str) -> str:
@@ -124,7 +156,8 @@ def _summarize_route_mode(route: Route) -> str:
 
         transit_seconds += dur
         system = leg.system or ""
-        line = leg.line or ""
+        raw_line = leg.line or ""
+        line = _normalize_line(raw_line)
 
         if system == "MTA Subway":
             subway_seconds += dur
@@ -152,7 +185,7 @@ def _summarize_route_mode(route: Route) -> str:
     bus_share = bus_seconds / total
     rail_share = rail_seconds / total
 
-    if subway_share >= 0.5:
+    if subway_share >= SUBWAY_MAJORITY_THRESHOLD:
         if len(subway_lines) == 0:
             return "Subway"
         if len(subway_lines) == 1:
@@ -246,7 +279,7 @@ def format_prep_ping(plan: Plan) -> str:
     start_str = plan.event.start.strftime("%-I:%M %p")
 
     lines = [
-        f"⏰ *Start getting ready*",
+        "⏰ *Start getting ready*",
         f"{title} at {start_str}",
     ]
     if leave_str:
@@ -273,7 +306,7 @@ def format_leave_ping(plan: Plan) -> str:
     location = escape_md(plan.event.location_raw or "unknown location")
 
     lines = [
-        f"🚶 *Leave now*",
+        "🚶 *Leave now*",
         f"{title} at {start_str} — {location}",
     ]
 

@@ -227,6 +227,19 @@ def test_morning_run_fetches_and_plans(
         call_args = mock_cal.fetch_events.call_args
         assert minimal_config.calendars == call_args.kwargs["calendars"]
 
+        # ── Verify the fetch window matches logical_day_bounds_nyc, not midnight ─
+        from commutecompass.timeutil import logical_day_bounds_nyc
+
+        expected_start, expected_end = logical_day_bounds_nyc(now)
+        actual_start = call_args.kwargs["start"]
+        actual_end = call_args.kwargs["end"]
+        assert actual_start == expected_start, (
+            f"fetch_events start={actual_start} should be logical day start {expected_start}"
+        )
+        assert actual_end == expected_end, (
+            f"fetch_events end={actual_end} should be logical day end {expected_end}"
+        )
+
         # ── Verify store: both plans upserted ───────────────────────────
         store = Store(minimal_config.paths.db_path)
         saved_plan1 = store.get_plan("evt-1")

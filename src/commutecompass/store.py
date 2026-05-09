@@ -104,13 +104,13 @@ class Store:
         return Plan.model_validate(data)
 
     def today_plans(self) -> list[Plan]:
-        """Return all plans for today (event_start is today in America/New_York)."""
-        from commutecompass.timeutil import NYC_TZ
+        """Return plans for the current logical day in America/New_York.
 
-        today_start = datetime.now(NYC_TZ).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        today_end = today_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+        Logical day boundary is 02:00-01:59 local time.
+        """
+        from commutecompass.timeutil import logical_day_bounds_nyc
+
+        today_start, today_end = logical_day_bounds_nyc()
 
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(

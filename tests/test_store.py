@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -203,6 +204,67 @@ def test_today_plans_excludes_tomorrow(tmp_db_path) -> None:
 
     plans = store.today_plans()
     assert not any(p.event.id == "evt-tomorrow" for p in plans)
+
+
+def test_today_plans_before_2am_includes_0130_as_previous_day(tmp_db_path) -> None:
+    """When now is before 2AM NYC, an event at 01:30 NYC belongs to the previous logical day."""
+    from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc
+
+    # Fixed reference: Saturday 2026-05-09 01:30 NYC — logical day is Fri May 8 02:00
+    ref = datetime(2026, 5, 9, 1, 30, tzinfo=NYC_TZ)
+    with patch("commutecompass.timeutil.now_nyc", return_value=ref):
+        day_start, day_end = logical_day_bounds_nyc(ref)
+        # Verify our assumption: event at 01:30 today is BEFORE day_start → previous day
+        event_at_0130 = Event(
+            id="evt-0130",
+            calendar_id="cal-001",
+            calendar_name="Test",
+            title="Late Night Rehearsal",
+            start=ref,
+            end=ref + timedelta(hours=2),
+        )
+        plan = Plan(event=event_at_0130, route=None, leave_at=None, prep_at=None)
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        store.upsert_plan(plan)
+
+        # today_plans() uses logical_day_bounds_nyc() internally — patch there
+        with patch("commutecompass.timeutil.now_nyc", return_value=ref):
+            plans = store.today_plans()
+
+        # The 01:30 event must appear because it falls in the previous logical day
+        assert any(p.event.id == "evt-0130" for p in plans)
+
+
+def test_today_plans_after_2am_includes_0230_as_current_day(tmp_db_path) -> None:
+    """When now is after 2AM NYC, an event at 02:30 NYC belongs to the current logical day."""
+    from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc
+
+    # Fixed reference: Saturday 2026-05-09 03:00 NYC — logical day is Sat May 9 02:00
+    ref = datetime(2026, 5, 9, 3, 0, tzinfo=NYC_TZ)
+    with patch("commutecompass.timeutil.now_nyc", return_value=ref):
+        day_start, day_end = logical_day_bounds_nyc(ref)
+        # Verify our assumption: event at 02:30 today is AFTER day_start → current day
+        event_at_0230 = Event(
+            id="evt-0230",
+            calendar_id="cal-001",
+            calendar_name="Test",
+            title="Early Morning Call",
+            start=ref.replace(hour=2, minute=30),
+            end=ref.replace(hour=4, minute=30),
+        )
+        plan = Plan(event=event_at_0230, route=None, leave_at=None, prep_at=None)
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        store.upsert_plan(plan)
+
+        with patch("commutecompass.timeutil.now_nyc", return_value=ref):
+            plans = store.today_plans()
+
+        # The 02:30 event must appear because it falls in the current logical day
+        assert any(p.event.id == "evt-0230" for p in plans)
 
 
 def test_delete_old_plans(tmp_db_path) -> None:

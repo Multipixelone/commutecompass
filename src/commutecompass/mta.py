@@ -296,7 +296,7 @@ def select_actionable_alerts(
             logger.debug("Filtered non-commute alert %s", alert.id)
             continue
 
-        decision = _heuristic_relevance_decision(alert, route_lines)
+        decision = _heuristic_relevance_decision(alert, route_lines, route)
         if decision is True:
             selected.append(alert)
             continue
@@ -322,6 +322,89 @@ def _alert_text(alert: Alert) -> str:
     return f"{alert.header}\n{alert.description}".lower()
 
 
+def _normalize_alert_text(text: str) -> str:
+    """Strip common MTA alert noise to focus on substantive content."""
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _build_route_context(route: Route) -> tuple[set[str], set[str]]:
+    """Build keyword sets from route transit legs to assess alert relevance.
+
+    Returns:
+        (stop_names, line_ids) extracted from the route's transit legs.
+    """
+    stop_names: set[str] = set()
+    line_ids: set[str] = set()
+
+    for leg in route.legs:
+        if leg.mode != "TRANSIT":
+            continue
+        if leg.line:
+            line_ids.add(leg.line.lower().strip())
+        if leg.headsign:
+            stop_names.add(leg.headsign.lower().strip())
+        # Extract origin/destination stop names from summary (e.g. "C from A to B")
+        if leg.summary:
+            parts = leg.summary.split(" from ")
+            if len(parts) >= 2:
+                # left side is the line; right side is "A to B"
+                right = parts[1]
+                for stop in right.replace(" to ", " ").replace(" and ", " ").split():
+                    stop = stop.strip(",. ")
+                    if stop and stop not in ("to", "and"):
+                        stop_names.add(stop.lower())
+
+    return stop_names, line_ids
+
+
+_LOCATION_SPECIFIC_PATTERNS = (
+    # Alert header/description mentions specific stations or segments
+    r"\bat\s+[\w\s' -]+station\b",
+    r"\bbetween\s+[\w\s' -]+and\s+[\w\s' -]+\b",
+    r"\bnear\s+[\w\s' -]+station\b",
+    r"\bat\s+[\w\s' -]+\s+stop\b",
+    r"\bfrom\s+[\w\s' -]+to\s+[\w\s' -]+\b",
+)
+
+
+def _is_location_specific_alert(
+    alert: Alert,
+    stop_names: set[str],
+    line_ids: set[str],
+) -> bool:
+    """Return True if an alert's location references appear unrelated to route context.
+
+    Checks whether an alert mentions specific stations or segments (via patterns like
+    "at X station", "between X and Y") that have no overlap with the route's own
+    stop names and headsigns.  This filters alerts for disruptions far from the
+    rider's actual segment.
+    """
+    text = _alert_text(alert)
+
+    # If no location-specific phrasing, leave it in
+    if not _contains_any(text, _LOCATION_SPECIFIC_PATTERNS):
+        return False
+
+    # Check overlap with route context — split multi-word stop names into tokens,
+    # but only count tokens >= 4 chars to avoid false positives from short
+    # abbreviations like "st" that appear in many station names.
+    stop_tokens = set()
+    for stop in stop_names:
+        for token in stop.split():
+            if len(token) >= 4:
+                stop_tokens.add(token)
+    words_in_text = set(re.findall(r"\b[\w]+", text))
+
+    overlap = stop_tokens & words_in_text
+    if overlap:
+        # Alert mentions at least one stop the route actually uses — keep it
+        return False
+
+    # No overlap: location-specific alert unrelated to this route
+    return True
+
+
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pat, text) is not None for pat in patterns)
 
@@ -334,17 +417,31 @@ def _is_non_commute_alert(alert: Alert) -> bool:
     return not _contains_any(text, _DISRUPTION_PATTERNS)
 
 
-def _heuristic_relevance_decision(alert: Alert, route_lines: set[str]) -> Optional[bool]:
+def _heuristic_relevance_decision(
+    alert: Alert,
+    route_lines: set[str],
+    route: Route,
+) -> Optional[bool]:
     """Return True/False when heuristic is confident, else None.
 
     - True: explicit disruption wording that references route lines, or severe alert.
-    - False: explicit non-commute advisory.
+    - False: explicit non-commute advisory, or location-specific alert for unrelated stops.
     - None: uncertain/ambiguous.
     """
     text = _alert_text(alert)
 
     if _is_non_commute_alert(alert):
         return False
+
+    # Build route context for location-specific filtering
+    stop_names, line_ids = _build_route_context(route)
+
+    # Filter far-away location-specific alerts
+    if _is_location_specific_alert(alert, stop_names, line_ids):
+        # Do NOT drop severe/system-wide alerts
+        if alert.severity != "SEVERE" and alert.affected_routes != {"*"}:
+            logger.debug("Filtered location-specific alert %s (no route stop overlap)", alert.id)
+            return False
 
     severe = alert.severity == "SEVERE"
     has_disruption_words = _contains_any(text, _DISRUPTION_PATTERNS)

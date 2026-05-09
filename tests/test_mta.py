@@ -697,3 +697,103 @@ class TestSelectActionableAlerts:
         result = select_actionable_alerts([ambiguous], route, at_time=now, llm=llm)
         assert result == []
         assert llm.calls == 1
+
+
+# ─── Location-specific alert filtering tests ─────────────────────────────────
+
+from commutecompass.mta import _is_location_specific_alert, _build_route_context
+
+
+class TestBuildRouteContext:
+    """Tests for _build_route_context."""
+
+    def test_extracts_line_ids_and_stops(self) -> None:
+        now = make_aware(datetime.now(NYC_TZ))
+        legs = [
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C",
+                headsign="Fulton St", depart_at=now, arrive_at=now + timedelta(minutes=30),
+                duration_seconds=1800, summary="C from Jay St-MetroTech to Fulton St",
+            ),
+        ]
+        route = sample_route(legs)
+        stop_names, line_ids = _build_route_context(route)
+        assert "fulton st" in stop_names
+        assert "c" in line_ids
+
+    def test_empty_route(self) -> None:
+        route = Route(legs=[], depart_at=make_aware(datetime.now(NYC_TZ)),
+                     arrive_at=make_aware(datetime.now(NYC_TZ)), total_duration_seconds=0)
+        stop_names, line_ids = _build_route_context(route)
+        assert stop_names == set()
+        assert line_ids == set()
+
+
+class TestIsLocationSpecificAlert:
+    """Tests for _is_location_specific_alert."""
+
+    def test_alert_without_location_patterns_is_not_filtered(self) -> None:
+        """Alert with no station/segment phrasing is kept."""
+        alert = Alert(
+            id="x", header="C train delays", description="Expect delays",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[], severity="WARNING",
+        )
+        stop_names = {"fulton st"}
+        line_ids = {"c"}
+        assert _is_location_specific_alert(alert, stop_names, line_ids) is False
+
+    def test_alert_near_route_stops_is_kept(self) -> None:
+        """Location-specific alert that mentions a route stop is kept."""
+        alert = Alert(
+            id="x",
+            header="Delays at Fulton St",
+            description="Fulton St station affected",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[], severity="WARNING",
+        )
+        stop_names = {"fulton st"}
+        line_ids = {"c"}
+        assert _is_location_specific_alert(alert, stop_names, line_ids) is False
+
+    def test_far_location_specific_alert_is_filtered(self) -> None:
+        """Location-specific alert for stops unrelated to route is filtered."""
+        alert = Alert(
+            id="x",
+            header="C train delays at 14 St",
+            description="Delays at 14 St station",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[], severity="WARNING",
+        )
+        # Route only uses "Fulton St" stops; 14 St has no token overlap
+        stop_names = {"fulton st"}
+        line_ids = {"c"}
+        assert _is_location_specific_alert(alert, stop_names, line_ids) is True
+
+    def test_severe_alert_remains_location_specific(self) -> None:
+        """SEVERE alerts remain location-specific (but never dropped upstream)."""
+        alert = Alert(
+            id="x",
+            header="C line suspended between Jay St-MetroTech and Euclid",
+            description="Suspended service",
+            affected_routes={"C"}, affected_systems={"MTA Subway"},
+            active_periods=[], severity="SEVERE",
+        )
+        stop_names = {"fulton st"}
+        line_ids = {"c"}
+        # True: location-specific (kept because SEVERE checked in heuristic)
+        assert _is_location_specific_alert(alert, stop_names, line_ids) is True
+
+    def test_system_wide_alert_remains_location_specific(self) -> None:
+        """Wildcard alerts remain location-specific (but never dropped upstream)."""
+        alert = Alert(
+            id="x",
+            header="Delays on C line between 34 St and 59 St",
+            description="Service change",
+            affected_routes={"*"}, affected_systems={"MTA Subway"},
+            active_periods=[], severity="WARNING",
+        )
+        stop_names = {"fulton st"}
+        line_ids = {"c"}
+        # True: location-specific (kept because affected_routes={"*"} checked upstream)
+        assert _is_location_specific_alert(alert, stop_names, line_ids) is True

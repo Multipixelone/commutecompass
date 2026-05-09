@@ -9,6 +9,10 @@ from zoneinfo import ZoneInfo
 
 NYC_TZ = ZoneInfo("America/New_York")
 
+# Business day boundary for commute planning.
+# Events between 00:00-01:59 local NYC are treated as part of the previous day.
+DAY_START_HOUR = 2
+
 
 def now_nyc() -> datetime:
     """Return current datetime in NYC timezone."""
@@ -26,6 +30,36 @@ def parse_iso_nyc(s: str) -> datetime:
     """Parse an ISO-8601 string and return it in NYC timezone."""
     dt = datetime.fromisoformat(s)
     return to_nyc(dt)
+
+
+def logical_day_bounds_nyc(
+    reference: datetime | None = None,
+    *,
+    day_start_hour: int = DAY_START_HOUR,
+) -> tuple[datetime, datetime]:
+    """Return NYC logical day bounds [start, end] for a reference time.
+
+    The logical day starts at ``day_start_hour`` in NYC local time, not midnight.
+    Example with ``day_start_hour=2``:
+    - reference 2026-05-12 01:30 => day is 2026-05-11 02:00 to 2026-05-12 01:59:59.999999
+    - reference 2026-05-12 09:00 => day is 2026-05-12 02:00 to 2026-05-13 01:59:59.999999
+
+    Args:
+        reference: Datetime used to choose the logical day (defaults to now in NYC).
+        day_start_hour: Local NYC hour (0-23) at which the logical day begins.
+
+    Returns:
+        Tuple of (start_inclusive, end_inclusive), both timezone-aware NYC datetimes.
+    """
+    if not 0 <= day_start_hour <= 23:
+        raise ValueError("day_start_hour must be between 0 and 23")
+
+    ref = now_nyc() if reference is None else to_nyc(reference)
+    start = ref.replace(hour=day_start_hour, minute=0, second=0, microsecond=0)
+    if ref < start:
+        start = start - timedelta(days=1)
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    return start, end
 
 
 def is_within_quiet_hours(dt: datetime, start: time, end: time) -> bool:

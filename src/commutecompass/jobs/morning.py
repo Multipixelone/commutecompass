@@ -1,7 +1,7 @@
 """Morning digest job.
 
 Sequence (§6.14):
-1. Compute [start, end] window: today 00:00 to today 23:59 NYC
+1. Compute [start, end] window: logical day 02:00 to 01:59 NYC
 2. Fetch calendar events via calendar_client
 3. For each event: plan = plan_event(...); store.upsert_plan(plan)
 4. Cancel stale pings for events that no longer exist
@@ -32,7 +32,7 @@ from commutecompass.mta import fetch_alerts
 from commutecompass.notify import TelegramNotifier
 from commutecompass.planner import plan_event
 from commutecompass.store import Store
-from commutecompass.timeutil import now_nyc
+from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
 from commutecompass.venues import VenueRegistry
 
 logger = logging.getLogger(__name__)
@@ -45,8 +45,7 @@ def run(config: Config) -> None:  # noqa: C901
         config: Validated application configuration.
     """
     _now = now_nyc()
-    today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = today_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    today_start, today_end = logical_day_bounds_nyc(_now)
 
     # ── 1. Fetch today's calendar events ─────────────────────────────────────
     calendar_client = CalendarClient(

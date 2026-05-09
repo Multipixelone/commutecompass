@@ -7,8 +7,10 @@ from datetime import datetime, time, timedelta, timezone
 import pytest
 
 from commutecompass.timeutil import (
+    DAY_START_HOUR,
     NYC_TZ,
     is_within_quiet_hours,
+    logical_day_bounds_nyc,
     now_nyc,
     parse_iso_nyc,
     to_nyc,
@@ -240,3 +242,25 @@ class TestToNycDST:
         # 2:00 AM on fall-back morning (after the transition) is EST
         after = datetime(2025, 11, 2, 2, 0, 0, tzinfo=NYC_TZ)
         assert after.utcoffset() == timedelta(hours=-5)  # EST
+
+
+class TestLogicalDayBoundsNyc:
+    """Test logical_day_bounds_nyc() with 2AM day start."""
+
+    def test_reference_before_day_start_maps_to_previous_logical_day(self) -> None:
+        ref = datetime(2026, 5, 12, 1, 30, 0, tzinfo=NYC_TZ)
+        start, end = logical_day_bounds_nyc(ref)
+
+        assert start == datetime(2026, 5, 11, DAY_START_HOUR, 0, 0, tzinfo=NYC_TZ)
+        assert end == datetime(2026, 5, 12, 1, 59, 59, 999999, tzinfo=NYC_TZ)
+
+    def test_reference_after_day_start_maps_to_same_calendar_day(self) -> None:
+        ref = datetime(2026, 5, 12, 9, 0, 0, tzinfo=NYC_TZ)
+        start, end = logical_day_bounds_nyc(ref)
+
+        assert start == datetime(2026, 5, 12, DAY_START_HOUR, 0, 0, tzinfo=NYC_TZ)
+        assert end == datetime(2026, 5, 13, 1, 59, 59, 999999, tzinfo=NYC_TZ)
+
+    def test_invalid_day_start_raises(self) -> None:
+        with pytest.raises(ValueError):
+            logical_day_bounds_nyc(datetime(2026, 5, 12, 9, 0, 0, tzinfo=NYC_TZ), day_start_hour=24)

@@ -327,6 +327,45 @@ class TestParseRoute:
         # 180 + 900 + 120 = 1200
         assert route.total_duration_seconds == 1200
 
+    def test_prefers_short_name_over_name_for_line(self) -> None:
+        """When both name and short_name are present, short_name takes precedence."""
+        response = {
+            "routes": [
+                {
+                    "legs": [
+                        {
+                            "steps": [
+                                {
+                                    "travel_mode": "TRANSIT",
+                                    "duration": {"value": 900},
+                                    "departure_time": {"value": 1746864000},
+                                    "arrival_time": {"value": 1746864900},
+                                    "transit_details": {
+                                        "line": {
+                                            "name": "C Train (8 Av Local)",
+                                            "short_name": "C",
+                                            "vehicle": {"type": "SUBWAY"},
+                                            "agencies": [{"name": "MTA NYC Transit"}],
+                                        },
+                                        "departure_stop": {"name": "Jay St-MetroTech"},
+                                        "arrival_stop": {"name": "Fulton St"},
+                                    },
+                                },
+                            ],
+                            "duration": {"value": 900},
+                            "departure_time": {"value": 1746864000},
+                            "arrival_time": {"value": 1746864900},
+                        }
+                    ],
+                    "duration": {"value": 900},
+                }
+            ],
+            "status": "OK",
+        }
+        route = _parse_route(response)
+        assert route is not None
+        assert route.legs[0].line == "C"
+
 
 # ─── Test plan_route ──────────────────────────────────────────────────────────
 

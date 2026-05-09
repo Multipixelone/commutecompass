@@ -91,7 +91,7 @@ def _parse_step(step: dict, nyc_tz: type) -> Optional[TransitLeg]:
                     system = agency_name
                     break
 
-        line = line_info.get("name") or line_info.get("short_name")
+        line = line_info.get("short_name") or line_info.get("name") or None
 
         departure_stop = transit_details.get("departure_stop", {})
         arrival_stop = transit_details.get("arrival_stop", {})
