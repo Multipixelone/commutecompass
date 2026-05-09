@@ -34,6 +34,25 @@ def looks_like_address(raw: str) -> bool:
     return has_digit and has_street_word
 
 
+_PLACEHOLDER_PATTERNS = (
+    "location available once rsvp",
+    "location revealed after rsvp",
+    "rsvp to see location",
+    "tba",
+    "tbd",
+    "tbd location",
+)
+
+
+def _is_placeholder(raw: str) -> bool:
+    """Return True if `raw` is clearly a non-actionable placeholder string."""
+    lowered = raw.lower()
+    return any(pat in lowered for pat in _PLACEHOLDER_PATTERNS)
+
+
+# ── Step 4b: placeholder check ────────────────────────────────────────────────
+
+
 def resolve(
     raw: Optional[str],
     *,
@@ -49,6 +68,7 @@ def resolve(
     2. Cache hit (store.get_geocode) → return cached
     3. Venue registry match → cache + return
     4. looks_like_address → geocode → cache + return
+    4b. Placeholder check → None (skip LLM/geocoder)
     5. LLM resolution → address: geocode + cache + return;
                         station: cache + return
     6. Unresolved → log + return None
@@ -94,6 +114,11 @@ def resolve(
             )
             store.cache_geocode(raw, result)
             return result
+
+    # ── Step 4b: placeholder check ───────────────────────────────────────────────
+    if _is_placeholder(raw):
+        log.debug("resolver: placeholder %r skipped", raw)
+        return None
 
     # ── Step 5: LLM resolution ─────────────────────────────────────────────────
     llm_resolved = llm.resolve_location(raw, hints={})

@@ -200,6 +200,8 @@ class TestFormatDigest:
         assert "Leave" in result
         # Route summary should include "C train"
         assert "C train" in result
+        # Calendar name wrapped in escaped literal parens so '(' and ')' never appear raw in output
+        assert r"\(Theatre\)" in result
         # Should start with today header
         assert "Today" in result
 

@@ -87,6 +87,31 @@ class TestLooksLikeAddress:
         assert looks_like_address(raw) == expected
 
 
+class TestIsPlaceholder:
+    """Unit tests for the placeholder heuristic."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Location available once RSVP'd", True),
+            ("Location Available Once RSVP'd", True),  # different case
+            ("Location revealed after RSVP", True),
+            ("RSVP to see location", True),
+            ("TBA", True),
+            ("TBD", True),
+            ("TBD Location", True),
+            ("200 Example St", False),  # real address
+            ("Lincoln Center", False),  # venue name
+            ("Home", False),  # plain word
+            ("", False),  # empty
+        ],
+    )
+    def test_is_placeholder(self, raw: str, expected: bool) -> None:
+        from commutecompass.resolver import _is_placeholder
+
+        assert _is_placeholder(raw) == expected
+
+
 class TestResolve:
     """Integration tests for the full resolution pipeline."""
 
@@ -123,6 +148,31 @@ class TestResolve:
             llm=mock_llm,
         )
         assert result is None
+
+    # ── Step 4b: placeholder ───────────────────────────────────────────────────
+
+    def test_placeholder_rsvp_returns_none_and_skips_llm_geocoder(
+        self,
+        mock_store: MagicMock,
+        mock_geocoder: MagicMock,
+        mock_llm: MagicMock,
+        venue_registry: VenueRegistry,
+    ) -> None:
+        """A clearly placeholder location like 'Location available once RSVP'd' returns None and does NOT call LLM or geocoder."""
+        result = resolve(
+            "Location available once RSVP'd",
+            venues=venue_registry,
+            store=mock_store,
+            geocoder=mock_geocoder,
+            llm=mock_llm,
+        )
+
+        assert result is None
+        # Neither LLM nor geocoder should be called for placeholder strings
+        mock_llm.resolve_location.assert_not_called()
+        mock_geocoder.assert_not_called()
+        # Nothing should be cached either
+        mock_store.cache_geocode.assert_not_called()
 
     # ── Step 2: cache hit ───────────────────────────────────────────────────────
 

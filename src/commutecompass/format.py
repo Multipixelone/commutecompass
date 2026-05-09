@@ -68,7 +68,7 @@ def _format_plan_summary(plan: Plan) -> str:
         icon = "📅"
     else:
         icon = "📍"
-    lines.append(f"{icon} *{escape_md(event.title)}* ({escape_md(event.calendar_name)})")
+    lines.append(f"{icon} *{escape_md(event.title)}* \\({escape_md(event.calendar_name)}\\)")
     lines.append(f"  {start_str} at {escape_md(event.location_raw or '(no location)')}")
 
     if plan.error:
