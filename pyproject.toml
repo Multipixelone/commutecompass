@@ -33,6 +33,7 @@ target-version = "py312"
 [tool.mypy]
 strict = true
 python_version = "3.12"
+mypy_path = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
