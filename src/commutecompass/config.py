@@ -19,8 +19,8 @@ class Origin(BaseModel):
     address: str
     lat: float
     lon: float
-    subway_station: str
-    lirr_station: str
+    subway_station: str = ""
+    lirr_station: str = ""
 
 
 class CalendarSpec(BaseModel):
@@ -64,6 +64,15 @@ class LocationOverride(BaseModel):
     location: str
 
 
+class HomeAssistantConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    entity_id: str = ""
+    home_zone: str = "home"
+    max_age_minutes: int = 30
+    replan_window_minutes: int = 30
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -73,12 +82,14 @@ class Config(BaseModel):
     opencode_go: OpencodeGoConfig
     mta: MtaConfig
     location_overrides: list[LocationOverride] = []
+    home_assistant: HomeAssistantConfig = HomeAssistantConfig()
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: int = 0
     opencode_go_token: str = ""
+    home_assistant_token: str = ""
 
 
 # ─────────── Exceptions ───────────
@@ -106,12 +117,15 @@ _REQUIRED_ENV_VARS = [
     "OPENCODE_GO_TOKEN",
 ]
 
+_HA_TOKEN_ENV_VAR = "HOME_ASSISTANT_TOKEN"
 
-def load_from_env() -> dict[str, str]:
+
+def load_from_env(extra_required: list[str] | None = None) -> dict[str, str]:
     """Extract required env vars; raise ConfigError listing all missing at once."""
+    required = _REQUIRED_ENV_VARS + list(extra_required or [])
     missing: list[str] = []
     values: dict[str, str] = {}
-    for var in _REQUIRED_ENV_VARS:
+    for var in required:
         val = os.environ.get(var)
         if val is None or val == "":
             missing.append(var)
@@ -133,8 +147,12 @@ def load_config(toml_path: Path) -> Config:
         if "morning_run_time" in sched and isinstance(sched["morning_run_time"], str):
             sched["morning_run_time"] = datetime.strptime(sched["morning_run_time"], "%H:%M").time()
 
+    # HA token is required only when [home_assistant].enabled = true.
+    ha_enabled = bool(raw.get("home_assistant", {}).get("enabled", False))
+    extra = [_HA_TOKEN_ENV_VAR] if ha_enabled else []
+
     # Pull env vars (raises ConfigError with all missing at once)
-    env = load_from_env()
+    env = load_from_env(extra_required=extra)
 
     # Merge env vars into the TOML data for pydantic validation
     raw["google_maps_api_key"] = env["GOOGLE_MAPS_API_KEY"]
@@ -142,5 +160,7 @@ def load_config(toml_path: Path) -> Config:
     raw["telegram_bot_token"] = env["TELEGRAM_BOT_TOKEN"]
     raw["telegram_chat_id"] = int(env["TELEGRAM_CHAT_ID"])
     raw["opencode_go_token"] = env["OPENCODE_GO_TOKEN"]
+    if ha_enabled:
+        raw["home_assistant_token"] = env[_HA_TOKEN_ENV_VAR]
 
     return Config.model_validate(raw)

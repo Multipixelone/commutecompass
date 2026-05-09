@@ -378,3 +378,79 @@ location = "123 Example Ave, Brooklyn, NY 11201"
         assert len(cfg.location_overrides) == 2
         assert cfg.location_overrides[0].calendar_id == "cal-a"
         assert cfg.location_overrides[1].calendar_id == "cal-b"
+
+
+class TestHomeAssistant:
+    """HOME_ASSISTANT_TOKEN is required only when [home_assistant].enabled = true."""
+
+    _HA_ON = """
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+
+[paths]
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+
+[mta]
+subway_alerts_url = "https://example.com/subway"
+lirr_alerts_url   = "https://example.com/lirr"
+bus_alerts_url    = "https://example.com/bus"
+
+[[calendars]]
+id = "x"
+name = "X"
+
+[home_assistant]
+enabled = true
+base_url = "http://ha"
+entity_id = "device_tracker.iphone"
+"""
+
+    def test_ha_disabled_does_not_require_token(
+        self, minimal_toml: Path, required_env: dict[str, str]
+    ) -> None:
+        _apply_env(required_env)
+        _clear_env(["HOME_ASSISTANT_TOKEN"])
+        cfg = load_config(minimal_toml)
+        assert cfg.home_assistant.enabled is False
+        assert cfg.home_assistant_token == ""
+
+    def test_ha_enabled_requires_token(
+        self, tmp_path: Path, required_env: dict[str, str]
+    ) -> None:
+        _apply_env(required_env)
+        _clear_env(["HOME_ASSISTANT_TOKEN"])
+        p = tmp_path / "config.toml"
+        p.write_text(self._HA_ON)
+        err = pytest.raises(ConfigError, load_config, p)
+        assert "HOME_ASSISTANT_TOKEN" in err.value.missing
+
+    def test_ha_enabled_token_present_loads(
+        self, tmp_path: Path, required_env: dict[str, str]
+    ) -> None:
+        _apply_env(required_env)
+        os.environ["HOME_ASSISTANT_TOKEN"] = "ha-tok"
+        try:
+            p = tmp_path / "config.toml"
+            p.write_text(self._HA_ON)
+            cfg = load_config(p)
+            assert cfg.home_assistant.enabled is True
+            assert cfg.home_assistant.entity_id == "device_tracker.iphone"
+            assert cfg.home_assistant_token == "ha-tok"
+        finally:
+            os.environ.pop("HOME_ASSISTANT_TOKEN", None)

@@ -14,8 +14,8 @@ class Origin(BaseModel):
     address: str
     lat: float
     lon: float
-    subway_station: str
-    lirr_station: str
+    subway_station: str = ""
+    lirr_station: str = ""
 
 
 class CalendarSpec(BaseModel):
@@ -59,6 +59,15 @@ class LocationOverride(BaseModel):
     location: str
 
 
+class HomeAssistantConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    entity_id: str = ""
+    home_zone: str = "home"
+    max_age_minutes: int = 30
+    replan_window_minutes: int = 30
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -68,11 +77,13 @@ class Config(BaseModel):
     opencode_go: OpencodeGoConfig
     mta: MtaConfig
     location_overrides: list[LocationOverride] = []
+    home_assistant: HomeAssistantConfig = HomeAssistantConfig()
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: int = 0
     opencode_go_token: str = ""
+    home_assistant_token: str = ""
 
 
 # ─────────── Domain models ───────────
@@ -145,3 +156,11 @@ class PingEntry(BaseModel):
     fired: bool = False
     fired_at: Optional[datetime] = None
     message: str
+
+
+class CurrentLocation(BaseModel):
+    lat: float
+    lon: float
+    zone: Optional[str] = None
+    captured_at: datetime
+    source: str = "home_assistant"
