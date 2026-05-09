@@ -75,6 +75,8 @@ in {
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
         StateDirectory = "commutecompass";
+        ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
+        ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml morning";
         # Hardening: restrict filesystem access; commutecompass reads /etc/commutecompass/*
         # and writes to dataDir (StateDirectory= lands under dataDir)
         NoNewPrivileges = true;
@@ -104,6 +106,7 @@ in {
         Group = cfg.group;
         EnvironmentFile = cfg.environmentFile;
         StateDirectory = "commutecompass";
+        ExecStartPre = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml init-db";
         ExecStart = "${cfg.package}/bin/commutecompass --config /etc/commutecompass/config.toml poll";
         # Hardening: same policy as morning service
         NoNewPrivileges = true;
