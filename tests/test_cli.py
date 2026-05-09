@@ -189,30 +189,30 @@ class TestInitDb:
         db_path = tmp_path / "test.db"
 
         with mock.patch("commutecompass.config.load_config") as mock_cfg:
-            from commutecompass.config import Config
+            from commutecompass.config import Config, Origin, PrepConfig, SchedulingConfig, PathsConfig, OpencodeGoConfig, MtaConfig
 
             cfg = Config(
-                origin={
-                    "address": "123 Example Ave",
-                    "lat": 40.6950,
-                    "lon": -73.9890,
-                    "subway_station": "Jay St-MetroTech",
-                    "lirr_station": "Atlantic Terminal",
-                },
+                origin=Origin(
+                    address="123 Example Ave",
+                    lat=40.6950,
+                    lon=-73.9890,
+                    subway_station="Jay St-MetroTech",
+                    lirr_station="Atlantic Terminal",
+                ),
                 calendars=[],
-                prep={"prep_minutes": 20, "safety_buffer_minutes": 5},
-                scheduling={},
-                paths={
-                    "venues_file": str(tmp_path / "venues.yaml"),
-                    "db_path": str(db_path),
-                    "oauth_token_path": str(tmp_path / "token.json"),
-                },
-                opencode_go={"endpoint": "https://example.com"},
-                mta={
-                    "subway_alerts_url": "https://example.com/s",
-                    "lirr_alerts_url": "https://example.com/l",
-                    "bus_alerts_url": "https://example.com/b",
-                },
+                prep=PrepConfig(prep_minutes=20, safety_buffer_minutes=5),
+                scheduling=SchedulingConfig(),
+                paths=PathsConfig(
+                    venues_file=str(tmp_path / "venues.yaml"),
+                    db_path=str(db_path),
+                    oauth_token_path=str(tmp_path / "token.json"),
+                ),
+                opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+                mta=MtaConfig(
+                    subway_alerts_url="https://example.com/s",
+                    lirr_alerts_url="https://example.com/l",
+                    bus_alerts_url="https://example.com/b",
+                ),
                 google_maps_api_key="fake",
                 google_oauth_client_secret_json="{}",
                 telegram_bot_token="123:abc",

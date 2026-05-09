@@ -79,6 +79,8 @@ def test_opencode_go_config_defaults() -> None:
 
 
 def test_config_full_construction() -> None:
+    from datetime import time
+
     config = Config(
         origin=Origin(
             address="123 Example Ave",
@@ -92,7 +94,7 @@ def test_config_full_construction() -> None:
             CalendarSpec(id="cal-2", name="School", enabled=False),
         ],
         prep=PrepConfig(prep_minutes=25),
-        scheduling=SchedulingConfig(morning_run_time="06:30"),
+        scheduling=SchedulingConfig(morning_run_time=time(6, 30)),
         paths=PathsConfig(
             venues_file="/etc/commutecompass/venues.yaml",
             db_path="/var/lib/commutecompass/state.db",
@@ -342,7 +344,9 @@ def test_alert_full() -> None:
     )
     assert alert.severity == "WARNING"
     assert "C" in alert.affected_routes
-    assert alert.active_periods[0][0] < alert.active_periods[0][1]
+    period_start, period_end = alert.active_periods[0]
+    assert period_end is not None
+    assert period_start < period_end
 
 
 def test_ping_entry_defaults() -> None:
@@ -380,7 +384,7 @@ def test_ping_entry_all_kinds() -> None:
         ping = PingEntry(
             id=f"ping-{kind}",
             event_id="evt-001",
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             fire_at=fire,
             message=f"Test {kind}",
         )
@@ -398,7 +402,7 @@ def test_event_mode_override_literals() -> None:
             title="t",
             start=start,
             end=end,
-            mode_override=mode,  # type: ignore[arg-type]
+            mode_override=mode,
         )
         assert event.mode_override == mode
 
@@ -407,7 +411,7 @@ def test_transit_leg_mode_literals() -> None:
     now = aware(datetime.now())
     for mode in ("WALKING", "TRANSIT", "DRIVING", "BICYCLING"):
         leg = TransitLeg(
-            mode=mode,  # type: ignore[arg-type]
+            mode=mode,
             depart_at=now,
             arrive_at=now,
             duration_seconds=60,
@@ -422,6 +426,6 @@ def test_alert_severity_literals() -> None:
             id="x",
             header="h",
             description="d",
-            severity=sev,  # type: ignore[arg-type]
+            severity=sev,
         )
         assert alert.severity == sev

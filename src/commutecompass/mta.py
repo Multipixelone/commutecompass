@@ -19,6 +19,13 @@ from commutecompass.timeutil import NYC_TZ
 if TYPE_CHECKING:
     from commutecompass.llm import OpencodeGoClient
 
+__all__ = [
+    "NYC_TZ",
+    "fetch_alerts",
+    "alerts_affecting_route",
+    "select_actionable_alerts",
+]
+
 logger = logging.getLogger(__name__)
 
 # Canonical MTA GTFS-RT alert feed URLs (verify against https://api.mta.info)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 
@@ -38,7 +38,7 @@ def _make_client() -> OpencodeGoClient:
 class TestResolveLocation:
     """Tests for resolve_location()."""
 
-    def _call(self, raw: str, content: str, hints: dict | None = None) -> Any:
+    def _call(self, raw: str, content: str, hints: Optional[dict[str, Any]] = None) -> Any:
         """Call client.resolve_location with a mocked HTTP response."""
         hints = hints or {}
         with patch("commutecompass.llm.httpx.Client") as mock_client_cls:

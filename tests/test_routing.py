@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,10 +23,11 @@ def directions_sample_path(fixtures_dir: Path) -> Path:
 
 
 @pytest.fixture
-def directions_sample_data(directions_sample_path: Path) -> dict:
+def directions_sample_data(directions_sample_path: Path) -> dict[str, Any]:
     """Load the directions sample JSON as a dict."""
+    from typing import cast
     with open(directions_sample_path) as f:
-        return json.load(f)
+        return cast(dict[str, Any], json.load(f))
 
 
 @pytest.fixture
@@ -81,7 +83,7 @@ class TestUnix:
 class TestParseRoute:
     """Tests for _parse_route parsing Google Directions payload."""
 
-    def test_parses_valid_response(self, directions_sample_data: dict) -> None:
+    def test_parses_valid_response(self, directions_sample_data: dict[str, Any]) -> None:
         """A valid directions response parses into a Route."""
         route = _parse_route(directions_sample_data)
 
@@ -92,7 +94,7 @@ class TestParseRoute:
         assert route.total_duration_seconds == 1680
         assert route.fare_estimate_cents == 290  # $2.90
 
-    def test_identifies_subway_leg(self, directions_sample_data: dict) -> None:
+    def test_identifies_subway_leg(self, directions_sample_data: dict[str, Any]) -> None:
         """The subway leg is correctly identified."""
         route = _parse_route(directions_sample_data)
 
@@ -105,7 +107,7 @@ class TestParseRoute:
         assert subway.system == "MTA Subway"
         assert subway.line == "C"
 
-    def test_identifies_walking_legs(self, directions_sample_data: dict) -> None:
+    def test_identifies_walking_legs(self, directions_sample_data: dict[str, Any]) -> None:
         """Walking legs are correctly identified."""
         route = _parse_route(directions_sample_data)
 
@@ -115,7 +117,7 @@ class TestParseRoute:
         for walk in walk_legs:
             assert walk.mode == "WALKING"
 
-    def test_depart_and_arrive_times(self, directions_sample_data: dict) -> None:
+    def test_depart_and_arrive_times(self, directions_sample_data: dict[str, Any]) -> None:
         """Departure and arrival times are correctly parsed."""
         route = _parse_route(directions_sample_data)
 
@@ -124,7 +126,7 @@ class TestParseRoute:
         assert route.arrive_at.tzinfo is not None
         assert route.arrive_at > route.depart_at
 
-    def test_raw_payload_stored(self, directions_sample_data: dict) -> None:
+    def test_raw_payload_stored(self, directions_sample_data: dict[str, Any]) -> None:
         """The raw provider payload is stored on the route."""
         route = _parse_route(directions_sample_data)
 
@@ -155,7 +157,7 @@ class TestParseRoute:
     def test_transfers_counted_correctly(self) -> None:
         """Transfers are counted when moving between transit lines."""
         # Simulate a route with two transit legs (transfer)
-        response = {
+        response: dict[str, Any] = {
             "routes": [
                 {
                     "legs": [
@@ -212,7 +214,7 @@ class TestParseRoute:
         Regression test: legacy Directions responses may not include route.duration,
         so we fall back to summing each leg's duration.value.
         """
-        response = {
+        response: dict[str, Any] = {
             "routes": [
                 {
                     "legs": [
@@ -264,7 +266,7 @@ class TestParseRoute:
 
     def test_total_duration_from_legs_multi_leg_route(self) -> None:
         """Multi-leg route total_duration_seconds is sum of all leg durations."""
-        response = {
+        response: dict[str, Any] = {
             "routes": [
                 {
                     "legs": [
@@ -329,7 +331,7 @@ class TestParseRoute:
 
     def test_prefers_short_name_over_name_for_line(self) -> None:
         """When both name and short_name are present, short_name takes precedence."""
-        response = {
+        response: dict[str, Any] = {
             "routes": [
                 {
                     "legs": [
@@ -383,6 +385,6 @@ class TestPlanRoute:
         self, origin: Origin, destination: ResolvedLocation, arrival_time: datetime
     ) -> None:
         """plan_route accepts all supported mode values."""
-        for mode in ["transit", "driving", "walking", "bicycling"]:
+        for mode in ("transit", "driving", "walking", "bicycling"):
             result = plan_route(origin, destination, arrival_time, mode=mode, api_key="")
             assert result is None  # No API key = None
