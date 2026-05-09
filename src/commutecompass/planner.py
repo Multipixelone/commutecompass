@@ -30,6 +30,47 @@ def get_effective_location(
     return event.location_raw or ""
 
 
+def effective_origin(
+    config: Config,
+    store: "Store",
+    *,
+    override: Optional[Origin] = None,
+) -> Origin:
+    """Pick the origin to plan from.
+
+    Precedence:
+      1. explicit override (CLI --here, etc.)
+      2. fresh HA-tracked location, unless tracker is in the configured home zone
+      3. config.origin (preserves subway/LIRR station hints)
+    """
+    base_origin = Origin(
+        address=config.origin.address,
+        lat=config.origin.lat,
+        lon=config.origin.lon,
+        subway_station=config.origin.subway_station,
+        lirr_station=config.origin.lirr_station,
+    )
+
+    if override is not None:
+        return override
+
+    if not config.home_assistant.enabled:
+        return base_origin
+
+    cl = store.get_current_location(max_age_minutes=config.home_assistant.max_age_minutes)
+    if cl is None:
+        return base_origin
+
+    if cl.zone is not None and cl.zone == config.home_assistant.home_zone:
+        return base_origin
+
+    return Origin(
+        address=f"{cl.lat:.6f},{cl.lon:.6f}",
+        lat=cl.lat,
+        lon=cl.lon,
+    )
+
+
 def plan_event(
     event: Event,
     config: Config,
@@ -38,6 +79,7 @@ def plan_event(
     llm: OpencodeGoClient,
     *,
     mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None,
+    origin_override: Optional[Origin] = None,
 ) -> Plan:
     """Compute optimal departure time for an event.
 
@@ -75,13 +117,7 @@ def plan_event(
         return Plan(event=event, error="location_unresolved")
 
     # Step 2: plan route
-    route_origin = Origin(
-        address=config.origin.address,
-        lat=config.origin.lat,
-        lon=config.origin.lon,
-        subway_station=config.origin.subway_station,
-        lirr_station=config.origin.lirr_station,
-    )
+    route_origin = effective_origin(config, store, override=origin_override)
 
     route = plan_route(
         origin=route_origin,

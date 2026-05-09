@@ -9,6 +9,7 @@ import pytest
 from commutecompass.config import (
     Config,
     CalendarSpec,
+    HomeAssistantConfig,
     LocationOverride,
     MtaConfig,
     OpencodeGoConfig,
@@ -18,12 +19,13 @@ from commutecompass.config import (
     SchedulingConfig,
 )
 from commutecompass.models import (
+    CurrentLocation,
     Event,
     ResolvedLocation,
     Route,
     TransitLeg,
 )
-from commutecompass.planner import plan_event, get_effective_location
+from commutecompass.planner import effective_origin, plan_event, get_effective_location
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.timeutil import NYC_TZ
@@ -526,3 +528,76 @@ def test_plan_event_no_override_uses_event_location(
     mock_resolve.assert_called_once()
     call_args = mock_resolve.call_args
     assert call_args[0][0] == event.location_raw
+
+
+# ── effective_origin tests ────────────────────────────────────────────────────
+
+
+def _ha_enabled_config(base: Config) -> Config:
+    return base.model_copy(
+        update={
+            "home_assistant": HomeAssistantConfig(
+                enabled=True,
+                base_url="http://ha",
+                entity_id="device_tracker.iphone",
+                home_zone="home",
+                max_age_minutes=30,
+            )
+        }
+    )
+
+
+def test_effective_origin_returns_explicit_override(config: Config) -> None:
+    from commutecompass.models import Origin as ModelOrigin
+
+    override = ModelOrigin(address="ovr", lat=1.0, lon=2.0)
+    store = MagicMock()
+    result = effective_origin(config, store, override=override)
+    assert result is override
+    store.get_current_location.assert_not_called()
+
+
+def test_effective_origin_returns_config_when_ha_disabled(config: Config) -> None:
+    store = MagicMock()
+    result = effective_origin(config, store)
+    assert result.lat == config.origin.lat
+    assert result.lon == config.origin.lon
+    store.get_current_location.assert_not_called()
+
+
+def test_effective_origin_returns_config_when_no_current_location(config: Config) -> None:
+    cfg = _ha_enabled_config(config)
+    store = MagicMock()
+    store.get_current_location.return_value = None
+    result = effective_origin(cfg, store)
+    assert result.lat == cfg.origin.lat
+    assert result.subway_station == cfg.origin.subway_station
+
+
+def test_effective_origin_returns_config_when_zone_is_home(config: Config) -> None:
+    from commutecompass.timeutil import now_nyc
+
+    cfg = _ha_enabled_config(config)
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=1.0, lon=2.0, zone="home", captured_at=now_nyc()
+    )
+    result = effective_origin(cfg, store)
+    assert result.lat == cfg.origin.lat
+    assert result.subway_station == cfg.origin.subway_station
+
+
+def test_effective_origin_uses_live_coords_when_away(config: Config) -> None:
+    from commutecompass.timeutil import now_nyc
+
+    cfg = _ha_enabled_config(config)
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=40.7128, lon=-74.006, zone="not_home", captured_at=now_nyc()
+    )
+    result = effective_origin(cfg, store)
+    assert result.lat == 40.7128
+    assert result.lon == -74.006
+    # Built without station hints
+    assert result.subway_station == ""
+    assert result.lirr_station == ""
