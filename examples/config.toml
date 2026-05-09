@@ -38,7 +38,7 @@ id = "school-calendar@example.com"
 name = "School"
 
 [[calendars]]
-id = "noreply@example.com"
+id = "personal-calendar@example.com"
 name = "Example User"
 
 [[calendars]]

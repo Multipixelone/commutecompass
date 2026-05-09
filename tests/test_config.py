@@ -192,9 +192,9 @@ morning_run_time = "06:00"
 poll_interval_seconds = 60
 
 [paths]
-venues_file = "/etc/commutecompass/venues.yaml"
+venues_file = "/etc/commutecompass/known_venues.yaml"
 db_path = "/var/lib/commutecompass/state.db"
-oauth_token_path = "/var/lib/commutecompass/token.json"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
 
 [opencode_go]
 endpoint = "https://opencode-go.example/v1/chat/completions"
@@ -365,11 +365,11 @@ name = "Calendar B"
 [[location_overrides]]
 calendar_id = "cal-a"
 title_contains = "Morning"
-location = "1 Park Ave, New York, NY 10016"
+location = "200 Example St, New York, NY 10001"
 
 [[location_overrides]]
 calendar_id = "cal-b"
-location = "100 Main St, New York, NY 10001"
+location = "123 Example Ave, Brooklyn, NY 11201"
 """
         p = tmp_path / "config.toml"
         p.write_text(toml)

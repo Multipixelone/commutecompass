@@ -48,7 +48,7 @@ class VenueRegistry:
         # Build normalized alias -> entry index mapping for fast exact lookup
         self._exact: dict[str, int] = {}
         # Build list of (collapsed_alias, entry_index) for fuzzy matching.
-        # Collapsed means whitespace removed so "CAP    21" and "Example School" both → "school".
+        # Collapsed means whitespace removed so "Studio  100" and "Studio100" both → "studio100".
         self._fuzzy: list[tuple[str, int]] = []
         for idx, entry in enumerate(entries):
             for alias in entry.aliases:
