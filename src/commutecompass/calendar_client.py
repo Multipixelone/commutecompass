@@ -6,13 +6,16 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 from commutecompass.models import CalendarSpec, Event
+
+if TYPE_CHECKING:
+    import googleapiclient.discovery
 
 
 class AuthError(Exception):
@@ -75,7 +78,7 @@ class CalendarClient:
         self._save_credentials(creds)
         self._creds = creds
 
-    def _build_service(self) -> "googleapiclient.discovery.Resource":  # type: ignore[nomagic]
+    def _build_service(self) -> "googleapiclient.discovery.Resource":
         """Build the Google Calendar API service object."""
         from googleapiclient import discovery
 

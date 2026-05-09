@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 from google.transit.gtfs_realtime_pb2 import (
@@ -15,6 +15,9 @@ from google.transit.gtfs_realtime_pb2 import (
 
 from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.timeutil import NYC_TZ
+
+if TYPE_CHECKING:
+    from commutecompass.llm import OpencodeGoClient
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +275,7 @@ def select_actionable_alerts(
     route: Route,
     at_time: datetime,
     *,
-    llm: Optional["OpencodeGoClient"] = None,  # type: ignore[name-defined, misc]
+    llm: Optional["OpencodeGoClient"] = None,
 ) -> list[Alert]:
     """Return the subset of affecting alerts likely to impact this commute.
 

@@ -5,10 +5,14 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from commutecompass.config import ConfigError  # noqa: F401
+
+if TYPE_CHECKING:
+    from commutecompass.config import Config
 
 # Default config path
 _CONFIG_DEFAULT = "/etc/commutecompass/config.toml"
@@ -19,7 +23,7 @@ _logger = logging.getLogger(__name__)
 # ─────────── Config helper ────────────────────────────────────────────────────
 
 
-def _load_config(config_path: Path) -> "Config":  # type: ignore[name-defined]
+def _load_config(config_path: Path) -> "Config":
     """Load and return the Config, exiting gracefully on error."""
     # Import module to allow patching at the right spot
     from commutecompass import config as config_mod

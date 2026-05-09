@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.geocode import GeocodeResult
 from commutecompass.models import ResolvedLocation
 from commutecompass.venues import VenueRegistry
+
+if TYPE_CHECKING:
+    from commutecompass.store import Store
+    from commutecompass.llm import OpencodeGoClient
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +61,9 @@ def resolve(
     raw: Optional[str],
     *,
     venues: VenueRegistry,
-    store: "Store",  # type: ignore[name-defined, misc]
+    store: "Store",
     geocoder: Callable[[str], Optional[GeocodeResult]],
-    llm: "OpencodeGoClient",  # type: ignore[name-defined, misc]
+    llm: "OpencodeGoClient",
 ) -> Optional[ResolvedLocation]:
     """Resolve a raw location string through the resolution pipeline.
 

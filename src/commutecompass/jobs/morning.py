@@ -16,9 +16,20 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from commutecompass.calendar_client import CalendarClient
 from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
+from commutecompass.mta import fetch_alerts
+from commutecompass.notify import TelegramNotifier
+from commutecompass.planner import plan_event
+from commutecompass.store import Store
+from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
+from commutecompass.venues import VenueRegistry
+
+if TYPE_CHECKING:
+    from commutecompass.llm import OpencodeGoClient
+
 from commutecompass.models import (
     Alert,
     Config,
@@ -26,12 +37,6 @@ from commutecompass.models import (
     PingEntry,
     Plan,
 )
-from commutecompass.mta import fetch_alerts
-from commutecompass.notify import TelegramNotifier
-from commutecompass.planner import plan_event
-from commutecompass.store import Store
-from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
-from commutecompass.venues import VenueRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +210,7 @@ def _plan_event_safe(
     config: Config,
     venue_registry: VenueRegistry,
     store: Store,
-    llm_client: "OpencodeGoClient",  # type: ignore[name-defined, misc]
+    llm_client: "OpencodeGoClient",
 ) -> Plan:
     """Call plan_event with error handling, returning an error Plan on failure."""
     try:

@@ -10,6 +10,7 @@ import pytest
 
 from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.mta import (
+    _fetch_feed,
     _is_location_specific_alert,
     _build_route_context,
     _time_overlaps,
