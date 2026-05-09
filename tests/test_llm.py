@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 
 import httpx
-import pytest
 
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import Alert, Route, TransitLeg

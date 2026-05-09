@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from commutecompass.models import Origin, ResolvedLocation, Route, TransitLeg
+from commutecompass.models import Origin, ResolvedLocation, Route
 from commutecompass.routing import _parse_route, _unix, plan_route
 from commutecompass.timeutil import NYC_TZ
 

@@ -19,7 +19,7 @@ _logger = logging.getLogger(__name__)
 # ─────────── Config helper ────────────────────────────────────────────────────
 
 
-def _load_config(config_path: Path) -> Config:
+def _load_config(config_path: Path) -> "Config":  # type: ignore[name-defined]
     """Load and return the Config, exiting gracefully on error."""
     # Import module to allow patching at the right spot
     from commutecompass import config as config_mod

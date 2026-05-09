@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from commutecompass.format import (
     _summarize_route_mode,
@@ -66,7 +65,7 @@ def make_route(legs: list[TransitLeg]) -> Route:
     """Helper to create a route."""
     depart_at = legs[0].depart_at if legs else datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc)
     arrive_at = legs[-1].arrive_at if legs else datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc)
-    total = sum(l.duration_seconds for l in legs)
+    total = sum(leg_.duration_seconds for leg_ in legs)
     return Route(
         legs=legs,
         depart_at=depart_at,

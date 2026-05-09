@@ -6,11 +6,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-import pytest
 
 from commutecompass.store import Store
 from commutecompass.models import (
-    Alert,
     Event,
     Plan,
     PingEntry,
@@ -507,7 +505,7 @@ def test_ping_entry_round_trip_with_datetime(tmp_db_path) -> None:
     store.mark_fired("ping-rt", ping.fired_at)
 
     pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
-    fired_ping = next((p for p in pending if p.id == "ping-rt"), None)
+    next((p for p in pending if p.id == "ping-rt"), None)
     # After marking fired it won't appear in pending; verify via direct query
     with __import__("sqlite3").connect(tmp_db_path) as conn:
         row = conn.execute(

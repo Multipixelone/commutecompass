@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecompass.models import CalendarSpec, Event
+from commutecompass.models import CalendarSpec
 from commutecompass.calendar_client import AuthError, CalendarClient
 
 

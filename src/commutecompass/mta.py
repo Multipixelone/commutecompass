@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import httpx
 from google.transit.gtfs_realtime_pb2 import (
     FeedMessage,
     Alert as GtfsAlert,
-    TimeRange as GtfsTimeRange,
-    EntitySelector,
 )
 
 from commutecompass.models import Alert, Route, TransitLeg
@@ -274,7 +272,7 @@ def select_actionable_alerts(
     route: Route,
     at_time: datetime,
     *,
-    llm: Optional["OpencodeGoClient"] = None,  # type: ignore[name-defined]
+    llm: Optional["OpencodeGoClient"] = None,  # type: ignore[name-defined, misc]
 ) -> list[Alert]:
     """Return the subset of affecting alerts likely to impact this commute.
 

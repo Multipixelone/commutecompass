@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -301,7 +299,7 @@ class TestResolve:
         # Geocoder fails -> falls through to LLM
         mock_geocoder.return_value = None
 
-        result = resolve(
+        resolve(
             "789 Unknown Street",
             venues=venue_registry,
             store=mock_store,

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
 
 from commutecompass.calendar_client import CalendarClient
 from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
@@ -26,7 +25,6 @@ from commutecompass.models import (
     Event,
     PingEntry,
     Plan,
-    Route,
 )
 from commutecompass.mta import fetch_alerts
 from commutecompass.notify import TelegramNotifier
@@ -207,7 +205,7 @@ def _plan_event_safe(
     config: Config,
     venue_registry: VenueRegistry,
     store: Store,
-    llm_client: "OpencodeGoClient",  # type: ignore[name-defined]
+    llm_client: "OpencodeGoClient",  # type: ignore[name-defined, misc]
 ) -> Plan:
     """Call plan_event with error handling, returning an error Plan on failure."""
     try:

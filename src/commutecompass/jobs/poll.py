@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.models import Alert, Config, Plan, PingEntry
@@ -11,9 +10,7 @@ from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
     from commutecompass.store import Store
-    from commutecompass.mta import alerts_affecting_route, fetch_alerts, select_actionable_alerts
     from commutecompass.notify import TelegramNotifier
-    from commutecompass.planner import plan_event
     from commutecompass.llm import OpencodeGoClient
 
 logger = logging.getLogger(__name__)
@@ -31,7 +28,7 @@ def run(
     select_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
     notifier: Optional[TelegramNotifier] = None,
     plan_event_fn: Optional[Callable[..., Plan]] = None,
-    now_fn: Optional[Callable[[], "datetime"]] = None,
+    now_fn: Optional[Callable[[], "datetime"]] = None,  # type: ignore[name-defined]
 ) -> None:
     """Run the poll loop job.
 
@@ -82,7 +79,7 @@ def run(
         config.telegram_bot_token, config.telegram_chat_id
     )
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
-    _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
+    _now_fn: Callable[[], "datetime"] = now_fn or now_nyc  # type: ignore[name-defined]
     llm_client: OpencodeGoClient | None = None
     if select_alerts_fn is None and alerts_affecting_route_fn is None:
         llm_client = OpencodeGoClient(
@@ -208,10 +205,9 @@ def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
     return False
 
 
-def _schedule_pings_for_plan(plan: Plan, store: "Store", now: "datetime") -> None:  # type: ignore[name-defined]
+def _schedule_pings_for_plan(plan: Plan, store: "Store", now: "datetime") -> None:  # type: ignore[name-defined, misc]
     """Schedule prep and leave pings for a plan (skip if already past)."""
     from commutecompass.format import format_prep_ping, format_leave_ping
-    from commutecompass.models import PingEntry
     from uuid import uuid4
 
     if plan.leave_at is not None and plan.leave_at > now:

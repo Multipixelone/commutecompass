@@ -9,7 +9,7 @@ from typing import Optional
 
 import sqlite3
 
-from commutecompass.models import Alert, Plan, PingEntry, ResolvedLocation
+from commutecompass.models import Plan, PingEntry, ResolvedLocation
 
 
 def _json_dumps(obj: object) -> str:

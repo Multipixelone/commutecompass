@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +21,6 @@ from commutecompass.models import (
     PingEntry,
     Plan,
     PrepConfig,
-    ResolvedLocation,
     Route,
     SchedulingConfig,
     OpencodeGoConfig,

@@ -57,9 +57,9 @@ def resolve(
     raw: Optional[str],
     *,
     venues: VenueRegistry,
-    store: "Store",  # type: ignore[name-defined]
+    store: "Store",  # type: ignore[name-defined, misc]
     geocoder: Callable[[str], Optional[GeocodeResult]],
-    llm: "OpencodeGoClient",  # type: ignore[name-defined]
+    llm: "OpencodeGoClient",  # type: ignore[name-defined, misc]
 ) -> Optional[ResolvedLocation]:
     """Resolve a raw location string through the resolution pipeline.
 

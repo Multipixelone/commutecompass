@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-import pytest
 
 from commutecompass.models import (
     Origin,

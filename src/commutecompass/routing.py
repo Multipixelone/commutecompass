@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import time
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -196,7 +195,6 @@ def _parse_route(response: dict) -> Optional[Route]:
         fare_cents = None
         if fare:
             fare_value = fare.get("value")
-            currency = fare.get("currency", "USD")
             if fare_value is not None:
                 # Convert to cents, assuming fare is in the local currency
                 fare_cents = int(fare_value * 100)

@@ -75,9 +75,8 @@ class CalendarClient:
         self._save_credentials(creds)
         self._creds = creds
 
-    def _build_service(self) -> "googleapiclient.discovery.Resource":
+    def _build_service(self) -> "googleapiclient.discovery.Resource":  # type: ignore[nomagic]
         """Build the Google Calendar API service object."""
-        import google.auth
         from googleapiclient import discovery
 
         creds = self._load_credentials()

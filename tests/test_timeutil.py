@@ -41,7 +41,6 @@ class TestToNyc:
         assert result.tzinfo == NYC_TZ
 
     def test_converts_aware_to_nyc(self) -> None:
-        utc_dt = datetime(2025, 3, 15, 14, 30, 0, tzinfo=datetime.now().astimezone(UTC).tzinfo)
         # Convert from a different zone
         other_tz = UTC
         aware_other = datetime(2025, 3, 15, 9, 30, 0, tzinfo=other_tz)

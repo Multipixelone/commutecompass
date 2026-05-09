@@ -4,21 +4,20 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecompass.models import Alert, Route, TransitLeg, Event
+from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.mta import (
-    fetch_alerts,
-    alerts_affecting_route,
-    select_actionable_alerts,
-    _fetch_feed,
-    _parse_alert,
+    _is_location_specific_alert,
+    _build_route_context,
     _time_overlaps,
     _systems_lines_overlap,
     NYC_TZ,
+    fetch_alerts,
+    alerts_affecting_route,
+    select_actionable_alerts,
 )
 
 
@@ -700,8 +699,6 @@ class TestSelectActionableAlerts:
 
 
 # ─── Location-specific alert filtering tests ─────────────────────────────────
-
-from commutecompass.mta import _is_location_specific_alert, _build_route_context
 
 
 class TestBuildRouteContext:
