@@ -320,7 +320,12 @@ def test_morning_run_idempotent(
     today_events: list[Event],
     sample_route: Route,
 ) -> None:
-    """Re-running overwrites plans cleanly (idempotent)."""
+    """Re-running morning replaces, not stacks, pending pings for each (event_id, kind).
+
+    The dedup invariant: scheduling the same (event_id, kind) twice results in
+    a single effective pending ping — the second run's values (fire_at/message)
+    replace the first, without multiplying the ping row count.
+    """
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
@@ -367,8 +372,9 @@ def test_morning_run_idempotent(
         import sqlite3
         with sqlite3.connect(minimal_config.paths.db_path) as conn:
             rows = conn.execute("SELECT COUNT(*) FROM pings").fetchone()
-            # Should have 4 pings total (prep+leave for evt-1 × 2 runs = 4; evt-2 has none)
-            assert rows[0] == 4
+            # Dedup invariant: one prep + one leave ping for evt-1 (evt-2 has no route → 0 pings).
+            # Second run replaces the first run's pings, it does not stack — total = 2, not 4.
+            assert rows[0] == 2
 
 
 def test_morning_run_cancel_stale_pings(

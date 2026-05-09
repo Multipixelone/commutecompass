@@ -80,6 +80,23 @@ class Store:
                     source TEXT NOT NULL
                 );
             """)
+            # Ensure only one unfired ping per (event_id, kind).
+            # Migrate existing duplicates first, keeping the row with the latest fire_at.
+            cursor = conn.execute("PRAGMA table_info(pings)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "event_id" in columns and "kind" in columns:
+                conn.execute("""
+                    DELETE FROM pings WHERE rowid NOT IN (
+                        SELECT MAX(rowid)
+                        FROM pings
+                        WHERE fired = 0
+                        GROUP BY event_id, kind
+                    )
+                """)
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_ping_event_kind_unfired
+                    ON pings(event_id, kind) WHERE fired = 0
+                """)
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 
@@ -150,8 +167,18 @@ class Store:
     # ── Ping CRUD ──────────────────────────────────────────────────────────────
 
     def schedule_ping(self, ping: PingEntry) -> None:
-        """Insert a ping entry."""
+        """Insert or replace a ping entry, ensuring at most one unfired ping per (event_id, kind).
+
+        Re-scheduling a ping for the same (event_id, kind) replaces any existing unfired row.
+        """
         with sqlite3.connect(self.db_path) as conn:
+            # Remove any existing unfired ping for the same (event_id, kind) first,
+            # then insert the new ping.  Using INSERT OR REPLACE would clobber the id
+            # which we want to keep from the caller's uuid, so we do it explicitly.
+            conn.execute(
+                "DELETE FROM pings WHERE event_id = ? AND kind = ? AND fired = 0",
+                (ping.event_id, ping.kind),
+            )
             conn.execute(
                 """
                 INSERT INTO pings (id, event_id, kind, fire_at, fired, fired_at, message)
