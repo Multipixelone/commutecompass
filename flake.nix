@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    git-hooks.url = "github:cachix/git-hooks.nix";
   };
 
   outputs =
@@ -11,6 +12,7 @@
       self,
       nixpkgs,
       flake-utils,
+      git-hooks,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -31,12 +33,35 @@
             google-auth-httplib2
             gtfs-realtime-bindings
             tomli
+            mypy
           ]
         );
+        pre-commit-check = git-hooks.lib.${system}.run {
+          src = ./.;
+          hooks = {
+            ruff.enable = true;
+            mypy = {
+              enable = true;
+              settings.binPath = "${pythonEnv}/bin/mypy";
+            };
+            pytest = {
+              enable = true;
+              name = "pytest";
+              entry = "${pythonEnv}/bin/pytest -q";
+              language = "system";
+              pass_filenames = false;
+              types = [ "python" ];
+            };
+          };
+        };
       in
       {
         packages.default = commutecompass;
         packages.commutecompass = commutecompass;
+
+        checks = {
+          inherit pre-commit-check;
+        };
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -44,7 +69,9 @@
             pythonEnv
             ruff
             mypy
-          ];
+            pre-commit
+          ] ++ pre-commit-check.enabledPackages;
+          shellHook = pre-commit-check.shellHook;
         };
       }
     )

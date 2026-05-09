@@ -18,3 +18,4 @@ build/
 *.so
 *.db
 *.db-journal
+/.pre-commit-config.yaml
