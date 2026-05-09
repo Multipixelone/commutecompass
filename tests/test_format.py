@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 
 from commutecompass.format import (
@@ -36,7 +37,7 @@ def make_event(
     calendar_name: str = "Theatre",
     start: datetime | None = None,
     location: str = "200 Example St",
-    location_kind: str = "address",
+    location_kind: Literal["address", "station"] = "address",
     location_value: str = "200 Example St, New York, NY 10001",
 ) -> Event:
     """Helper to create a test event with resolved location."""
@@ -257,6 +258,23 @@ class TestFormatDigest:
         assert "🎭" in result
         assert "🎓" in result
 
+    def test_format_digest_job_uses_ice_cream_icon_and_salt_straw_fallback(self) -> None:
+        """Job calendar uses 🍨 and Salt & Straw when location is missing."""
+        event = make_event(
+            id="evt-job",
+            title="Example User · 6pm - 11pm · SHIFT COORDINATOR",
+            calendar_name="Job",
+            start=datetime(2026, 5, 12, 18, 0, tzinfo=timezone.utc),
+            location="",
+        )
+        plan = make_plan(event, None)
+
+        result = format_digest([plan], [])
+
+        assert "🍨" in result
+        assert "Salt & Straw" in result
+        assert "(no location)" not in result
+
     def test_format_digest_with_alerts(self) -> None:
         """format_digest includes alert lines when provided."""
         event = make_event(id="evt1", title="Example Class", start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc))
@@ -379,6 +397,53 @@ class TestFormatDigest:
         # Check that special chars are escaped (result should not raise parse errors)
         # The raw output should contain backslashes before special chars
         assert "presentation" in result
+
+    def test_format_digest_truncates_multiline_nyc_us_address(self) -> None:
+        """NYC/US multiline addresses collapse to first line only."""
+        event = make_event(
+            id="evt1",
+            title="Example Class",
+            calendar_name="Theatre",
+            start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc),
+            location="240 Hudson St\nNew York NY 10013\nUnited States",
+            location_value="240 Hudson St, New York, NY 10013",
+        )
+        leg = TransitLeg(
+            mode="TRANSIT",
+            system="MTA Subway",
+            line="C",
+            headsign="Fulton St",
+            depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc),
+            arrive_at=datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc),
+            duration_seconds=2700,
+            summary="C train",
+        )
+        route = make_route([leg])
+        plan = make_plan(event, route)
+
+        result = format_digest([plan], [])
+
+        assert "240 Hudson St" in result
+        assert "New York NY 10013" not in result
+        assert "United States" not in result
+
+    def test_format_digest_keeps_non_nyc_or_non_us_multiline_parts(self) -> None:
+        """Non-NYC/US multiline addresses stay flattened with context preserved."""
+        event = make_event(
+            id="evt1",
+            title="Out of Town Meeting",
+            calendar_name="Personal",
+            start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc),
+            location="1 Main St\nJersey City NJ 07302\nUnited States",
+            location_value="1 Main St, Jersey City, NJ 07302",
+        )
+        plan = make_plan(event, None)
+
+        result = format_digest([plan], [])
+
+        assert "1 Main St" in result
+        assert "Jersey City NJ 07302" in result
+        assert "United States" in result
 
 
 class TestFormatPrepPing:
@@ -543,6 +608,34 @@ class TestFormatLeavePing:
 
         assert "Rehearsal" in result
         # Should not crash on parens
+
+    def test_format_leave_ping_truncates_multiline_nyc_us_address(self) -> None:
+        """Leave ping also truncates NYC/US multiline addresses."""
+        event = make_event(
+            id="evt1",
+            title="Example Class",
+            start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc),
+            location="240 Hudson St\nNew York NY 10013\nUnited States",
+            location_value="240 Hudson St, New York, NY 10013",
+        )
+        leg = TransitLeg(
+            mode="TRANSIT",
+            system="MTA Subway",
+            line="C",
+            headsign="Fulton St",
+            depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc),
+            arrive_at=datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc),
+            duration_seconds=2700,
+            summary="C train",
+        )
+        route = make_route([leg])
+        plan = make_plan(event, route)
+
+        result = format_leave_ping(plan)
+
+        assert "240 Hudson St" in result
+        assert "New York NY 10013" not in result
+        assert "United States" not in result
 
 
 class TestFormatServiceUpdate:

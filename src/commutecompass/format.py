@@ -49,6 +49,49 @@ def escape_md(s: str) -> str:
     return s
 
 
+def _is_us_country_line(line: str) -> bool:
+    """Return True when a line clearly denotes the United States."""
+    normalized = line.strip().casefold().replace(".", "")
+    return normalized in {
+        "united states",
+        "united states of america",
+        "usa",
+        "us",
+    }
+
+
+def _is_new_york_line(line: str) -> bool:
+    """Return True when a line appears to be New York city/state location text."""
+    normalized = line.strip().casefold().replace(",", " ")
+    normalized = " ".join(normalized.split())
+    return "new york" in normalized and " ny" in f" {normalized}"
+
+
+def _compact_location(location_raw: str | None, *, fallback: str) -> str:
+    """Compact multiline locations for cleaner message output.
+
+    For standard NYC + United States addresses, show just the street line.
+    Otherwise, flatten multiline addresses onto a single comma-separated line.
+    """
+    if not location_raw:
+        return fallback
+
+    lines = [line.strip() for line in location_raw.splitlines() if line.strip()]
+    if not lines:
+        return fallback
+    if len(lines) == 1:
+        return lines[0]
+
+    first_line = lines[0]
+    second_line = lines[1] if len(lines) >= 2 else ""
+    last_line = lines[-1]
+
+    if _is_new_york_line(second_line) and _is_us_country_line(last_line):
+        return first_line
+
+    return ", ".join(lines)
+
+
 def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
     """Format the daily digest message.
 
@@ -94,6 +137,8 @@ def _format_plan_summary(plan: Plan) -> str:
     cal_lower = event.calendar_name.lower()
     if "theatre" in cal_lower or "stage" in cal_lower:
         icon = "🎭"
+    elif "job" in cal_lower or "work" in cal_lower:
+        icon = "🍨"
     elif "school" in cal_lower or "class" in cal_lower:
         icon = "🎓"
     elif "personal" in cal_lower:
@@ -101,7 +146,11 @@ def _format_plan_summary(plan: Plan) -> str:
     else:
         icon = "📍"
     lines.append(f"{icon} *{escape_md(event.title)}* \\({escape_md(event.calendar_name)}\\)")
-    lines.append(f"  {start_str} at {escape_md(event.location_raw or '(no location)')}")
+    location_fallback = "Salt & Straw" if ("job" in cal_lower or "work" in cal_lower) else "(no location)"
+    location = _compact_location(event.location_raw, fallback=location_fallback)
+    if ("job" in cal_lower or "work" in cal_lower) and location.strip() == "(no location)":
+        location = "Salt & Straw"
+    lines.append(f"  {start_str} at {escape_md(location)}")
 
     if plan.error:
         lines.append(f"  ❌ {escape_md(plan.error)}")
@@ -303,7 +352,7 @@ def format_leave_ping(plan: Plan) -> str:
 
     title = escape_md(plan.event.title)
     start_str = plan.event.start.strftime("%-I:%M %p")
-    location = escape_md(plan.event.location_raw or "unknown location")
+    location = escape_md(_compact_location(plan.event.location_raw, fallback="unknown location"))
 
     lines = [
         "🚶 *Leave now*",
