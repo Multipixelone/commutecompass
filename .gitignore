@@ -19,3 +19,4 @@ build/
 *.db
 *.db-journal
 /.pre-commit-config.yaml
+.claude/settings.local.json
