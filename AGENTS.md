@@ -100,6 +100,7 @@ If you change any of these, update tests and mention in PR notes:
 
 ## PR / commit checklist
 
+- [ ] Commits are atomic (as small as possible), semantic, and scoped
 - [ ] No secrets in diff
 - [ ] Tests added/updated for changed behavior
 - [ ] `pytest` passes for touched areas
