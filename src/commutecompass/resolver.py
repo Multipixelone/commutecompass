@@ -7,7 +7,7 @@ import re
 from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.geocode import GeocodeResult
-from commutecompass.models import ResolvedLocation
+from commutecompass.models import ResolvedLocation, ZoneInfo
 from commutecompass.venues import VenueRegistry
 
 if TYPE_CHECKING:
@@ -64,11 +64,13 @@ def resolve(
     store: "Store",
     geocoder: Callable[[str], Optional[GeocodeResult]],
     llm: "OpencodeGoClient",
+    ha_zones: Optional[dict[str, ZoneInfo]] = None,
 ) -> Optional[ResolvedLocation]:
     """Resolve a raw location string through the resolution pipeline.
 
-    Pipeline (§6.10):
+    Pipeline (§6.10, with HA zones in front):
     1. Empty raw → None
+    1b. HA zone friendly_name match → return (not cached, so HA edits propagate)
     2. Cache hit (store.get_geocode) → return cached
     3. Venue registry match → cache + return
     4. looks_like_address → geocode → cache + return
@@ -82,6 +84,19 @@ def resolve(
         return None
 
     raw = raw.strip()
+
+    # ── Step 1b: HA zone match ────────────────────────────────────────────────
+    if ha_zones:
+        zone = ha_zones.get(raw.lower())
+        if zone is not None:
+            log.debug("resolver: ha_zone match for %r -> %s", raw, zone.entity_id)
+            return ResolvedLocation(
+                kind="address",
+                value=zone.name,
+                lat=zone.lat,
+                lon=zone.lon,
+                source="ha_zone",
+            )
 
     # ── Step 2: cache hit ───────────────────────────────────────────────────────
     cached = store.get_geocode(raw)
