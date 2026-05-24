@@ -23,7 +23,7 @@ from commutecompass.calendar_client import CalendarClient
 from commutecompass.config import Config
 from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
 from commutecompass.mta import fetch_alerts
-from commutecompass.notify import TelegramNotifier
+from commutecompass.notify import build_notifier
 from commutecompass.planner import plan_event
 from commutecompass.store import Store
 from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
@@ -209,10 +209,7 @@ def run(config: Config) -> None:  # noqa: C901
 
     # ── 6. Build and send digest ──────────────────────────────────────────────
     digest = format_digest(plans, affecting_alerts)
-    notifier = TelegramNotifier(
-        bot_token=config.telegram_bot_token,
-        chat_id=config.telegram_chat_id,
-    )
+    notifier = build_notifier(config)
     sent = notifier.send(digest)
     if sent:
         logger.info("morning job: digest sent successfully")

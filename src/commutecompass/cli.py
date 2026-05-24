@@ -223,20 +223,17 @@ def plan(ctx: click.Context, event_id: str, here: bool) -> None:
 @cli.command(name="test-notify")
 @click.pass_context
 def test_notify(ctx: click.Context) -> None:
-    """Send a test Telegram message."""
+    """Send a test message via the configured notifier (telegram or stdout)."""
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
 
-    from commutecompass.notify import TelegramNotifier
+    from commutecompass.notify import build_notifier
 
-    notifier = TelegramNotifier(
-        bot_token=cfg.telegram_bot_token,
-        chat_id=cfg.telegram_chat_id,
-    )
+    notifier = build_notifier(cfg)
 
     ok = notifier.send("🟢 commutecompass is alive — test notification OK")
     if ok:
-        click.echo("Test message sent successfully.")
+        click.echo(f"Test message emitted via {cfg.notify.mode} notifier.", err=True)
     else:
         click.echo("Failed to send test message (see stderr for logs).", err=True)
         sys.exit(1)
@@ -263,6 +260,146 @@ def where(ctx: click.Context) -> None:
 
     age_seconds = int((now_nyc() - cl.captured_at).total_seconds())
     click.echo(f"lat={cl.lat:.6f} lon={cl.lon:.6f} zone={cl.zone or '-'} age={age_seconds}s source={cl.source}")
+
+
+# ─────────── digest-preview ──────────────────────────────────────────────────
+
+
+@cli.command(name="digest-preview")
+@click.pass_context
+def digest_preview(ctx: click.Context) -> None:
+    """Print today's digest from cached plans without sending anything.
+
+    Reads the plans already stored by the latest ``morning`` run and renders
+    them via the same formatter the digest uses. No Telegram traffic, no
+    re-planning, no API calls. Useful for chat queries ("what's on today?").
+    """
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    from commutecompass.format import format_digest
+    from commutecompass.store import Store
+
+    store = Store(Path(cfg.paths.db_path))
+    plans = store.today_plans()
+    click.echo(format_digest(plans, alerts=[]))
+
+
+# ─────────── adjust EVENT_ID ─────────────────────────────────────────────────
+
+
+@cli.command()
+@click.argument("event_id")
+@click.option(
+    "--add-prep",
+    type=int,
+    required=True,
+    help="Minutes to add to the prep buffer (negative shrinks it). "
+    "Shifts prep_at earlier by this many minutes.",
+)
+@click.pass_context
+def adjust(ctx: click.Context, event_id: str, add_prep: int) -> None:
+    """Shift today's prep time for EVENT_ID by --add-prep minutes.
+
+    Use case: "I need to shower before this event, add 45 min" →
+    ``adjust <id> --add-prep 45``.  The existing poll cycle re-fires the
+    rescheduled prep ping at its new time.
+    """
+    import uuid
+    from datetime import timedelta
+
+    from commutecompass.format import format_prep_ping
+    from commutecompass.models import PingEntry
+    from commutecompass.store import Store
+    from commutecompass.timeutil import now_nyc
+
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    store = Store(Path(cfg.paths.db_path))
+    plan = store.get_plan(event_id)
+    if plan is None:
+        click.echo(f"No plan found for event {event_id}.", err=True)
+        sys.exit(1)
+    if plan.prep_at is None or plan.leave_at is None:
+        click.echo(
+            f"Event {event_id} has no scheduled prep/leave time — cannot adjust.",
+            err=True,
+        )
+        sys.exit(1)
+
+    now = now_nyc()
+    new_prep_at = plan.prep_at - timedelta(minutes=add_prep)
+    if new_prep_at < now:
+        new_prep_at = now
+    plan.prep_at = new_prep_at
+
+    store.upsert_plan(plan)
+
+    # Re-schedule the prep ping at the new time. schedule_ping replaces any
+    # existing unfired prep ping for this event atomically.
+    if new_prep_at > now:
+        store.schedule_ping(
+            PingEntry(
+                id=str(uuid.uuid4()),
+                event_id=event_id,
+                kind="prep",
+                fire_at=new_prep_at,
+                fired=False,
+                message=format_prep_ping(plan),
+            )
+        )
+
+    direction = "earlier" if add_prep > 0 else "later"
+    click.echo(
+        f"Adjusted prep for {event_id}: prep_at {new_prep_at.strftime('%-I:%M %p')} "
+        f"({abs(add_prep)} min {direction}); leave_at "
+        f"{plan.leave_at.strftime('%-I:%M %p')} unchanged."
+    )
+
+
+# ─────────── config (group) ──────────────────────────────────────────────────
+
+
+@cli.group()
+def config() -> None:
+    """View or edit allowlisted config fields."""
+
+
+@config.command(name="show")
+@click.option("--json", "as_json", is_flag=True, help="Emit pretty JSON instead of TOML.")
+@click.pass_context
+def config_show(ctx: click.Context, as_json: bool) -> None:
+    """Print the effective config with secrets redacted."""
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    from commutecompass.config import render_config_json, render_config_toml
+
+    if as_json:
+        click.echo(render_config_json(cfg))
+    else:
+        click.echo(render_config_toml(cfg))
+
+
+@config.command(name="set")
+@click.argument("key")
+@click.argument("value")
+@click.pass_context
+def config_set(ctx: click.Context, key: str, value: str) -> None:
+    """Set an allowlisted config field. KEY uses dotted form (e.g. prep.prep_minutes)."""
+    from commutecompass.config import ConfigSetError, update_config_field
+
+    config_path: Path = ctx.obj["config_path"]
+    try:
+        coerced = update_config_field(config_path, key, value)
+    except ConfigSetError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+    except OSError as exc:
+        click.echo(f"Error writing {config_path}: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"{key} = {coerced!r}")
 
 
 # ─────────── bot (stub) ──────────────────────────────────────────────────────

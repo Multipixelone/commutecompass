@@ -12,7 +12,7 @@ from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 if TYPE_CHECKING:
     from datetime import datetime
     from commutecompass.store import Store
-    from commutecompass.notify import TelegramNotifier
+    from commutecompass.notify import Notifier
     from commutecompass.llm import OpencodeGoClient
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ def run(
     fetch_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
     alerts_affecting_route_fn: Optional[Callable[..., list[Alert]]] = None,
     select_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
-    notifier: Optional[TelegramNotifier] = None,
+    notifier: Optional["Notifier"] = None,
     plan_event_fn: Optional[Callable[..., Plan]] = None,
     now_fn: Optional[Callable[[], "datetime"]] = None,
     ha_fetch_fn: Optional[Callable[..., Optional[CurrentLocation]]] = None,
@@ -61,7 +61,7 @@ def run(
     from commutecompass.mta import alerts_affecting_route as _affecting
     from commutecompass.mta import fetch_alerts as _fetch
     from commutecompass.mta import select_actionable_alerts as _select_actionable
-    from commutecompass.notify import TelegramNotifier as _Notifier
+    from commutecompass.notify import build_notifier
     from commutecompass.planner import plan_event as _plan_event
     from commutecompass.llm import OpencodeGoClient
 
@@ -78,9 +78,7 @@ def run(
         )
     else:
         _select_alerts = _select_actionable
-    _notifier: TelegramNotifier = notifier or _Notifier(
-        config.telegram_bot_token, config.telegram_chat_id
-    )
+    _notifier: Notifier = notifier or build_notifier(config)
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
     _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
     if ha_fetch_fn is None:

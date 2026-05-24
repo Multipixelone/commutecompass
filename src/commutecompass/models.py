@@ -68,6 +68,10 @@ class HomeAssistantConfig(BaseModel):
     replan_window_minutes: int = 30
 
 
+class NotifyConfig(BaseModel):
+    mode: Literal["stdout", "telegram"] = "stdout"
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -78,6 +82,7 @@ class Config(BaseModel):
     mta: MtaConfig
     location_overrides: list[LocationOverride] = []
     home_assistant: HomeAssistantConfig = HomeAssistantConfig()
+    notify: NotifyConfig = NotifyConfig()
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
     telegram_bot_token: str = ""

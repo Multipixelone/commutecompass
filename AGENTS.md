@@ -61,15 +61,17 @@ commutecompass --config examples/config.toml poll
 
 ## Architecture map (quick)
 
-- `config.py`: TOML + env loading into `Config`
+- `config.py`: TOML + env loading into `Config`; `redact_for_display`, `update_config_field` for the `config` CLI
 - `calendar_client.py`: OAuth/token + Google Calendar fetch
 - `resolver.py`: raw location -> cache/venues/geocode/LLM pipeline
 - `planner.py`: event -> resolved location -> route -> leave/prep times
 - `store.py`: SQLite state (plans, pings, geocode cache, alerts_seen)
 - `format.py`: Telegram MarkdownV2-safe messages
-- `notify.py`: Telegram API send
+- `notify.py`: dispatches between `TelegramNotifier` and `StdoutNotifier` per `[notify].mode`; `build_notifier(config)` is the only entry point job code should use
 - `jobs/morning.py`: daily planning + digest
 - `jobs/poll.py`: due pings + alert-triggered replanning
+- `skills/commutecompass/`: OpenClaw skill (SKILL.md + scripts/ + references/); model-invoked dispatch for chat queries and adjustments
+- `contrib/openclaw-send.sh`: cron/systemd glue that splits stdout-mode messages and pipes each one to `openclaw message send`
 
 ## Known gotchas
 
@@ -96,7 +98,10 @@ If you change any of these, update tests and mention in PR notes:
 - message formatting (`format.py`),
 - location resolution order/heuristics (`resolver.py`),
 - DB schema or serialization (`store.py`),
-- scheduling semantics in jobs.
+- scheduling semantics in jobs,
+- new CLI subcommands or removed ones — update `skills/commutecompass/SKILL.md` (dispatch table) and add/remove the corresponding script under `skills/commutecompass/scripts/`,
+- `CONFIG_SET_ALLOWLIST` in `config.py` — keep `skills/commutecompass/references/config-allowlist.md` in sync,
+- the stdout-mode delimiters in `notify.py` — `contrib/openclaw-send.sh` parses them and must match.
 
 ## PR / commit checklist
 

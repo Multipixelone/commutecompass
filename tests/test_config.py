@@ -8,10 +8,16 @@ from pathlib import Path
 import pytest
 
 from commutecompass.config import (
+    CONFIG_SET_ALLOWLIST,
     Config,
     ConfigError,
+    ConfigSetError,
     load_config,
     load_from_env,
+    redact_for_display,
+    render_config_json,
+    render_config_toml,
+    update_config_field,
 )
 
 
@@ -124,8 +130,11 @@ class TestLoadFromEnv:
 
 class TestLoadConfig:
     def test_happy_path(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
-        """Full TOML + full env produces a valid Config."""
+        """Full TOML + full env produces a valid Config (telegram mode forces creds to load)."""
         _apply_env(required_env)
+        # Default notify.mode is "stdout"; switch to "telegram" so telegram_* fields populate.
+        with open(minimal_toml, "a") as fh:
+            fh.write('\n[notify]\nmode = "telegram"\n')
         cfg = load_config(minimal_toml)
 
         assert isinstance(cfg, Config)
@@ -146,8 +155,19 @@ class TestLoadConfig:
         assert cfg.calendars[0].name == "Theatre"
         assert cfg.calendars[1].enabled is True  # default
 
+    def test_default_notify_mode_is_stdout_and_skips_telegram_env(
+        self, minimal_toml: Path, required_env: dict[str, str]
+    ) -> None:
+        """With default notify.mode = "stdout", telegram env vars are not required."""
+        _apply_env(required_env)
+        _clear_env(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
+        cfg = load_config(minimal_toml)
+        assert cfg.notify.mode == "stdout"
+        assert cfg.telegram_bot_token == ""
+        assert cfg.telegram_chat_id == 0
+
     def test_missing_env_raises_before_parsing_toml(self, minimal_toml: Path) -> None:
-        """With no env vars set, we get a ConfigError before touching the file."""
+        """With no env vars set in default (stdout) mode, only the 3 always-required vars are reported."""
         _clear_env([
             "GOOGLE_MAPS_API_KEY",
             "GOOGLE_OAUTH_CLIENT_SECRET",
@@ -156,13 +176,21 @@ class TestLoadConfig:
             "OPENCODE_GO_TOKEN",
         ])
         err = pytest.raises(ConfigError, load_config, minimal_toml)
-        # All five missing vars should be reported
-        assert len(err.value.missing) == 5
+        # stdout mode is default; only non-telegram vars are required
+        assert set(err.value.missing) == {
+            "GOOGLE_MAPS_API_KEY",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            "OPENCODE_GO_TOKEN",
+        }
 
-    def test_missing_env_aggregates_all(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
-        """Only TELEGRAM_CHAT_ID missing — error lists exactly that one."""
+    def test_missing_telegram_env_in_telegram_mode_raises(
+        self, minimal_toml: Path, required_env: dict[str, str]
+    ) -> None:
+        """When notify.mode = "telegram", missing TELEGRAM_CHAT_ID is reported."""
         _apply_env(required_env)
         _clear_env(["TELEGRAM_CHAT_ID"])
+        with open(minimal_toml, "a") as fh:
+            fh.write('\n[notify]\nmode = "telegram"\n')
         err = pytest.raises(ConfigError, load_config, minimal_toml)
         assert err.value.missing == ["TELEGRAM_CHAT_ID"]
 
@@ -454,3 +482,144 @@ entity_id = "device_tracker.iphone"
             assert cfg.home_assistant_token == "ha-tok"
         finally:
             os.environ.pop("HOME_ASSISTANT_TOKEN", None)
+
+
+# ─────────── Redaction ────────────────────────────────────────────────────────
+
+
+class TestRedactForDisplay:
+    def test_redacts_token_suffix(self) -> None:
+        result = redact_for_display({"telegram_bot_token": "123:abc"})
+        assert result == {"telegram_bot_token": "***REDACTED***"}
+
+    def test_redacts_secret_suffix(self) -> None:
+        result = redact_for_display(
+            {"google_oauth_client_secret_json": '{"client":"x"}'}
+        )
+        assert result == {"google_oauth_client_secret_json": "***REDACTED***"}
+
+    def test_redacts_key_suffix(self) -> None:
+        result = redact_for_display({"google_maps_api_key": "AIza..."})
+        assert result == {"google_maps_api_key": "***REDACTED***"}
+
+    def test_preserves_non_secret_fields(self) -> None:
+        data = {"prep": {"prep_minutes": 20}, "origin": {"address": "x"}}
+        assert redact_for_display(data) == data
+
+    def test_recursive_into_nested(self) -> None:
+        data = {"outer": {"home_assistant_token": "secret", "enabled": True}}
+        result = redact_for_display(data)
+        assert result["outer"]["home_assistant_token"] == "***REDACTED***"
+        assert result["outer"]["enabled"] is True
+
+    def test_empty_secret_stays_empty(self) -> None:
+        """Don't replace empty/zero values — only non-empty secrets get redacted."""
+        result = redact_for_display({"telegram_bot_token": ""})
+        assert result == {"telegram_bot_token": ""}
+
+
+# ─────────── render_config_toml / json ───────────────────────────────────────
+
+
+class TestRenderConfig:
+    def _cfg(self, required_env: dict[str, str], minimal_toml: Path) -> Config:
+        _apply_env(required_env)
+        with open(minimal_toml, "a") as fh:
+            fh.write('\n[notify]\nmode = "telegram"\n')
+        return load_config(minimal_toml)
+
+    def test_render_toml_redacts(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
+        cfg = self._cfg(required_env, minimal_toml)
+        out = render_config_toml(cfg)
+        assert "***REDACTED***" in out
+        assert required_env["TELEGRAM_BOT_TOKEN"] not in out
+        assert required_env["GOOGLE_MAPS_API_KEY"] not in out
+
+    def test_render_json_redacts(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
+        cfg = self._cfg(required_env, minimal_toml)
+        out = render_config_json(cfg)
+        assert "***REDACTED***" in out
+        assert required_env["TELEGRAM_BOT_TOKEN"] not in out
+
+
+# ─────────── update_config_field ─────────────────────────────────────────────
+
+
+class TestUpdateConfigField:
+    def _write_toml(self, tmp_path: Path) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text(
+            """\
+# Top-level comment that must survive
+[prep]
+prep_minutes = 20  # inline comment
+safety_buffer_minutes = 5
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+"""
+        )
+        return p
+
+    def test_allowlist_unknown_key_rejected(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        with pytest.raises(ConfigSetError) as exc_info:
+            update_config_field(p, "telegram_bot_token", "abc")
+        # Error names the offending key and lists allowed ones
+        assert "telegram_bot_token" in str(exc_info.value)
+        assert "prep.prep_minutes" in str(exc_info.value)
+
+    def test_int_value_coerced_and_written(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        result = update_config_field(p, "prep.prep_minutes", "30")
+        assert result == 30
+        body = p.read_text()
+        assert "prep_minutes = 30" in body
+
+    def test_invalid_int_raises(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        with pytest.raises(ConfigSetError, match="integer"):
+            update_config_field(p, "prep.prep_minutes", "thirty")
+
+    def test_hhmm_value_validated_and_written(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        result = update_config_field(p, "scheduling.morning_run_time", "07:15")
+        assert result == "07:15"
+        body = p.read_text()
+        assert 'morning_run_time = "07:15"' in body
+
+    def test_invalid_hhmm_raises(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        with pytest.raises(ConfigSetError, match="HH:MM"):
+            update_config_field(p, "scheduling.morning_run_time", "25:99")
+
+    def test_notify_mode_allowlist(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        update_config_field(p, "notify.mode", "telegram")
+        body = p.read_text()
+        assert 'mode = "telegram"' in body
+
+    def test_notify_mode_invalid(self, tmp_path: Path) -> None:
+        p = self._write_toml(tmp_path)
+        with pytest.raises(ConfigSetError, match="stdout"):
+            update_config_field(p, "notify.mode", "discord")
+
+    def test_comments_preserved(self, tmp_path: Path) -> None:
+        """tomlkit must preserve the top-level comment after a set."""
+        p = self._write_toml(tmp_path)
+        update_config_field(p, "prep.prep_minutes", "25")
+        body = p.read_text()
+        assert "# Top-level comment that must survive" in body
+
+    def test_allowlist_includes_expected_keys(self) -> None:
+        for key in [
+            "prep.prep_minutes",
+            "prep.safety_buffer_minutes",
+            "scheduling.morning_run_time",
+            "scheduling.poll_interval_seconds",
+            "scheduling.quiet_hours_start",
+            "scheduling.quiet_hours_end",
+            "notify.mode",
+        ]:
+            assert key in CONFIG_SET_ALLOWLIST
