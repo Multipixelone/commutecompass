@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.config import Config
-from commutecompass.models import Alert, CurrentLocation, Plan, PingEntry
+from commutecompass.models import Alert, CurrentLocation, Plan, PingEntry, ZoneInfo
 from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ def run(
     plan_event_fn: Optional[Callable[..., Plan]] = None,
     now_fn: Optional[Callable[[], "datetime"]] = None,
     ha_fetch_fn: Optional[Callable[..., Optional[CurrentLocation]]] = None,
+    ha_zones_fn: Optional[Callable[..., dict[str, ZoneInfo]]] = None,
 ) -> None:
     """Run the poll loop job.
 
@@ -88,6 +89,11 @@ def run(
         _ha_fetch_fn: Callable[..., Optional[CurrentLocation]] = _ha_fetch
     else:
         _ha_fetch_fn = ha_fetch_fn
+    if ha_zones_fn is None:
+        from commutecompass.ha_client import fetch_zones as _ha_fetch_zones
+        _ha_zones_fn: Callable[..., dict[str, ZoneInfo]] = _ha_fetch_zones
+    else:
+        _ha_zones_fn = ha_zones_fn
     llm_client: OpencodeGoClient | None = None
     if select_alerts_fn is None and alerts_affecting_route_fn is None:
         llm_client = OpencodeGoClient(
@@ -96,13 +102,15 @@ def run(
             model=config.opencode_go.model,
         )
 
-    # ── Phase 0: refresh current location from Home Assistant ──────────────────
+    # ── Phase 0: refresh current location & zones from Home Assistant ─────────
+    ha_zones: dict[str, ZoneInfo] = {}
     if config.home_assistant.enabled:
         try:
             loc = _ha_fetch_fn(
                 config.home_assistant.base_url,
                 config.home_assistant.entity_id,
                 config.home_assistant_token,
+                min_accuracy_m=float(config.home_assistant.min_gps_accuracy_meters),
             )
         except Exception as exc:
             logger.warning("HA fetch raised: %s", exc)
@@ -110,8 +118,21 @@ def run(
         if loc is not None:
             _store.upsert_current_location(loc)
             logger.debug(
-                "ha_pull: ok lat=%.5f lon=%.5f zone=%s", loc.lat, loc.lon, loc.zone
+                "ha_pull: ok lat=%.5f lon=%.5f zone=%s acc=%s",
+                loc.lat,
+                loc.lon,
+                loc.zone,
+                loc.accuracy_m,
             )
+
+        try:
+            ha_zones = _ha_zones_fn(
+                config.home_assistant.base_url,
+                config.home_assistant_token,
+            )
+        except Exception as exc:
+            logger.warning("HA fetch_zones raised: %s", exc)
+            ha_zones = {}
 
     # ── Phase 1: quiet-hours check ─────────────────────────────────────────────
     now = _now_fn()
@@ -174,6 +195,7 @@ def run(
                     venues=None,  # will be loaded by planner if needed
                     store=_store,
                     llm=None,  # not needed for replan; location already resolved
+                    ha_zones=ha_zones,
                 )
             except Exception as exc:
                 logger.error("Replan failed for event %s: %s", plan.event.id, exc)
@@ -227,6 +249,7 @@ def run(
                     venues=None,
                     store=_store,
                     llm=None,
+                    ha_zones=ha_zones,
                 )
             except Exception as exc:
                 logger.warning("Location replan failed for %s: %s", plan.event.id, exc)
