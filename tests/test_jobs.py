@@ -213,7 +213,7 @@ def test_morning_run_fetches_and_plans(
         evt2_plan = Plan(event=today_events[1], error="location_unresolved")
 
         def mock_plan_event(
-            event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None
+            event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any
         ) -> Plan:
             if event.id == "evt-1":
                 return evt1_plan
@@ -302,7 +302,7 @@ def test_morning_run_skips_past_pings(
             prep_at=past_leave - timedelta(minutes=20),
         )
 
-        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any) -> Plan:
             return past_plan
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -349,7 +349,7 @@ def test_morning_run_idempotent(
 
         call_count = 0
 
-        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any) -> Plan:
             nonlocal call_count
             call_count += 1
             if event.id == "evt-1":
@@ -449,7 +449,7 @@ def test_morning_run_cancel_stale_pings(
             prep_at=now + timedelta(hours=3) - timedelta(minutes=65),
         )
 
-        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any) -> Plan:
             return plan1
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -504,7 +504,7 @@ def test_morning_run_with_affecting_alerts(
         )
         plan2 = Plan(event=today_events[1], error="location_unresolved")
 
-        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any) -> Plan:
             if event.id == "evt-1":
                 return plan1
             return plan2
@@ -547,7 +547,7 @@ def test_morning_run_telegram_failure_is_not_fatal(
             prep_at=now + timedelta(hours=3) - timedelta(minutes=65),
         )
 
-        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None) -> Plan:
+        def mock_plan_event(event: Event, config: Config, venues: Any, store: Any, llm: Any, *, mode_override: str | None = None, **_extra: Any) -> Plan:
             return plan1
 
         with patch("commutecompass.jobs.morning.plan_event", side_effect=mock_plan_event):
@@ -1150,7 +1150,7 @@ def test_poll_calls_ha_fetch_when_enabled_and_skips_when_disabled(
 
     fetch_calls: list[tuple[str, str, str]] = []
 
-    def _fetch(base_url: str, entity_id: str, token: str) -> CurrentLocation:
+    def _fetch(base_url: str, entity_id: str, token: str, **_kw: Any) -> CurrentLocation:
         fetch_calls.append((base_url, entity_id, token))
         return CurrentLocation(
             lat=40.7128, lon=-74.006, zone="not_home", captured_at=now

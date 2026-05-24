@@ -97,6 +97,10 @@ class Store:
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_ping_event_kind_unfired
                     ON pings(event_id, kind) WHERE fired = 0
                 """)
+            # Phase 1: add gps_accuracy column to current_location if missing.
+            cl_cols = {row[1] for row in conn.execute("PRAGMA table_info(current_location)").fetchall()}
+            if "accuracy_m" not in cl_cols:
+                conn.execute("ALTER TABLE current_location ADD COLUMN accuracy_m REAL")
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 
@@ -305,14 +309,15 @@ class Store:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
-                INSERT INTO current_location (id, lat, lon, zone, captured_at, source)
-                VALUES ('singleton', ?, ?, ?, ?, ?)
+                INSERT INTO current_location (id, lat, lon, zone, captured_at, source, accuracy_m)
+                VALUES ('singleton', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     lat = excluded.lat,
                     lon = excluded.lon,
                     zone = excluded.zone,
                     captured_at = excluded.captured_at,
-                    source = excluded.source
+                    source = excluded.source,
+                    accuracy_m = excluded.accuracy_m
                 """,
                 (
                     loc.lat,
@@ -320,6 +325,7 @@ class Store:
                     loc.zone,
                     loc.captured_at.isoformat(),
                     loc.source,
+                    loc.accuracy_m,
                 ),
             )
 
@@ -332,7 +338,7 @@ class Store:
         """
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT lat, lon, zone, captured_at, source "
+                "SELECT lat, lon, zone, captured_at, source, accuracy_m "
                 "FROM current_location WHERE id = 'singleton'"
             ).fetchone()
         if row is None:
@@ -350,4 +356,5 @@ class Store:
             zone=row[2],
             captured_at=captured_at,
             source=row[4],
+            accuracy_m=row[5],
         )

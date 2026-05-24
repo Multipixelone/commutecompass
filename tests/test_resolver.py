@@ -421,3 +421,120 @@ class TestResolve:
 
         assert result is None
         mock_store.cache_geocode.assert_not_called()
+
+
+# ── HA zone short-circuit ─────────────────────────────────────────────────────
+
+
+class TestHaZoneMatch:
+    def _zones(self) -> dict:
+        from commutecompass.models import ZoneInfo
+
+        return {
+            "work": ZoneInfo(
+                name="Work",
+                lat=40.7346,
+                lon=-74.0055,
+                radius_m=128.0,
+                entity_id="zone.work",
+            ),
+            "madison theatre": ZoneInfo(
+                name="Madison Theatre",
+                lat=40.6862,
+                lon=-73.6266,
+                radius_m=172.0,
+                entity_id="zone.madison_theatre",
+            ),
+        }
+
+    def test_zone_match_short_circuits_before_cache(
+        self,
+        mock_store: MagicMock,
+        mock_geocoder: MagicMock,
+        mock_llm: MagicMock,
+        venue_registry: VenueRegistry,
+    ) -> None:
+        result = resolve(
+            "Madison Theatre",
+            venues=venue_registry,
+            store=mock_store,
+            geocoder=mock_geocoder,
+            llm=mock_llm,
+            ha_zones=self._zones(),
+        )
+
+        assert result is not None
+        assert result.source == "ha_zone"
+        assert result.lat == 40.6862
+        assert result.value == "Madison Theatre"
+        # Cache neither read nor written so HA edits propagate next call.
+        mock_store.get_geocode.assert_not_called()
+        mock_store.cache_geocode.assert_not_called()
+        mock_geocoder.assert_not_called()
+
+    def test_zone_match_is_case_insensitive(
+        self,
+        mock_store: MagicMock,
+        mock_geocoder: MagicMock,
+        mock_llm: MagicMock,
+        venue_registry: VenueRegistry,
+    ) -> None:
+        result = resolve(
+            "  work  ",
+            venues=venue_registry,
+            store=mock_store,
+            geocoder=mock_geocoder,
+            llm=mock_llm,
+            ha_zones=self._zones(),
+        )
+        assert result is not None
+        assert result.source == "ha_zone"
+
+    def test_no_partial_match(
+        self,
+        mock_store: MagicMock,
+        mock_geocoder: MagicMock,
+        mock_llm: MagicMock,
+        venue_registry: VenueRegistry,
+    ) -> None:
+        """'Office Tower' must NOT match a 'office' zone — exact (lowercased) only."""
+        from commutecompass.models import ZoneInfo
+
+        zones = {
+            "office": ZoneInfo(
+                name="Office",
+                lat=40.0,
+                lon=-74.0,
+                entity_id="zone.office",
+            ),
+        }
+        mock_llm.resolve_location.return_value = None
+        result = resolve(
+            "Office Tower",
+            venues=venue_registry,
+            store=mock_store,
+            geocoder=mock_geocoder,
+            llm=mock_llm,
+            ha_zones=zones,
+        )
+        # Falls through to cache check and downstream — no zone short-circuit.
+        mock_store.get_geocode.assert_called_once()
+        assert result is None or result.source != "ha_zone"
+
+    def test_no_zones_arg_keeps_existing_behavior(
+        self,
+        mock_store: MagicMock,
+        mock_geocoder: MagicMock,
+        mock_llm: MagicMock,
+        venue_registry: VenueRegistry,
+    ) -> None:
+        result = resolve(
+            "200 Example St",
+            venues=venue_registry,
+            store=mock_store,
+            geocoder=mock_geocoder,
+            llm=mock_llm,
+        )
+        # Hits venue registry as before.
+        assert result is not None
+        assert result.source == "known_venues"

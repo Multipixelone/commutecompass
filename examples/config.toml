@@ -40,19 +40,51 @@ lirr_alerts_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys
 bus_alerts_url = "https://gtfsrt.prod.obanyc.com/alerts"
 
 # ── Home Assistant integration (optional) ─────────────────────────────────────
-# When enabled, each poll-tick pulls the device_tracker entity's latest state
-# from Home Assistant. If that location is fresher than max_age_minutes and the
-# tracker is not in the home_zone, planning uses it as the trip origin instead
-# of [origin] above. Within replan_window_minutes of an event's leave time, the
-# poll job also re-plans against the live location and pushes a Telegram update
-# if the route shifts by ≥ 5 min. Requires HOME_ASSISTANT_TOKEN in the env.
+# When enabled, each poll-tick pulls the tracker entity's latest state from HA.
+# If the fix is fresh and accurate enough:
+#   - state matches a [[home_assistant.zone_origins]] entry → that origin is
+#     used (with its subway/LIRR hints)
+#   - state matches home_zone → [origin] above is used
+#   - otherwise → the live GPS coords are used as the trip origin
+# Within replan_window_minutes of an event's leave time the poll job re-plans
+# against the live location and pushes a Telegram update if the route shifts
+# by ≥ 5 min. Requires HOME_ASSISTANT_TOKEN in the env.
+#
+# `entity_id` may be either a `device_tracker.*` or a `person.*` — both expose
+# `state` + `attributes.latitude/longitude`. `person.*` is recommended because
+# it aggregates multiple device trackers under one entity.
+#
+# Calendar events whose location text exactly matches one of HA's zone
+# friendly_names (case-insensitive) also short-circuit the geocoder — handy
+# for recurring events at "Office", "Madison Theatre", etc.
 [home_assistant]
 enabled = false
 base_url = "http://homeassistant.local:8123"
-entity_id = "device_tracker.example_iphone"
+entity_id = "person.example"
 home_zone = "home"
 max_age_minutes = 30
 replan_window_minutes = 30
+# Reject GPS fixes whose reported accuracy is worse than this many metres.
+# Set to 0 to disable the filter entirely.
+min_gps_accuracy_meters = 500
+
+# Per-zone origin overrides — when the tracker is in a matched zone, planning
+# uses this Origin instead of the live GPS coords, so non-home zones still get
+# subway/LIRR station hints just like the home origin.
+#
+# `zone` is compared case-insensitively against the HA zone's friendly_name.
+# [[home_assistant.zone_origins]]
+# zone = "work"
+# address = "200 W Street, New York, NY"
+# lat = 40.7346
+# lon = -74.0055
+# subway_station = "34 St-Penn Station"
+#
+# [[home_assistant.zone_origins]]
+# zone = "cap21"
+# address = "18 Bridge St, New York, NY"
+# lat = 40.7062
+# lon = -74.0124
 
 [[calendars]]
 id = "theatre-calendar@example.com"

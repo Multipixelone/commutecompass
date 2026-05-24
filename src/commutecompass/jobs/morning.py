@@ -38,6 +38,7 @@ from commutecompass.models import (
     Event,
     PingEntry,
     Plan,
+    ZoneInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,14 +80,17 @@ def run(config: Config) -> None:  # noqa: C901
     store.init_schema()
 
     # Refresh current location once so plan_event can pick it up via effective_origin.
+    ha_zones: dict[str, ZoneInfo] = {}
     if config.home_assistant.enabled:
         from commutecompass.ha_client import fetch_location as _ha_fetch
+        from commutecompass.ha_client import fetch_zones as _ha_fetch_zones
 
         try:
             loc = _ha_fetch(
                 config.home_assistant.base_url,
                 config.home_assistant.entity_id,
                 config.home_assistant_token,
+                min_accuracy_m=float(config.home_assistant.min_gps_accuracy_meters),
             )
         except Exception as exc:
             logger.warning("HA fetch raised in morning: %s", exc)
@@ -96,6 +100,16 @@ def run(config: Config) -> None:  # noqa: C901
             logger.debug(
                 "morning ha_pull: ok lat=%.5f lon=%.5f zone=%s", loc.lat, loc.lon, loc.zone
             )
+
+        try:
+            ha_zones = _ha_fetch_zones(
+                config.home_assistant.base_url,
+                config.home_assistant_token,
+            )
+            logger.debug("morning ha_zones: %d zones loaded", len(ha_zones))
+        except Exception as exc:
+            logger.warning("HA fetch_zones raised in morning: %s", exc)
+            ha_zones = {}
 
     venue_registry = VenueRegistry.load(Path(config.paths.venues_file))
 
@@ -109,7 +123,7 @@ def run(config: Config) -> None:  # noqa: C901
 
     plans: list[Plan] = []
     for event in events:
-        plan = _plan_event_safe(event, config, venue_registry, store, llm_client)
+        plan = _plan_event_safe(event, config, venue_registry, store, llm_client, ha_zones)
         store.upsert_plan(plan)
         plans.append(plan)
 
@@ -232,6 +246,7 @@ def _plan_event_safe(
     venue_registry: VenueRegistry,
     store: Store,
     llm_client: "OpencodeGoClient",
+    ha_zones: dict[str, ZoneInfo] | None = None,
 ) -> Plan:
     """Call plan_event with error handling, returning an error Plan on failure."""
     try:
@@ -241,6 +256,7 @@ def _plan_event_safe(
             venues=venue_registry,
             store=store,
             llm=llm_client,
+            ha_zones=ha_zones,
         )
     except Exception as exc:
         logger.warning(

@@ -752,3 +752,62 @@ class TestCurrentLocation:
         fresh = store.get_current_location(max_age_minutes=None)
         assert fresh is not None
         assert fresh.lat == 1.0
+
+    def test_accuracy_m_round_trip(self, tmp_db_path: Path) -> None:
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        store.upsert_current_location(
+            CurrentLocation(
+                lat=1.0,
+                lon=2.0,
+                zone="not_home",
+                captured_at=now_nyc(),
+                accuracy_m=15.0,
+            )
+        )
+        got = store.get_current_location()
+        assert got is not None
+        assert got.accuracy_m == 15.0
+
+    def test_accuracy_m_defaults_to_none(self, tmp_db_path: Path) -> None:
+        """upserts that omit accuracy_m should round-trip as None."""
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(tmp_db_path)
+        store.init_schema()
+        store.upsert_current_location(
+            CurrentLocation(lat=1.0, lon=2.0, zone="home", captured_at=now_nyc())
+        )
+        got = store.get_current_location()
+        assert got is not None
+        assert got.accuracy_m is None
+
+    def test_schema_migration_adds_accuracy_m_to_pre_phase1_db(
+        self, tmp_db_path: Path
+    ) -> None:
+        """init_schema must idempotently add accuracy_m to an older current_location table."""
+        import sqlite3
+
+        # Hand-create the pre-migration table.
+        tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(tmp_db_path) as conn:
+            conn.execute("""
+                CREATE TABLE current_location (
+                    id TEXT PRIMARY KEY DEFAULT 'singleton',
+                    lat REAL NOT NULL,
+                    lon REAL NOT NULL,
+                    zone TEXT,
+                    captured_at TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+            """)
+
+        # Run the migration via init_schema.
+        store = Store(tmp_db_path)
+        store.init_schema()
+
+        with sqlite3.connect(tmp_db_path) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(current_location)").fetchall()}
+        assert "accuracy_m" in cols

@@ -1,4 +1,4 @@
-"""Home Assistant REST client — pulls device_tracker state."""
+"""Home Assistant REST client — pulls tracker state and zones."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Optional
 
 import httpx
 
-from commutecompass.models import CurrentLocation
+from commutecompass.models import CurrentLocation, ZoneInfo
 from commutecompass.timeutil import NYC_TZ, now_nyc
 
 _logger = logging.getLogger(__name__)
@@ -20,11 +20,15 @@ def fetch_location(
     token: str,
     *,
     timeout: float = 5.0,
+    min_accuracy_m: Optional[float] = None,
 ) -> Optional[CurrentLocation]:
-    """Fetch current location from a Home Assistant device_tracker entity.
+    """Fetch current location from a Home Assistant tracker entity.
 
-    Returns None on any HTTP/parse failure or when the entity has no
-    numeric latitude/longitude attributes.
+    Works for `device_tracker.*` or `person.*` — both expose
+    `attributes.latitude`/`longitude` and a state of the zone friendly_name.
+
+    Returns None on any HTTP/parse failure, when the entity has no numeric
+    coords, or when `gps_accuracy` is fuzzier than `min_accuracy_m` (when set).
     """
     if not (base_url and entity_id and token):
         return None
@@ -69,6 +73,23 @@ def fetch_location(
     if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
         return None
 
+    accuracy_raw = attrs.get("gps_accuracy")
+    accuracy_m: Optional[float] = (
+        float(accuracy_raw) if isinstance(accuracy_raw, (int, float)) else None
+    )
+    if (
+        min_accuracy_m is not None
+        and accuracy_m is not None
+        and accuracy_m > min_accuracy_m
+    ):
+        _logger.debug(
+            "HA fetch: reject %s — accuracy %.0fm > %.0fm threshold",
+            entity_id,
+            accuracy_m,
+            min_accuracy_m,
+        )
+        return None
+
     state = payload.get("state")
     zone = state if isinstance(state, str) and state else None
 
@@ -80,7 +101,82 @@ def fetch_location(
         zone=zone,
         captured_at=captured_at,
         source="home_assistant",
+        accuracy_m=accuracy_m,
     )
+
+
+def fetch_zones(
+    base_url: str,
+    token: str,
+    *,
+    timeout: float = 5.0,
+) -> dict[str, ZoneInfo]:
+    """Fetch HA zone entities, keyed by lower-cased friendly_name.
+
+    Returns an empty dict on any HTTP/parse failure. Zones with non-numeric
+    latitude/longitude are skipped.
+    """
+    if not (base_url and token):
+        return {}
+
+    url = f"{base_url.rstrip('/')}/api/states"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        _logger.warning("HA fetch_zones failed: %s", exc)
+        return {}
+
+    if response.status_code != 200:
+        _logger.warning(
+            "HA fetch_zones returned %d: %s",
+            response.status_code,
+            response.text[:200],
+        )
+        return {}
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        _logger.warning("HA fetch_zones: bad JSON: %s", exc)
+        return {}
+
+    if not isinstance(payload, list):
+        return {}
+
+    zones: dict[str, ZoneInfo] = {}
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        entity_id = entry.get("entity_id", "")
+        if not isinstance(entity_id, str) or not entity_id.startswith("zone."):
+            continue
+        attrs = entry.get("attributes", {})
+        if not isinstance(attrs, dict):
+            continue
+        lat = attrs.get("latitude")
+        lon = attrs.get("longitude")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        radius = attrs.get("radius", 0.0)
+        radius_m = float(radius) if isinstance(radius, (int, float)) else 0.0
+        friendly = attrs.get("friendly_name") or entity_id.removeprefix("zone.")
+        if not isinstance(friendly, str) or not friendly:
+            continue
+        zones[friendly.lower()] = ZoneInfo(
+            name=friendly,
+            lat=float(lat),
+            lon=float(lon),
+            radius_m=radius_m,
+            entity_id=entity_id,
+        )
+
+    return zones
 
 
 def _parse_last_updated(raw: object) -> datetime:

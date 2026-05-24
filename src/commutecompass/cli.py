@@ -194,6 +194,17 @@ def plan(ctx: click.Context, event_id: str, here: bool) -> None:
     else:
         event = existing.event
 
+    from commutecompass.models import ZoneInfo
+
+    ha_zones: dict[str, ZoneInfo] = {}
+    if cfg.home_assistant.enabled:
+        from commutecompass.ha_client import fetch_zones
+
+        ha_zones = fetch_zones(
+            cfg.home_assistant.base_url,
+            cfg.home_assistant_token,
+        )
+
     new_plan = plan_event(
         event=event,
         config=cfg,
@@ -201,6 +212,7 @@ def plan(ctx: click.Context, event_id: str, here: bool) -> None:
         store=store,
         llm=llm,
         origin_override=origin_override,
+        ha_zones=ha_zones,
     )
 
     store.upsert_plan(new_plan)

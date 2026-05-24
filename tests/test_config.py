@@ -480,9 +480,45 @@ entity_id = "device_tracker.iphone"
             assert cfg.home_assistant.enabled is True
             assert cfg.home_assistant.entity_id == "device_tracker.iphone"
             assert cfg.home_assistant_token == "ha-tok"
+            # Phase 1 defaults
+            assert cfg.home_assistant.min_gps_accuracy_meters == 500
+            assert cfg.home_assistant.zone_origins == []
         finally:
             os.environ.pop("HOME_ASSISTANT_TOKEN", None)
 
+    def test_ha_zone_origins_parse(
+        self, tmp_path: Path, required_env: dict[str, str]
+    ) -> None:
+        _apply_env(required_env)
+        os.environ["HOME_ASSISTANT_TOKEN"] = "ha-tok"
+        toml_with_zones = self._HA_ON + """
+min_gps_accuracy_meters = 200
+
+[[home_assistant.zone_origins]]
+zone = "work"
+address = "200 W Street, NY"
+lat = 40.7346
+lon = -74.0055
+subway_station = "34 St-Penn Station"
+
+[[home_assistant.zone_origins]]
+zone = "cap21"
+address = "18 Bridge St, NY"
+lat = 40.7062
+lon = -74.0124
+"""
+        try:
+            p = tmp_path / "config.toml"
+            p.write_text(toml_with_zones)
+            cfg = load_config(p)
+            assert cfg.home_assistant.min_gps_accuracy_meters == 200
+            assert len(cfg.home_assistant.zone_origins) == 2
+            zo = cfg.home_assistant.zone_origins[0]
+            assert zo.zone == "work"
+            assert zo.subway_station == "34 St-Penn Station"
+            assert cfg.home_assistant.zone_origins[1].zone == "cap21"
+        finally:
+            os.environ.pop("HOME_ASSISTANT_TOKEN", None)
 
 # ─────────── Redaction ────────────────────────────────────────────────────────
 

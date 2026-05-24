@@ -65,6 +65,15 @@ class LocationOverride(BaseModel):
     location: str
 
 
+class ZoneOrigin(BaseModel):
+    zone: str
+    address: str
+    lat: float
+    lon: float
+    subway_station: str = ""
+    lirr_station: str = ""
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -72,6 +81,8 @@ class HomeAssistantConfig(BaseModel):
     home_zone: str = "home"
     max_age_minutes: int = 30
     replan_window_minutes: int = 30
+    min_gps_accuracy_meters: int = 500
+    zone_origins: list[ZoneOrigin] = []
 
 
 class NotifyConfig(BaseModel):
