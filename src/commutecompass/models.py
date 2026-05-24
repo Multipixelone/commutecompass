@@ -59,6 +59,23 @@ class LocationOverride(BaseModel):
     location: str
 
 
+class ZoneOrigin(BaseModel):
+    """Per-zone origin override with subway/LIRR hints.
+
+    When the tracker reports being in a zone matching `zone` (case-insensitive,
+    matched against the HA zone's friendly_name), planning uses this Origin
+    instead of the fallback `[origin]` block. Lets non-home zones like "Work"
+    or "CAP21" carry their own station hints.
+    """
+
+    zone: str
+    address: str
+    lat: float
+    lon: float
+    subway_station: str = ""
+    lirr_station: str = ""
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -66,6 +83,8 @@ class HomeAssistantConfig(BaseModel):
     home_zone: str = "home"
     max_age_minutes: int = 30
     replan_window_minutes: int = 30
+    min_gps_accuracy_meters: int = 500
+    zone_origins: list[ZoneOrigin] = Field(default_factory=list)
 
 
 class Config(BaseModel):
@@ -93,7 +112,7 @@ class ResolvedLocation(BaseModel):
     value: str
     lat: Optional[float] = None
     lon: Optional[float] = None
-    source: Literal["known_venues", "geocode", "llm", "cache"]
+    source: Literal["known_venues", "geocode", "llm", "cache", "ha_zone"]
 
 
 class Event(BaseModel):
@@ -164,3 +183,14 @@ class CurrentLocation(BaseModel):
     zone: Optional[str] = None
     captured_at: datetime
     source: str = "home_assistant"
+    accuracy_m: Optional[float] = None
+
+
+class ZoneInfo(BaseModel):
+    """Snapshot of an HA `zone.*` entity used for origin/destination matching."""
+
+    name: str
+    lat: float
+    lon: float
+    radius_m: float = 0.0
+    entity_id: str = ""
