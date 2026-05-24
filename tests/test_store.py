@@ -177,10 +177,9 @@ def test_today_plans_returns_today(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    # Create event starting later today. Using 22h offset ensures it falls
-    # in the current logical day regardless of time-of-day edge cases
-    # (e.g., before 02:00 NYC when the logical day starts the previous calendar day).
-    event = make_event("evt-today", start_offset_hours=22, end_offset_hours=24)
+    # Create event starting soon (1h offset) so it always falls within
+    # the current logical day regardless of time-of-day.
+    event = make_event("evt-today", start_offset_hours=1, end_offset_hours=3)
     plan = make_plan(event)
     store.upsert_plan(plan)
 
