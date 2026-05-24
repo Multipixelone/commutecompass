@@ -17,6 +17,7 @@ from commutecompass.config import (
     PathsConfig,
     PrepConfig,
     SchedulingConfig,
+    ZoneOrigin,
 )
 from commutecompass.models import (
     CurrentLocation,
@@ -601,3 +602,107 @@ def test_effective_origin_uses_live_coords_when_away(config: Config) -> None:
     # Built without station hints
     assert result.subway_station == ""
     assert result.lirr_station == ""
+
+
+def test_effective_origin_home_match_is_case_insensitive(config: Config) -> None:
+    """HA returns the zone friendly_name (e.g. "Home"); config uses slug ("home")."""
+    from commutecompass.timeutil import now_nyc
+
+    cfg = _ha_enabled_config(config)
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=1.0, lon=2.0, zone="Home", captured_at=now_nyc()
+    )
+    result = effective_origin(cfg, store)
+    assert result.lat == cfg.origin.lat
+    assert result.subway_station == cfg.origin.subway_station
+
+
+def test_effective_origin_returns_zone_origin_when_zone_matches(config: Config) -> None:
+    from commutecompass.timeutil import now_nyc
+
+    cfg = config.model_copy(
+        update={
+            "home_assistant": HomeAssistantConfig(
+                enabled=True,
+                base_url="http://ha",
+                entity_id="person.finn",
+                home_zone="home",
+                max_age_minutes=30,
+                zone_origins=[
+                    ZoneOrigin(
+                        zone="Work",
+                        address="200 W Street, NY",
+                        lat=40.7346,
+                        lon=-74.0055,
+                        subway_station="34 St-Penn Station",
+                    ),
+                ],
+            )
+        }
+    )
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=40.7346, lon=-74.0055, zone="Work", captured_at=now_nyc()
+    )
+    result = effective_origin(cfg, store)
+    assert result.address == "200 W Street, NY"
+    assert result.lat == 40.7346
+    assert result.subway_station == "34 St-Penn Station"
+
+
+def test_effective_origin_zone_origin_match_is_case_insensitive(config: Config) -> None:
+    from commutecompass.timeutil import now_nyc
+
+    cfg = config.model_copy(
+        update={
+            "home_assistant": HomeAssistantConfig(
+                enabled=True,
+                base_url="http://ha",
+                entity_id="person.finn",
+                zone_origins=[
+                    ZoneOrigin(
+                        zone="cap21",
+                        address="18 Bridge St, NY",
+                        lat=40.7062,
+                        lon=-74.0124,
+                    ),
+                ],
+            )
+        }
+    )
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=40.7062, lon=-74.0124, zone="CAP21", captured_at=now_nyc()
+    )
+    result = effective_origin(cfg, store)
+    assert result.address == "18 Bridge St, NY"
+
+
+def test_effective_origin_rejects_low_accuracy_fix(config: Config) -> None:
+    from commutecompass.timeutil import now_nyc
+
+    cfg = config.model_copy(
+        update={
+            "home_assistant": HomeAssistantConfig(
+                enabled=True,
+                base_url="http://ha",
+                entity_id="person.finn",
+                home_zone="home",
+                max_age_minutes=30,
+                min_gps_accuracy_meters=200,
+            )
+        }
+    )
+    store = MagicMock()
+    store.get_current_location.return_value = CurrentLocation(
+        lat=40.7128,
+        lon=-74.006,
+        zone="not_home",
+        captured_at=now_nyc(),
+        accuracy_m=1500.0,
+    )
+    result = effective_origin(cfg, store)
+    # Bad fix → fall back to config.origin (with station hints)
+    assert result.lat == cfg.origin.lat
+    assert result.subway_station == cfg.origin.subway_station

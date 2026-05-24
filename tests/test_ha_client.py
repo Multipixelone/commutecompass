@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 
-from commutecompass.ha_client import fetch_location
+from commutecompass.ha_client import fetch_location, fetch_zones
 
 
 def _mock_get_response(status: int, payload: Optional[Mapping[str, object]]) -> httpx.Response:
@@ -80,3 +80,112 @@ class TestFetchLocation:
         assert fetch_location("", "device_tracker.x", "tok") is None
         assert fetch_location("http://ha", "", "tok") is None
         assert fetch_location("http://ha", "device_tracker.x", "") is None
+
+    def test_parses_gps_accuracy(self) -> None:
+        payload = {
+            "entity_id": "person.finn",
+            "state": "Work",
+            "attributes": {
+                "latitude": 40.7346,
+                "longitude": -74.0055,
+                "gps_accuracy": 12,
+            },
+            "last_updated": "2026-05-09T12:34:56+00:00",
+        }
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.get.return_value = _mock_get_response(200, payload)
+
+            result = fetch_location("http://ha", "person.finn", "tok")
+
+        assert result is not None
+        assert result.accuracy_m == 12.0
+        assert result.zone == "Work"
+
+    def test_rejects_fuzzier_than_threshold(self) -> None:
+        payload = {
+            "entity_id": "person.finn",
+            "state": "Work",
+            "attributes": {
+                "latitude": 40.7346,
+                "longitude": -74.0055,
+                "gps_accuracy": 1500,
+            },
+            "last_updated": "2026-05-09T12:34:56+00:00",
+        }
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.get.return_value = _mock_get_response(200, payload)
+
+            result = fetch_location(
+                "http://ha", "person.finn", "tok", min_accuracy_m=500.0
+            )
+
+        assert result is None
+
+
+class TestFetchZones:
+    def _states_payload(self) -> list[dict]:
+        return [
+            {
+                "entity_id": "zone.home",
+                "state": "0",
+                "attributes": {
+                    "latitude": 40.6798,
+                    "longitude": -73.9421,
+                    "radius": 100.0,
+                    "friendly_name": "Home",
+                },
+            },
+            {
+                "entity_id": "zone.work",
+                "state": "0",
+                "attributes": {
+                    "latitude": 40.7346,
+                    "longitude": -74.0055,
+                    "radius": 128.0,
+                    "friendly_name": "Work",
+                },
+            },
+            {
+                "entity_id": "device_tracker.nougat",
+                "state": "Home",
+                "attributes": {"latitude": 40.68, "longitude": -73.94},
+            },
+            {
+                "entity_id": "zone.broken",
+                "state": "0",
+                "attributes": {"friendly_name": "Broken"},
+            },
+        ]
+
+    def test_happy_path_filters_to_zones(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.get.return_value = _mock_get_response(200, self._states_payload())
+
+            zones = fetch_zones("http://ha", "tok")
+
+        assert set(zones) == {"home", "work"}
+        assert zones["work"].name == "Work"
+        assert zones["work"].lat == 40.7346
+        assert zones["work"].radius_m == 128.0
+        assert zones["work"].entity_id == "zone.work"
+
+    def test_non_200_returns_empty_dict(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.get.return_value = httpx.Response(status_code=403, text="forbidden")
+
+            assert fetch_zones("http://ha", "tok") == {}
+
+    def test_network_error_returns_empty_dict(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.get.side_effect = httpx.HTTPError("boom")
+
+            assert fetch_zones("http://ha", "tok") == {}
+
+    def test_empty_inputs_short_circuit(self) -> None:
+        assert fetch_zones("", "tok") == {}
+        assert fetch_zones("http://ha", "") == {}
