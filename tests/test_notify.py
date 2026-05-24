@@ -16,6 +16,7 @@ from commutecompass.notify import (
     _chunk_message,
     build_notifier,
 )
+from commutecompass.config import Config
 
 
 class TestTelegramNotifierSend:
@@ -264,9 +265,8 @@ class TestStdoutNotifier:
 
 
 class TestBuildNotifier:
-    def _make_config(self, mode: str):
+    def _make_config(self, mode: str) -> Config:
         from commutecompass.config import (
-            Config,
             MtaConfig,
             NotifyConfig,
             OpencodeGoConfig,

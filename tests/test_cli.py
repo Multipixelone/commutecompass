@@ -9,6 +9,9 @@ import pytest
 from click.testing import CliRunner
 
 from commutecompass.cli import cli
+from commutecompass.config import Config
+from commutecompass.models import Plan
+from commutecompass.store import Store
 
 
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
@@ -278,7 +281,7 @@ class TestOauthCommand:
 # ─────────── digest-preview ──────────────────────────────────────────────────
 
 
-def _fake_config(tmp_path: Path):
+def _fake_config(tmp_path: Path) -> Config:
     """Build a minimal Config object for cli tests that bypass load_config."""
     from commutecompass.config import (
         Config,
@@ -332,7 +335,7 @@ class TestDigestPreview:
 
 
 class TestAdjustCommand:
-    def _seed_plan(self, tmp_path: Path, prep_offset_min: int = 90, leave_offset_min: int = 60):
+    def _seed_plan(self, tmp_path: Path, prep_offset_min: int = 90, leave_offset_min: int = 60) -> tuple[Config, Store, Plan]:
         """Seed a plan in the DB with prep/leave times offset_min minutes in the future."""
         from datetime import timedelta
 

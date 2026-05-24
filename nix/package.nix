@@ -20,6 +20,7 @@ python3Packages.buildPythonApplication rec {
     pyyaml
     rapidfuzz
     tomli
+    tomlkit
   ];
 
   pythonImportsCheck = [ "commutecompass" ];

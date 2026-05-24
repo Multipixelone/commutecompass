@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
 from unittest.mock import patch
 
 import httpx
@@ -10,7 +9,7 @@ import httpx
 from commutecompass.ha_client import fetch_location, fetch_zones
 
 
-def _mock_get_response(status: int, payload: Optional[Mapping[str, object]]) -> httpx.Response:
+def _mock_get_response(status: int, payload: object) -> httpx.Response:
     if payload is None:
         return httpx.Response(status_code=status, text="not json")
     return httpx.Response(status_code=status, json=payload)
@@ -125,7 +124,7 @@ class TestFetchLocation:
 
 
 class TestFetchZones:
-    def _states_payload(self) -> list[dict]:
+    def _states_payload(self) -> list[dict[str, object]]:
         return [
             {
                 "entity_id": "zone.home",

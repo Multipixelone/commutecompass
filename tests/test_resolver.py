@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from commutecompass.geocode import GeocodeResult
-from commutecompass.models import ResolvedLocation
+from commutecompass.models import ResolvedLocation, ZoneInfo
 from commutecompass.resolver import looks_like_address, resolve
 from commutecompass.venues import VenueEntry, VenueRegistry
 
@@ -427,9 +427,7 @@ class TestResolve:
 
 
 class TestHaZoneMatch:
-    def _zones(self) -> dict:
-        from commutecompass.models import ZoneInfo
-
+    def _zones(self) -> dict[str, ZoneInfo]:
         return {
             "work": ZoneInfo(
                 name="Work",
