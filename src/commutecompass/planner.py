@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from commutecompass.config import Config
 from commutecompass.geocode import GeocodeResult
-from commutecompass.models import Event, Origin, Plan
+from commutecompass.models import Event, Origin, Plan, ZoneInfo
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 
@@ -40,8 +40,10 @@ def effective_origin(
 
     Precedence:
       1. explicit override (CLI --here, etc.)
-      2. fresh HA-tracked location, unless tracker is in the configured home zone
-      3. config.origin (preserves subway/LIRR station hints)
+      2. configured zone_origins[*] when the tracker is in that zone
+      3. config.origin when the tracker is in the home zone (preserves hints)
+      4. fresh HA-tracked GPS coords (no station hints)
+      5. config.origin fallback
     """
     base_origin = Origin(
         address=config.origin.address,
@@ -61,8 +63,25 @@ def effective_origin(
     if cl is None:
         return base_origin
 
-    if cl.zone is not None and cl.zone == config.home_assistant.home_zone:
+    threshold_m = float(config.home_assistant.min_gps_accuracy_meters)
+    if cl.accuracy_m is not None and threshold_m > 0 and cl.accuracy_m > threshold_m:
         return base_origin
+
+    zone_lower = cl.zone.lower() if isinstance(cl.zone, str) else None
+
+    if zone_lower is not None:
+        for zo in config.home_assistant.zone_origins:
+            if zo.zone.lower() == zone_lower:
+                return Origin(
+                    address=zo.address,
+                    lat=zo.lat,
+                    lon=zo.lon,
+                    subway_station=zo.subway_station,
+                    lirr_station=zo.lirr_station,
+                )
+
+        if zone_lower == config.home_assistant.home_zone.lower():
+            return base_origin
 
     return Origin(
         address=f"{cl.lat:.6f},{cl.lon:.6f}",
@@ -80,6 +99,7 @@ def plan_event(
     *,
     mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None,
     origin_override: Optional[Origin] = None,
+    ha_zones: Optional[dict[str, ZoneInfo]] = None,
 ) -> Plan:
     """Compute optimal departure time for an event.
 
@@ -112,6 +132,7 @@ def plan_event(
         store=store,
         geocoder=geocoder,
         llm=llm,
+        ha_zones=ha_zones,
     )
     if resolved is None:
         return Plan(event=event, error="location_unresolved")
