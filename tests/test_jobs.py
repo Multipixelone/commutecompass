@@ -187,7 +187,7 @@ def test_morning_run_fetches_and_plans(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         # ── CalendarClient mock ─────────────────────────────────────────
         mock_cal = MagicMock()
@@ -281,7 +281,7 @@ def test_morning_run_skips_past_pings(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -329,7 +329,7 @@ def test_morning_run_idempotent(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal_class.return_value = mock_cal
@@ -387,7 +387,7 @@ def test_morning_run_cancel_stale_pings(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_fetch_alerts.return_value = []
@@ -471,7 +471,7 @@ def test_morning_run_with_affecting_alerts(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -527,7 +527,7 @@ def test_morning_run_telegram_failure_is_not_fatal(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = today_events
@@ -567,7 +567,7 @@ def test_morning_run_empty_calendar(
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.TelegramNotifier"
+        "commutecompass.jobs.morning.build_notifier"
     ) as mock_notifier_class:
         mock_cal = MagicMock()
         mock_cal.fetch_events.return_value = []

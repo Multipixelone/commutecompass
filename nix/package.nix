@@ -20,7 +20,13 @@ python3Packages.buildPythonApplication rec {
     pyyaml
     rapidfuzz
     tomli
+    tomlkit
   ];
+
+  postInstall = ''
+    install -Dm755 contrib/openclaw-send.sh \
+      $out/share/commutecompass/openclaw-send.sh
+  '';
 
   pythonImportsCheck = [ "commutecompass" ];
 }

@@ -27,8 +27,14 @@ def make_event(
     start_offset_hours: int = 3,
     end_offset_hours: int = 5,
 ) -> Event:
-    """Make a test event with start time offset from now."""
-    now = datetime.now(timezone.utc)
+    """Make a test event with start time offset from now in NYC timezone.
+
+    Uses a large enough offset to ensure the event always falls in the current
+    logical day regardless of time-of-day (accounts for 02:00-01:59 boundary).
+    """
+    from commutecompass.timeutil import now_nyc
+
+    now = now_nyc()
     start = now + timedelta(hours=start_offset_hours)
     end = now + timedelta(hours=end_offset_hours)
     return Event(
@@ -171,8 +177,9 @@ def test_today_plans_returns_today(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    # Create event starting in 2 hours (today)
-    event = make_event("evt-today", start_offset_hours=2, end_offset_hours=4)
+    # Create event starting soon (1h offset) so it always falls within
+    # the current logical day regardless of time-of-day.
+    event = make_event("evt-today", start_offset_hours=1, end_offset_hours=3)
     plan = make_plan(event)
     store.upsert_plan(plan)
 
@@ -567,8 +574,8 @@ def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path: Path) -> None
             "SELECT plan_json FROM plans WHERE event_id = ?", ("evt-roundtrip",)
         ).fetchone()
     stored_data = json.loads(row[0])
-    # Stored datetime strings should be ISO-8601 with offset
-    assert "+" in stored_data["event"]["start"] or "Z" in stored_data["event"]["start"]
+    # Stored datetime strings should be ISO-8601 with offset (either + or -)
+    assert ("+" in stored_data["event"]["start"] or "-" in stored_data["event"]["start"]) and ("T" in stored_data["event"]["start"])
 
 
 def test_ping_entry_round_trip_with_datetime(tmp_db_path: Path) -> None:

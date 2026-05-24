@@ -19,11 +19,33 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`morning`](./src/commutecompass/jobs/) — run the morning digest job
 - [`poll`](./src/commutecompass/jobs/) — run the per-minute poll loop
 - [`plan`](./src/commutecompass/planner.py) — replan a single event (debug)
-- [`test-notify`](./src/commutecompass/notify.py) — send a test Telegram message
+- [`digest-preview`](./src/commutecompass/cli.py) — print today's digest from cache without sending
+- [`adjust EVENT_ID --add-prep N`](./src/commutecompass/cli.py) — shift a plan's prep time by N minutes
+- [`config show`](./src/commutecompass/cli.py) / [`config set KEY VALUE`](./src/commutecompass/cli.py) — view or edit allowlisted config fields
+- [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
+- [`where`](./src/commutecompass/cli.py) — print the latest stored current location
 
 ## Configuration
 
 See [`examples/config.toml`](./examples/) and [`examples/env.example`](./examples/) for the full configuration schema. Architecture and implementation notes live in [`plan.md`](./plan.md).
+
+## OpenClaw integration
+
+commutecompass ships an [OpenClaw](https://openclaw.ai) skill at [`skills/commutecompass/`](./skills/commutecompass/) so you can interact with it from chat — "what's on for today?", "shift my next event prep 45 min earlier", "set quiet hours to 23:00".
+
+OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.toml` (the default in `examples/config.toml`) and commutecompass will emit each would-be Telegram message to stdout wrapped in delimiters. Pipe through [`contrib/openclaw-send.sh`](./contrib/openclaw-send.sh) to forward each message to `openclaw message send`:
+
+```cron
+0 6 * * *  COMMUTECOMPASS_CONFIG=/etc/commutecompass/config.toml \
+           commutecompass morning | \
+           OPENCLAW_TARGET=$CHAT_ID /opt/commutecompass/contrib/openclaw-send.sh
+
+* * * * *  COMMUTECOMPASS_CONFIG=/etc/commutecompass/config.toml \
+           commutecompass poll | \
+           OPENCLAW_TARGET=$CHAT_ID /opt/commutecompass/contrib/openclaw-send.sh
+```
+
+Point your OpenClaw instance at `skills/commutecompass/` (set `COMMUTECOMPASS_CONFIG` in OpenClaw's env), and the chat commands are live. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
 
 ## Development
 

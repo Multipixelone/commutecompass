@@ -9,6 +9,9 @@ import pytest
 from click.testing import CliRunner
 
 from commutecompass.cli import cli
+from commutecompass.config import Config
+from commutecompass.models import Plan
+from commutecompass.store import Store
 
 
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
@@ -92,7 +95,18 @@ class TestMainHelp:
         """--help shows all subcommands."""
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
-        for cmd in ["oauth", "init-db", "morning", "poll", "plan", "test-notify", "bot"]:
+        for cmd in [
+            "oauth",
+            "init-db",
+            "morning",
+            "poll",
+            "plan",
+            "test-notify",
+            "bot",
+            "digest-preview",
+            "adjust",
+            "config",
+        ]:
             assert cmd in result.output
 
     def test_global_help_shows_config_option(self, runner: CliRunner) -> None:
@@ -262,3 +276,213 @@ class TestOauthCommand:
         """oauth --help works (verifies command wires config)."""
         result = runner.invoke(cli, ["--config", str(minimal_toml), "oauth", "--help"])
         assert result.exit_code == 0
+
+
+# ─────────── digest-preview ──────────────────────────────────────────────────
+
+
+def _fake_config(tmp_path: Path) -> Config:
+    """Build a minimal Config object for cli tests that bypass load_config."""
+    from commutecompass.config import (
+        Config,
+        MtaConfig,
+        NotifyConfig,
+        OpencodeGoConfig,
+        Origin,
+        PathsConfig,
+        PrepConfig,
+        SchedulingConfig,
+    )
+
+    return Config(
+        origin=Origin(address="x", lat=0.0, lon=0.0),
+        calendars=[],
+        prep=PrepConfig(),
+        scheduling=SchedulingConfig(),
+        paths=PathsConfig(
+            venues_file=str(tmp_path / "v.yaml"),
+            db_path=str(tmp_path / "state.db"),
+            oauth_token_path=str(tmp_path / "t.json"),
+        ),
+        opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+        mta=MtaConfig(
+            subway_alerts_url="https://example.com/s",
+            lirr_alerts_url="https://example.com/l",
+            bus_alerts_url="https://example.com/b",
+        ),
+        notify=NotifyConfig(mode="stdout"),
+    )
+
+
+class TestDigestPreview:
+    def test_no_plans_prints_no_events_message(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """With an empty DB, digest-preview prints a digest with the 'no events' line."""
+        cfg = _fake_config(tmp_path)
+        from commutecompass.store import Store
+
+        Store(cfg.paths.db_path).init_schema()
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["digest-preview"])
+
+        assert result.exit_code == 0, result.output
+        assert "No events" in result.output or "Today" in result.output
+
+
+# ─────────── adjust ──────────────────────────────────────────────────────────
+
+
+class TestAdjustCommand:
+    def _seed_plan(self, tmp_path: Path, prep_offset_min: int = 90, leave_offset_min: int = 60) -> tuple[Config, Store, Plan]:
+        """Seed a plan in the DB with prep/leave times offset_min minutes in the future."""
+        from datetime import timedelta
+
+        from commutecompass.models import Event, Plan
+        from commutecompass.store import Store
+        from commutecompass.timeutil import now_nyc
+
+        cfg = _fake_config(tmp_path)
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+        now = now_nyc()
+        event = Event(
+            id="evt-abc",
+            calendar_id="cal-1",
+            calendar_name="Job",
+            title="Standup",
+            start=now + timedelta(hours=2),
+            end=now + timedelta(hours=3),
+        )
+        plan = Plan(
+            event=event,
+            leave_at=now + timedelta(minutes=leave_offset_min),
+            prep_at=now + timedelta(minutes=prep_offset_min),
+        )
+        store.upsert_plan(plan)
+        return cfg, store, plan
+
+    def test_adjust_shifts_prep_earlier(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg, store, plan = self._seed_plan(tmp_path, prep_offset_min=90)
+        original_prep = plan.prep_at
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "45"])
+
+        assert result.exit_code == 0, result.output
+        saved = store.get_plan("evt-abc")
+        assert saved is not None and saved.prep_at is not None and original_prep is not None
+        # Prep should have moved 45 minutes earlier
+        delta = (original_prep - saved.prep_at).total_seconds() / 60
+        assert 44 < delta < 46
+
+    def test_adjust_clamps_to_now(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Negative add-prep that pushes prep_at below now is clamped to now."""
+        from commutecompass.timeutil import now_nyc
+
+        cfg, store, _ = self._seed_plan(tmp_path, prep_offset_min=10)
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "120"])
+
+        assert result.exit_code == 0
+        saved = store.get_plan("evt-abc")
+        assert saved is not None and saved.prep_at is not None
+        # Clamped to now ± a couple seconds; never in the past
+        assert saved.prep_at >= now_nyc() - __import__("datetime").timedelta(seconds=2)
+
+    def test_adjust_missing_event_exits_nonzero(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _fake_config(tmp_path)
+        from commutecompass.store import Store
+
+        Store(cfg.paths.db_path).init_schema()
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["adjust", "nonexistent", "--add-prep", "10"])
+
+        assert result.exit_code != 0
+        assert "No plan found" in result.output
+
+    def test_adjust_reschedules_prep_ping(self, runner: CliRunner, tmp_path: Path) -> None:
+        """After adjust, a pending prep ping exists at the new fire_at."""
+        from datetime import timedelta
+
+        from commutecompass.timeutil import now_nyc
+
+        cfg, store, plan = self._seed_plan(tmp_path, prep_offset_min=90)
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "30"])
+        assert result.exit_code == 0
+
+        # Query pending pings up to 2 hours from now
+        pending = store.pending_pings(now_nyc() + timedelta(hours=2))
+        prep_pings = [p for p in pending if p.kind == "prep" and p.event_id == "evt-abc"]
+        assert len(prep_pings) == 1
+
+
+# ─────────── config show / config set ────────────────────────────────────────
+
+
+class TestConfigShow:
+    def test_config_show_outputs_toml_by_default(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _fake_config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["config", "show"])
+        assert result.exit_code == 0
+        # TOML-ish: contains "prep" header and an int assignment
+        assert "[prep]" in result.output or "prep_minutes" in result.output
+
+    def test_config_show_json_flag(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = _fake_config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["config", "show", "--json"])
+        assert result.exit_code == 0
+        import json as _json
+
+        parsed = _json.loads(result.output)
+        assert "prep" in parsed
+
+    def test_config_show_redacts_secrets(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = _fake_config(tmp_path)
+        cfg.telegram_bot_token = "supersecret"
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["config", "show"])
+        assert result.exit_code == 0
+        assert "supersecret" not in result.output
+        assert "REDACTED" in result.output
+
+
+class TestConfigSet:
+    def _toml_with_prep(self, tmp_path: Path) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text(
+            """\
+[prep]
+prep_minutes = 20
+safety_buffer_minutes = 5
+"""
+        )
+        return p
+
+    def test_set_allowed_key(self, runner: CliRunner, tmp_path: Path) -> None:
+        p = self._toml_with_prep(tmp_path)
+        result = runner.invoke(cli, ["--config", str(p), "config", "set", "prep.prep_minutes", "33"])
+        assert result.exit_code == 0, result.output
+        assert "prep_minutes = 33" in p.read_text()
+
+    def test_set_disallowed_key_exits_nonzero(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        p = self._toml_with_prep(tmp_path)
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "set", "telegram_bot_token", "x"]
+        )
+        assert result.exit_code != 0
+        # Error message should name the allowlist
+        assert "prep.prep_minutes" in result.output

@@ -4,6 +4,7 @@ let
 
   configPath = "/etc/commutecompass/config.toml";
   exe = "${cfg.package}/bin/commutecompass --config ${configPath}";
+  sendWrapper = "${cfg.package}/share/commutecompass/openclaw-send.sh";
 
   stateDirName = lib.removePrefix "/var/lib/" cfg.dataDir;
 
@@ -15,6 +16,11 @@ let
       User = cfg.user;
       Group = cfg.group;
       EnvironmentFile = cfg.environmentFile;
+      Environment = [
+        "OPENCLAW_TARGET=${cfg.openclaw.target}"
+        "OPENCLAW_BIN=${cfg.openclaw.package}/bin/openclaw"
+        "OPENCLAW_CHANNEL=${cfg.openclaw.channel}"
+      ];
       StateDirectory = stateDirName;
       StateDirectoryMode = "0750";
       # init-db is idempotent (CREATE TABLE IF NOT EXISTS); cheap to run every tick
@@ -49,10 +55,14 @@ let
     };
   };
 
+  # pipefail propagates wrapper failures (openclaw down, target rejected) up
+  # to systemd so the unit shows as failed instead of silently dropping the
+  # message.
   mkService = subcommand: description:
     lib.recursiveUpdate serviceDefaults {
       inherit description;
-      serviceConfig.ExecStart = "${exe} ${subcommand}";
+      serviceConfig.ExecStart =
+        "${pkgs.bash}/bin/bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'";
     };
 in {
   options.services.commutecompass = {
@@ -88,13 +98,59 @@ in {
     environmentFile = lib.mkOption {
       type = lib.types.path;
       description = ''
-        Path to env file (e.g. agenix-decrypted secrets). Must define
-        GOOGLE_MAPS_API_KEY, GOOGLE_OAUTH_CLIENT_SECRET, TELEGRAM_BOT_TOKEN,
-        TELEGRAM_CHAT_ID, and OPENCODE_GO_TOKEN.
+        Path to env file (e.g. agenix-decrypted secrets).
 
-        When [home_assistant].enabled = true in config.toml, must also define
-        HOME_ASSISTANT_TOKEN (long-lived access token from HA).
+        Always required:
+          GOOGLE_MAPS_API_KEY
+          GOOGLE_OAUTH_CLIENT_SECRET
+          OPENCODE_GO_TOKEN
+
+        Required only when notify.mode = "telegram" in config.toml (i.e. the
+        Python notifier sends to Telegram directly instead of emitting
+        delimited stdout for the openclaw wrapper):
+          TELEGRAM_BOT_TOKEN
+          TELEGRAM_CHAT_ID
+
+        Required only when [home_assistant].enabled = true:
+          HOME_ASSISTANT_TOKEN
+
+        May also set any env vars openclaw itself needs (e.g.
+        OPENCLAW_CONFIG) — the service sandbox blocks $HOME, so openclaw
+        cannot pick up ~/.config/openclaw/ on its own.
       '';
+    };
+
+    openclaw = {
+      package = lib.mkOption {
+        type = lib.types.package;
+        description = ''
+          Package providing `bin/openclaw`. The morning/poll services pipe
+          their delimited stdout through this binary, which delivers each
+          message to the configured channel.
+        '';
+      };
+
+      target = lib.mkOption {
+        type = lib.types.str;
+        example = "-987654321";
+        description = ''
+          Delivery target passed as `openclaw message send --target`. For
+          Telegram, a numeric chat id (negative for groups/supergroups).
+
+          Rendered into the unit's Environment= and therefore world-readable
+          via /nix/store. If the target itself must stay secret, drop this
+          option and instead set OPENCLAW_TARGET in environmentFile.
+        '';
+      };
+
+      channel = lib.mkOption {
+        type = lib.types.str;
+        default = "telegram";
+        description = ''
+          Channel name passed as `openclaw message send --channel`. Must
+          match a channel registered in your openclaw config.
+        '';
+      };
     };
 
     morningTime = lib.mkOption {

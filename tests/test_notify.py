@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import io
 from unittest.mock import patch
 
 import httpx
 
-from commutecompass.notify import TelegramNotifier, _chunk_message, _MAX_MESSAGE_CHARS
+from commutecompass.notify import (
+    STDOUT_MSG_END,
+    STDOUT_MSG_START,
+    StdoutNotifier,
+    TelegramNotifier,
+    _MAX_MESSAGE_CHARS,
+    _chunk_message,
+    build_notifier,
+)
+from commutecompass.config import Config
 
 
 class TestTelegramNotifierSend:
@@ -209,3 +219,87 @@ class TestTelegramNotifierSendChunking:
 
             assert result is False
             assert mock_instance.post.call_count == 2
+
+
+# ── StdoutNotifier ────────────────────────────────────────────────────────────
+
+
+class TestStdoutNotifier:
+    """StdoutNotifier wraps each message in delimiters for OpenClaw to relay."""
+
+    def test_send_writes_delimited_block(self) -> None:
+        stream = io.StringIO()
+        notifier = StdoutNotifier(stream=stream)
+        ok = notifier.send("hello world")
+        assert ok is True
+        assert stream.getvalue() == f"{STDOUT_MSG_START}\nhello world\n{STDOUT_MSG_END}\n"
+
+    def test_send_multiline_preserved_inside_block(self) -> None:
+        stream = io.StringIO()
+        notifier = StdoutNotifier(stream=stream)
+        notifier.send("line 1\nline 2\nline 3")
+        out = stream.getvalue()
+        assert STDOUT_MSG_START in out
+        assert STDOUT_MSG_END in out
+        assert "line 1\nline 2\nline 3" in out
+
+    def test_send_multiple_messages_emit_separate_blocks(self) -> None:
+        stream = io.StringIO()
+        notifier = StdoutNotifier(stream=stream)
+        notifier.send("first")
+        notifier.send("second")
+        out = stream.getvalue()
+        assert out.count(STDOUT_MSG_START) == 2
+        assert out.count(STDOUT_MSG_END) == 2
+
+    def test_send_ignores_parse_mode(self) -> None:
+        """parse_mode is accepted for protocol compatibility but doesn't affect output."""
+        stream = io.StringIO()
+        notifier = StdoutNotifier(stream=stream)
+        notifier.send("hi", parse_mode="HTML")
+        # No mention of parse_mode in the emitted block
+        assert "HTML" not in stream.getvalue()
+
+
+# ── build_notifier dispatch ───────────────────────────────────────────────────
+
+
+class TestBuildNotifier:
+    def _make_config(self, mode: str) -> Config:
+        from commutecompass.config import (
+            MtaConfig,
+            NotifyConfig,
+            OpencodeGoConfig,
+            Origin,
+            PathsConfig,
+            PrepConfig,
+            SchedulingConfig,
+        )
+
+        return Config(
+            origin=Origin(address="x", lat=0.0, lon=0.0),
+            calendars=[],
+            prep=PrepConfig(),
+            scheduling=SchedulingConfig(),
+            paths=PathsConfig(venues_file="/tmp/v", db_path="/tmp/d", oauth_token_path="/tmp/t"),
+            opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+            mta=MtaConfig(
+                subway_alerts_url="https://example.com/s",
+                lirr_alerts_url="https://example.com/l",
+                bus_alerts_url="https://example.com/b",
+            ),
+            notify=NotifyConfig(mode=mode),  # type: ignore[arg-type]
+            telegram_bot_token="tok",
+            telegram_chat_id=12345,
+        )
+
+    def test_build_notifier_stdout(self) -> None:
+        cfg = self._make_config("stdout")
+        assert isinstance(build_notifier(cfg), StdoutNotifier)
+
+    def test_build_notifier_telegram(self) -> None:
+        cfg = self._make_config("telegram")
+        notifier = build_notifier(cfg)
+        assert isinstance(notifier, TelegramNotifier)
+        assert notifier.bot_token == "tok"
+        assert notifier.chat_id == 12345

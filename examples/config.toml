@@ -1,3 +1,13 @@
+# ── Notification mode ─────────────────────────────────────────────────────────
+# "stdout" (default): each would-be Telegram message is printed to stdout with
+#   ===COMMUTECOMPASS-MSG=== ... ===COMMUTECOMPASS-END=== markers. Pipe through
+#   contrib/openclaw-send.sh to relay via your OpenClaw bot. TELEGRAM_BOT_TOKEN
+#   and TELEGRAM_CHAT_ID are unused in this mode.
+# "telegram":         POST directly to the Telegram Bot API (legacy single-bot
+#   deployment). Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the env.
+[notify]
+mode = "stdout"
+
 [origin]
 address = "123 Example Ave, Brooklyn, NY 11201"
 lat = 40.6950

@@ -33,6 +33,7 @@
             google-auth-httplib2
             gtfs-realtime-bindings
             tomli
+            tomlkit
             mypy
           ]
         );
