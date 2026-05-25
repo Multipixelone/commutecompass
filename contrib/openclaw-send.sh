@@ -34,10 +34,10 @@ OPENCLAW_CHANNEL="${OPENCLAW_CHANNEL:-telegram}"
 
 _send_one() {
   local body=$1
-  printf '%s' "$body" | "$OPENCLAW_BIN" message send \
+  "$OPENCLAW_BIN" message send \
     --channel "$OPENCLAW_CHANNEL" \
     --target "$OPENCLAW_TARGET" \
-    --stdin
+    --message "$body"
 }
 
 in_msg=0
