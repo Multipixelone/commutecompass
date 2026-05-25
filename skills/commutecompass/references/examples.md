@@ -1,7 +1,9 @@
 # Chat → command examples
 
-Concrete mappings the agent can pattern-match against. All commands assume
-`COMMUTECOMPASS_CONFIG` is exported.
+Concrete mappings the agent can pattern-match against. All scripts shell out
+to `commutecompass-skill`, which the NixOS module installs on PATH for users
+listed in `services.commutecompass.skill.users`. No env or config-path
+preamble required.
 
 ## Read-only queries
 

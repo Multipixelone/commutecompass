@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec commutecompass --config "${COMMUTECOMPASS_CONFIG}" morning "$@"
+exec commutecompass-skill morning "$@"

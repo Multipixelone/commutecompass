@@ -8,6 +8,32 @@ let
 
   stateDirName = lib.removePrefix "/var/lib/" cfg.dataDir;
 
+  # Wrapper for chat-driven skill invocations (skills/commutecompass/scripts/*).
+  # The systemd units have EnvironmentFile= injected by the unit; interactive
+  # shells don't, so we source the env file ourselves and bake in --config so
+  # callers (and the model) don't have to set COMMUTECOMPASS_CONFIG.
+  #
+  # Requires the invoking user to be a member of cfg.group so it can read
+  # cfg.environmentFile (which therefore must be mode 0440 or wider).
+  skillWrapper = pkgs.writeShellApplication {
+    name = "commutecompass-skill";
+    runtimeInputs = [ cfg.package ];
+    text = ''
+      env_file=${lib.escapeShellArg cfg.environmentFile}
+      if [ ! -r "$env_file" ]; then
+        printf 'commutecompass-skill: cannot read %s\n' "$env_file" >&2
+        printf 'commutecompass-skill: add your user to the %s group and ensure the file is group-readable (mode 0440 or wider)\n' ${lib.escapeShellArg cfg.group} >&2
+        exit 1
+      fi
+      set -a
+      # shellcheck disable=SC1090
+      . "$env_file"
+      set +a
+      export COMMUTECOMPASS_CONFIG=${lib.escapeShellArg configPath}
+      exec commutecompass --config ${lib.escapeShellArg configPath} "$@"
+    '';
+  };
+
   serviceDefaults = {
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
@@ -208,6 +234,28 @@ in {
         StateDirectory= can manage ownership and permissions.
       '';
     };
+
+    skill.users = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      example = [ "tunnel" ];
+      description = ''
+        Login users that should be able to invoke the OpenClaw skill scripts
+        (`skills/commutecompass/scripts/*.sh`) from an interactive shell —
+        typically the user that runs the OpenClaw gateway.
+
+        For each user listed, this module:
+          - adds them to `services.commutecompass.group` so they can read
+            `${configPath}` and `services.commutecompass.environmentFile`;
+          - installs a `commutecompass-skill` wrapper in
+            `environment.systemPackages` that sources the env file, sets
+            `COMMUTECOMPASS_CONFIG=${configPath}`, and execs `commutecompass`.
+
+        The wrapper requires `services.commutecompass.environmentFile` to be
+        group-readable (mode 0440 or wider). The default agenix mode `0400`
+        is not enough; set `age.secrets.<name>.mode = "0440"` to match.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -220,7 +268,12 @@ in {
     # `commutecompass send-test`, etc. from any shell. The CLI's --config
     # default is /etc/commutecompass/config.toml — same path environment.etc
     # below writes to — so no extra wrapping is needed.
-    environment.systemPackages = [ cfg.package ];
+    #
+    # When skill.users is set, also ship the commutecompass-skill wrapper that
+    # OpenClaw skill scripts call (it sources the env file the systemd units
+    # otherwise inject via EnvironmentFile=).
+    environment.systemPackages =
+      [ cfg.package ] ++ lib.optional (cfg.skill.users != []) skillWrapper;
 
     users.users = lib.mkIf cfg.createUser {
       ${cfg.user} = {
@@ -228,9 +281,12 @@ in {
         group = cfg.group;
       };
     };
-    users.groups = lib.mkIf cfg.createGroup {
-      ${cfg.group} = {};
-    };
+    users.groups = lib.mkMerge [
+      (lib.mkIf cfg.createGroup { ${cfg.group} = {}; })
+      (lib.mkIf (cfg.skill.users != []) {
+        ${cfg.group}.members = cfg.skill.users;
+      })
+    ];
 
     environment.etc."commutecompass/config.toml" = {
       source = cfg.configFile;
