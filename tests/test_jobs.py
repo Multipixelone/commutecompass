@@ -1256,6 +1256,193 @@ def test_poll_location_replan_sends_update_when_route_shifts(
     assert saved is not None and saved.leave_at == new_leave
 
 
+def test_poll_ha_alarm_fires_for_prep_and_leave_only(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """When ha_alarm_notifier is supplied, it fires alongside the primary notifier
+    for prep/leave pings only — not for digest or service_update."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    prep_at = leave_at - timedelta(minutes=20)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=prep_at,
+    )
+
+    leave_ping = PingEntry(
+        id="ping-leave",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=1),
+        fired=False,
+        message="leave now",
+    )
+    prep_ping = PingEntry(
+        id="ping-prep",
+        event_id=today_events[0].id,
+        kind="prep",
+        fire_at=now - timedelta(minutes=21),
+        fired=False,
+        message="get ready",
+    )
+    digest_ping = PingEntry(
+        id="ping-digest",
+        event_id=today_events[0].id,
+        kind="digest",
+        fire_at=now - timedelta(minutes=120),
+        fired=False,
+        message="digest body",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(leave_ping)
+    store.schedule_ping(prep_ping)
+    store.schedule_ping(digest_ping)
+
+    notifier = SpyNotifier()
+    alarm = SpyNotifier()
+
+    # Configure alarm kinds via config — default is ["prep", "leave"]
+    minimal_config.home_assistant.alarm.enabled = True
+    minimal_config.home_assistant.alarm.service = "script.commute_alarm"
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        ha_alarm_notifier=cast(TelegramNotifier, alarm),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+    )
+
+    # Primary notifier saw all three pings
+    assert set(notifier.sent) == {"leave now", "get ready", "digest body"}
+    # Alarm notifier saw only prep + leave — digest is NOT alarm-worthy
+    assert set(alarm.sent) == {"leave now", "get ready"}
+
+
+def test_poll_ha_alarm_failure_does_not_unfire_primary(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """If the HA alarm POST fails, the primary ping stays marked-fired and is not
+    re-attempted on the next poll."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=leave_at - timedelta(minutes=20),
+    )
+    leave_ping = PingEntry(
+        id="ping-leave",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=1),
+        fired=False,
+        message="leave now",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(leave_ping)
+
+    notifier = SpyNotifier()
+    failing_alarm = SpyNotifier(return_value=False)
+
+    minimal_config.home_assistant.alarm.enabled = True
+    minimal_config.home_assistant.alarm.service = "script.commute_alarm"
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        ha_alarm_notifier=cast(TelegramNotifier, failing_alarm),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+    )
+
+    # Primary fired once, alarm attempted once
+    assert notifier.sent == ["leave now"]
+    assert failing_alarm.sent == ["leave now"]
+
+    # Second poll: ping was marked fired despite alarm failure → no resend
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        ha_alarm_notifier=cast(TelegramNotifier, failing_alarm),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now + timedelta(minutes=1),
+    )
+    assert notifier.sent == ["leave now"]
+    assert failing_alarm.sent == ["leave now"]
+
+
+def test_poll_ha_alarm_not_fired_when_disabled(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """When alarm.enabled = False (the default), no HA alarm fires even if a
+    notifier instance is somehow available."""
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=leave_at - timedelta(minutes=20),
+    )
+    leave_ping = PingEntry(
+        id="ping-leave",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=1),
+        fired=False,
+        message="leave now",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(leave_ping)
+
+    notifier = SpyNotifier()
+
+    # Don't enable alarm; ha_alarm_notifier defaults to None and build_ha_alarm_notifier
+    # returns None because alarm.enabled is False.
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+    )
+
+    assert notifier.sent == ["leave now"]
+
+
 def test_poll_location_replan_outside_window_is_noop(
     minimal_config: Config,
     today_events: list[Event],

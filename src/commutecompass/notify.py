@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
-from typing import TextIO
+from typing import Optional, TextIO
 
 import httpx
 
 from commutecompass.config import Config
+from commutecompass.ha_client import call_service as _ha_call_service
 
 
 _logger = logging.getLogger(__name__)
@@ -136,15 +138,107 @@ class StdoutNotifier:
         return True
 
 
+# MarkdownV2 escapes everything in this set with a backslash; HA receivers
+# (Pushcut, notify.mobile_app_*, persistent_notification) want plain text.
+# Stripping just the escape backslashes is enough to make the body readable
+# without losing structure.
+_MARKDOWN_V2_ESCAPE_RE = re.compile(r"\\([_*\[\]()~`>#+\-=|{}.!\\])")
+
+
+def _strip_markdown_v2(text: str) -> str:
+    """Undo Telegram MarkdownV2 backslash-escapes for plain-text consumers."""
+    return _MARKDOWN_V2_ESCAPE_RE.sub(r"\1", text)
+
+
+class HomeAssistantAlarmNotifier:
+    """Fire an HA service call so HA can wake the user with a real alarm.
+
+    Sends ``{"title": ..., "message": ..., **extra_data}`` to
+    ``{domain}.{service}``.  The HA-side service decides the actual alarm
+    mechanism — typically a script that chains Pushcut + a critical
+    ``notify.mobile_app_*`` push + a media_player blast.
+
+    parse_mode is accepted for protocol compatibility but ignored; MarkdownV2
+    backslash-escapes are stripped before sending so the body reads cleanly on
+    iOS / Pushcut / etc.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        domain: str,
+        service: str,
+        extra_data: Optional[dict[str, object]] = None,
+        title: str = "CommuteCompass",
+    ) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.domain = domain
+        self.service = service
+        self.extra_data = dict(extra_data or {})
+        self.title = title
+
+    def send(self, text: str, parse_mode: str = "MarkdownV2") -> bool:
+        body = _strip_markdown_v2(text)
+        payload: dict[str, object] = {"title": self.title, "message": body}
+        # User-supplied keys win — lets the operator override title/message
+        # or pass HA-specific knobs (sound, push.sound.critical, tag, etc.).
+        payload.update(self.extra_data)
+        return _ha_call_service(
+            self.base_url,
+            self.token,
+            self.domain,
+            self.service,
+            data=payload,
+        )
+
+
 # Loose alias for any object exposing ``send(text, parse_mode) -> bool``.
-Notifier = TelegramNotifier | StdoutNotifier
+Notifier = TelegramNotifier | StdoutNotifier | HomeAssistantAlarmNotifier
 
 
 def build_notifier(config: Config) -> Notifier:
-    """Construct the notifier dictated by ``config.notify.mode``."""
+    """Construct the *primary* notifier dictated by ``config.notify.mode``.
+
+    The HA alarm channel (if configured) is additive and built separately by
+    ``build_ha_alarm_notifier`` — it does not replace the primary notifier.
+    """
     if config.notify.mode == "telegram":
         return TelegramNotifier(
             bot_token=config.telegram_bot_token,
             chat_id=config.telegram_chat_id,
         )
     return StdoutNotifier()
+
+
+def build_ha_alarm_notifier(config: Config) -> Optional["HomeAssistantAlarmNotifier"]:
+    """Build the additive HA alarm notifier when configured, else None.
+
+    Requires both ``[home_assistant].enabled`` and ``[home_assistant.alarm]
+    .enabled`` to be true plus a ``service`` of the form ``"domain.service"``.
+    Returns None (logged at INFO/WARNING) when prerequisites are missing so
+    the poll loop can simply skip the alarm step.
+    """
+    ha = config.home_assistant
+    if not ha.enabled or not ha.alarm.enabled:
+        return None
+    if not ha.base_url or not config.home_assistant_token:
+        _logger.warning(
+            "ha_alarm: enabled but base_url or HOME_ASSISTANT_TOKEN missing — skipping"
+        )
+        return None
+    domain, sep, service = ha.alarm.service.partition(".")
+    if not sep or not domain or not service:
+        _logger.warning(
+            "ha_alarm: alarm.service %r is not 'domain.service' — skipping",
+            ha.alarm.service,
+        )
+        return None
+    return HomeAssistantAlarmNotifier(
+        base_url=ha.base_url,
+        token=config.home_assistant_token,
+        domain=domain,
+        service=service,
+        extra_data=ha.alarm.extra_data,
+    )

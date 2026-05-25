@@ -74,6 +74,15 @@ class ZoneOrigin(BaseModel):
     lirr_station: str = ""
 
 
+class HomeAssistantAlarmConfig(BaseModel):
+    """Additive alarm channel — see models.HomeAssistantAlarmConfig."""
+
+    enabled: bool = False
+    service: str = ""
+    kinds: list[Literal["prep", "leave"]] = ["prep", "leave"]
+    extra_data: dict[str, Any] = {}
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -83,6 +92,7 @@ class HomeAssistantConfig(BaseModel):
     replan_window_minutes: int = 30
     min_gps_accuracy_meters: int = 500
     zone_origins: list[ZoneOrigin] = []
+    alarm: HomeAssistantAlarmConfig = HomeAssistantAlarmConfig()
 
 
 class NotifyConfig(BaseModel):

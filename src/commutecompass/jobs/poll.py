@@ -29,6 +29,7 @@ def run(
     alerts_affecting_route_fn: Optional[Callable[..., list[Alert]]] = None,
     select_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
     notifier: Optional["Notifier"] = None,
+    ha_alarm_notifier: Optional["Notifier"] = None,
     plan_event_fn: Optional[Callable[..., Plan]] = None,
     now_fn: Optional[Callable[[], "datetime"]] = None,
     ha_fetch_fn: Optional[Callable[..., Optional[CurrentLocation]]] = None,
@@ -62,7 +63,7 @@ def run(
     from commutecompass.mta import alerts_affecting_route as _affecting
     from commutecompass.mta import fetch_alerts as _fetch
     from commutecompass.mta import select_actionable_alerts as _select_actionable
-    from commutecompass.notify import build_notifier
+    from commutecompass.notify import build_ha_alarm_notifier, build_notifier
     from commutecompass.planner import plan_event as _plan_event
     from commutecompass.llm import OpencodeGoClient
 
@@ -80,6 +81,14 @@ def run(
     else:
         _select_alerts = _select_actionable
     _notifier: Notifier = notifier or build_notifier(config)
+    # Additive alarm channel — optional; None when not configured.  Caller may
+    # also inject one (tests do).  We do not fall back to build_ha_alarm_notifier
+    # when ha_alarm_notifier is explicitly None *and* the test path supplied
+    # other overrides, so a None test value stays None.
+    _ha_alarm: Optional[Notifier] = (
+        ha_alarm_notifier if ha_alarm_notifier is not None else build_ha_alarm_notifier(config)
+    )
+    _ha_alarm_kinds: set[str] = set(config.home_assistant.alarm.kinds)
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
     _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
     if ha_fetch_fn is None:
@@ -153,6 +162,13 @@ def run(
         if _notifier.send(ping.message):
             _store.mark_fired(ping.id, now)
             logger.info("Fired ping %s (%s)", ping.id, ping.kind)
+            # Additive HA alarm: fire AFTER the primary notification is marked
+            # so an HA outage cannot un-fire the ping or cause repeat sends.
+            if _ha_alarm is not None and ping.kind in _ha_alarm_kinds:
+                if not _ha_alarm.send(ping.message):
+                    logger.warning(
+                        "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
+                    )
         else:
             logger.warning("Failed to send ping %s (%s)", ping.id, ping.kind)
 

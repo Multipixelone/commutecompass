@@ -47,6 +47,48 @@ OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.t
 
 Point your OpenClaw instance at `skills/commutecompass/`, and the chat commands are live. The scripts shell out to `commutecompass-skill`, a wrapper the NixOS module installs when `services.commutecompass.skill.users` is set; it sources the secrets env file and points at `/etc/commutecompass/config.toml`, so the calling session needs no preamble. Outside NixOS, ship an equivalent wrapper on PATH. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
 
+## Home Assistant alarm
+
+CommuteCompass already pulls live location from Home Assistant when `[home_assistant].enabled = true`. With the optional `[home_assistant.alarm]` block it will *additionally* POST to an HA service every time a `prep` or `leave` ping fires — so HA can wake you up with a real alarm without changing your existing notification channel. The same `HOME_ASSISTANT_TOKEN` is reused; no new env var.
+
+```toml
+[home_assistant.alarm]
+enabled = true
+service = "script.commute_alarm"   # any "domain.service"
+kinds   = ["prep", "leave"]        # which ping kinds trigger the alarm
+
+# Optional pass-through merged into the HA service payload
+[home_assistant.alarm.extra_data.data.push.sound]
+critical = 1
+name = "alarm.caf"
+```
+
+The recommended pattern is to point `service` at a small HA script you own and chain the loud parts there — iOS does not let third-party apps create real Clock-app alarms programmatically, so something like [Pushcut](https://www.pushcut.io) (its "Notification Server" sustains a custom loud tone until dismissed) plus an HA Companion critical notification fallback is the canonical "wake-from-a-nap" setup. A minimal HA script:
+
+```yaml
+script:
+  commute_alarm:
+    sequence:
+      - service: notify.pushcut_my_iphone
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          data:
+            sound: "alarm-loop"   # a Pushcut alarm sound
+      - service: notify.mobile_app_my_iphone   # belt-and-suspenders critical push
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          data:
+            push:
+              sound:
+                critical: 1
+                name: "alarm.caf"
+                volume: 1.0
+```
+
+CommuteCompass POSTs `{"title": "CommuteCompass", "message": "<ping body>", ...extra_data}` to the configured service. If the call fails, the primary notifier's send is **not** rolled back — the ping is still marked fired and won't repeat next minute.
+
 ## Development
 
 ```bash

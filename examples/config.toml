@@ -86,6 +86,31 @@ min_gps_accuracy_meters = 500
 # lat = 40.7062
 # lon = -74.0124
 
+# ── Home Assistant alarm channel (optional, additive) ────────────────────────
+# When enabled, each prep/leave ping ALSO POSTs to an HA service so HA can
+# wake you up with a real alarm (Pushcut, looping critical notification,
+# media_player on a HomePod — whatever you wire up inside HA itself).  The
+# existing notify channel (Telegram/stdout) keeps firing as before; this is
+# additive.  Reuses [home_assistant].base_url and HOME_ASSISTANT_TOKEN.
+#
+# `service` is the HA service to call as "domain.service".  Pointing at a
+# script.* you own (rather than directly at notify.mobile_app_*) lets you
+# evolve the alarm chain without touching commutecompass config.
+#
+# `extra_data` is merged into the JSON body POSTed to HA; use it to set
+# Pushcut sound names, mobile_app critical-push flags, tags, etc.
+# [home_assistant.alarm]
+# enabled = true
+# service = "script.commute_alarm"   # call your HA-side alarm script
+# kinds = ["prep", "leave"]          # ping kinds that trigger the alarm
+# [home_assistant.alarm.extra_data]
+# # title = "Get moving!"           # overrides the default "CommuteCompass"
+# # Example pass-through for HA Companion app critical push (iOS):
+# # [home_assistant.alarm.extra_data.data.push.sound]
+# # critical = 1
+# # volume = 1.0
+# # name = "alarm.caf"
+
 [[calendars]]
 id = "theatre-calendar@example.com"
 name = "Theatre"
