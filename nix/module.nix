@@ -85,6 +85,25 @@ in {
       default = "commutecompass";
     };
 
+    createUser = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether this module should declare `users.users.${"\${cfg.user}"}`.
+        Set false when pointing `user` at a user that already exists (e.g. a
+        login user that owns the openclaw state in its home directory).
+      '';
+    };
+
+    createGroup = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether this module should declare `users.groups.${"\${cfg.group}"}`.
+        Set false when reusing an existing group such as `users`.
+      '';
+    };
+
     configFile = lib.mkOption {
       type = lib.types.path;
       description = "Path to commutecompass config.toml.";
@@ -197,11 +216,15 @@ in {
       message = "services.commutecompass.dataDir must be under /var/lib/ (got: ${cfg.dataDir})";
     }];
 
-    users.users.${cfg.user} = {
-      isSystemUser = true;
-      group = cfg.group;
+    users.users = lib.mkIf cfg.createUser {
+      ${cfg.user} = {
+        isSystemUser = true;
+        group = cfg.group;
+      };
     };
-    users.groups.${cfg.group} = {};
+    users.groups = lib.mkIf cfg.createGroup {
+      ${cfg.group} = {};
+    };
 
     environment.etc."commutecompass/config.toml" = {
       source = cfg.configFile;
