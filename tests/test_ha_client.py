@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import httpx
 
-from commutecompass.ha_client import fetch_location, fetch_zones
+from commutecompass.ha_client import call_service, fetch_location, fetch_zones
 
 
 def _mock_get_response(status: int, payload: object) -> httpx.Response:
@@ -188,3 +188,72 @@ class TestFetchZones:
     def test_empty_inputs_short_circuit(self) -> None:
         assert fetch_zones("", "tok") == {}
         assert fetch_zones("http://ha", "") == {}
+
+
+class TestCallService:
+    def test_happy_path_posts_to_service_url(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            ok = call_service(
+                "http://ha.local:8123",
+                "secret-token",
+                "script",
+                "commute_alarm",
+                data={"title": "Get ready", "message": "Leave in 20"},
+            )
+
+        assert ok is True
+        call_args = mock_instance.post.call_args
+        assert call_args.args[0] == "http://ha.local:8123/api/services/script/commute_alarm"
+        assert call_args.kwargs["json"] == {"title": "Get ready", "message": "Leave in 20"}
+        assert call_args.kwargs["headers"]["Authorization"] == "Bearer secret-token"
+
+    def test_trailing_slash_stripped(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            call_service("http://ha/", "tok", "notify", "mobile_app_x")
+
+        assert (
+            mock_instance.post.call_args.args[0]
+            == "http://ha/api/services/notify/mobile_app_x"
+        )
+
+    def test_accepts_201_and_202_as_success(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=201, json=[])
+
+            assert call_service("http://ha", "tok", "script", "s") is True
+
+    def test_4xx_returns_false(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=401, text="unauth")
+
+            assert call_service("http://ha", "tok", "script", "s") is False
+
+    def test_network_error_returns_false(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.side_effect = httpx.HTTPError("boom")
+
+            assert call_service("http://ha", "tok", "script", "s") is False
+
+    def test_empty_inputs_short_circuit(self) -> None:
+        assert call_service("", "tok", "script", "s") is False
+        assert call_service("http://ha", "", "script", "s") is False
+        assert call_service("http://ha", "tok", "", "s") is False
+        assert call_service("http://ha", "tok", "script", "") is False
+
+    def test_empty_data_sends_empty_object(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            call_service("http://ha", "tok", "script", "s")
+
+        assert mock_instance.post.call_args.kwargs["json"] == {}

@@ -105,6 +105,52 @@ def fetch_location(
     )
 
 
+def call_service(
+    base_url: str,
+    token: str,
+    domain: str,
+    service: str,
+    data: dict[str, object] | None = None,
+    *,
+    timeout: float = 5.0,
+) -> bool:
+    """POST to /api/services/{domain}/{service}.
+
+    Used to trigger HA-side automations, scripts, or notify services (e.g.
+    ``notify.mobile_app_iphone``, ``script.commute_alarm``).  Returns True on
+    HTTP 2xx; False on any failure (logged at WARNING).  Never raises.
+    """
+    if not (base_url and domain and service and token):
+        return False
+
+    url = f"{base_url.rstrip('/')}/api/services/{domain}/{service}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = dict(data) if data else {}
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, json=payload, headers=headers)
+    except httpx.HTTPError as exc:
+        _logger.warning("HA call_service %s.%s failed: %s", domain, service, exc)
+        return False
+
+    if not (200 <= response.status_code < 300):
+        _logger.warning(
+            "HA call_service %s.%s returned %d: %s",
+            domain,
+            service,
+            response.status_code,
+            response.text[:200],
+        )
+        return False
+
+    return True
+
+
 def fetch_zones(
     base_url: str,
     token: str,

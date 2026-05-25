@@ -10,10 +10,13 @@ import httpx
 from commutecompass.notify import (
     STDOUT_MSG_END,
     STDOUT_MSG_START,
+    HomeAssistantAlarmNotifier,
     StdoutNotifier,
     TelegramNotifier,
     _MAX_MESSAGE_CHARS,
     _chunk_message,
+    _strip_markdown_v2,
+    build_ha_alarm_notifier,
     build_notifier,
 )
 from commutecompass.config import Config
@@ -303,3 +306,165 @@ class TestBuildNotifier:
         assert isinstance(notifier, TelegramNotifier)
         assert notifier.bot_token == "tok"
         assert notifier.chat_id == 12345
+
+
+# ── HomeAssistantAlarmNotifier ────────────────────────────────────────────────
+
+
+class TestStripMarkdownV2:
+    def test_strips_escape_backslashes(self) -> None:
+        assert _strip_markdown_v2(r"Leave by 7\.30 \(C train\)") == "Leave by 7.30 (C train)"
+
+    def test_leaves_plain_text_unchanged(self) -> None:
+        assert _strip_markdown_v2("nothing to do here.") == "nothing to do here."
+
+    def test_unescapes_dash_and_dot(self) -> None:
+        assert _strip_markdown_v2(r"prep at 6\.45\-7\.00") == "prep at 6.45-7.00"
+
+
+class TestHomeAssistantAlarmNotifier:
+    def test_send_posts_to_ha_service_with_title_and_message(self) -> None:
+        notifier = HomeAssistantAlarmNotifier(
+            base_url="http://ha:8123",
+            token="tok",
+            domain="script",
+            service="commute_alarm",
+        )
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            ok = notifier.send(r"⏰ Get ready for *Rehearsal* \- leave by 7\.30")
+
+        assert ok is True
+        call_args = mock_instance.post.call_args
+        assert call_args.args[0] == "http://ha:8123/api/services/script/commute_alarm"
+        body = call_args.kwargs["json"]
+        assert body["title"] == "CommuteCompass"
+        # Backslash escapes stripped; star left as-is (HA doesn't care)
+        assert body["message"] == "⏰ Get ready for *Rehearsal* - leave by 7.30"
+
+    def test_extra_data_is_merged_and_can_override_title(self) -> None:
+        notifier = HomeAssistantAlarmNotifier(
+            base_url="http://ha",
+            token="tok",
+            domain="notify",
+            service="mobile_app_iphone",
+            extra_data={
+                "title": "WAKE UP",
+                "data": {"push": {"sound": {"critical": 1, "name": "alarm.caf"}}},
+            },
+        )
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            notifier.send("leave now")
+
+        body = mock_instance.post.call_args.kwargs["json"]
+        assert body["title"] == "WAKE UP"
+        assert body["message"] == "leave now"
+        assert body["data"]["push"]["sound"]["critical"] == 1
+
+    def test_returns_false_on_ha_failure(self) -> None:
+        notifier = HomeAssistantAlarmNotifier(
+            base_url="http://ha", token="tok", domain="script", service="s"
+        )
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=401, text="nope")
+
+            assert notifier.send("leave now") is False
+
+    def test_parse_mode_is_ignored(self) -> None:
+        notifier = HomeAssistantAlarmNotifier(
+            base_url="http://ha", token="tok", domain="script", service="s"
+        )
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            notifier.send("hi", parse_mode="HTML")
+
+        # No mention of parse_mode anywhere in the payload
+        body = mock_instance.post.call_args.kwargs["json"]
+        assert "parse_mode" not in body
+
+
+class TestBuildHaAlarmNotifier:
+    def _make_config(
+        self,
+        *,
+        ha_enabled: bool = True,
+        alarm_enabled: bool = True,
+        service: str = "script.commute_alarm",
+        base_url: str = "http://ha:8123",
+        token: str = "tok",
+    ) -> Config:
+        from commutecompass.config import (
+            HomeAssistantAlarmConfig,
+            HomeAssistantConfig,
+            MtaConfig,
+            NotifyConfig,
+            OpencodeGoConfig,
+            Origin,
+            PathsConfig,
+            PrepConfig,
+            SchedulingConfig,
+        )
+
+        return Config(
+            origin=Origin(address="x", lat=0.0, lon=0.0),
+            calendars=[],
+            prep=PrepConfig(),
+            scheduling=SchedulingConfig(),
+            paths=PathsConfig(venues_file="/tmp/v", db_path="/tmp/d", oauth_token_path="/tmp/t"),
+            opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+            mta=MtaConfig(
+                subway_alerts_url="https://example.com/s",
+                lirr_alerts_url="https://example.com/l",
+                bus_alerts_url="https://example.com/b",
+            ),
+            notify=NotifyConfig(mode="stdout"),
+            home_assistant=HomeAssistantConfig(
+                enabled=ha_enabled,
+                base_url=base_url,
+                alarm=HomeAssistantAlarmConfig(
+                    enabled=alarm_enabled,
+                    service=service,
+                    extra_data={"data": {"push": {"sound": {"critical": 1}}}},
+                ),
+            ),
+            home_assistant_token=token,
+        )
+
+    def test_returns_notifier_when_fully_configured(self) -> None:
+        cfg = self._make_config()
+        n = build_ha_alarm_notifier(cfg)
+        assert n is not None
+        assert n.domain == "script"
+        assert n.service == "commute_alarm"
+        assert n.base_url == "http://ha:8123"
+        assert n.token == "tok"
+        assert n.extra_data == {"data": {"push": {"sound": {"critical": 1}}}}
+
+    def test_disabled_when_ha_disabled(self) -> None:
+        assert build_ha_alarm_notifier(self._make_config(ha_enabled=False)) is None
+
+    def test_disabled_when_alarm_disabled(self) -> None:
+        assert build_ha_alarm_notifier(self._make_config(alarm_enabled=False)) is None
+
+    def test_disabled_when_token_missing(self) -> None:
+        assert build_ha_alarm_notifier(self._make_config(token="")) is None
+
+    def test_disabled_when_base_url_missing(self) -> None:
+        assert build_ha_alarm_notifier(self._make_config(base_url="")) is None
+
+    def test_disabled_when_service_malformed(self) -> None:
+        # No dot → not "domain.service"
+        assert build_ha_alarm_notifier(self._make_config(service="commute_alarm")) is None
+        # Empty
+        assert build_ha_alarm_notifier(self._make_config(service="")) is None
+        # Dot but missing one side
+        assert build_ha_alarm_notifier(self._make_config(service=".commute_alarm")) is None
+        assert build_ha_alarm_notifier(self._make_config(service="script.")) is None

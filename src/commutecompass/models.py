@@ -76,6 +76,25 @@ class ZoneOrigin(BaseModel):
     lirr_station: str = ""
 
 
+class HomeAssistantAlarmConfig(BaseModel):
+    """Optional additive alarm channel — fires an HA service when prep/leave pings fire.
+
+    The intent is to delegate the "wake the user up loudly" mechanism to HA
+    itself (Pushcut, looping critical notification, a HomePod media_player,
+    a script that chains them — anything callable as an HA service).  This
+    keeps CommuteCompass out of the iOS-alarm-clock business.
+
+    Reuses ``HomeAssistantConfig.base_url`` and ``HOME_ASSISTANT_TOKEN``.
+    """
+
+    enabled: bool = False
+    service: str = ""  # "domain.service", e.g. "script.commute_alarm"
+    kinds: list[Literal["prep", "leave"]] = Field(
+        default_factory=lambda: ["prep", "leave"]  # type: ignore[arg-type]
+    )
+    extra_data: dict[str, Any] = Field(default_factory=dict)
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -85,6 +104,7 @@ class HomeAssistantConfig(BaseModel):
     replan_window_minutes: int = 30
     min_gps_accuracy_meters: int = 500
     zone_origins: list[ZoneOrigin] = Field(default_factory=list)
+    alarm: HomeAssistantAlarmConfig = Field(default_factory=HomeAssistantAlarmConfig)
 
 
 class NotifyConfig(BaseModel):
