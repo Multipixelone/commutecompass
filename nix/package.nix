@@ -26,6 +26,7 @@ python3Packages.buildPythonApplication rec {
   postInstall = ''
     install -Dm755 contrib/openclaw-send.sh \
       $out/share/commutecompass/openclaw-send.sh
+    patchShebangs $out/share/commutecompass/openclaw-send.sh
   '';
 
   pythonImportsCheck = [ "commutecompass" ];
