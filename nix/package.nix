@@ -1,4 +1,4 @@
-{ lib, python3Packages, fetchFromGitHub, ... }:
+{ lib, python3Packages, bash, fetchFromGitHub, ... }:
 
 python3Packages.buildPythonApplication rec {
   pname = "commutecompass";
@@ -23,10 +23,14 @@ python3Packages.buildPythonApplication rec {
     tomlkit
   ];
 
+  # patchShebangs silently no-ops here: strictDeps=1 puts it in --host mode,
+  # which only searches HOST_PATH (buildInputs + propagatedBuildInputs) — bash
+  # from stdenv isn't in there. Rewrite the shebang directly instead.
   postInstall = ''
     install -Dm755 contrib/openclaw-send.sh \
       $out/share/commutecompass/openclaw-send.sh
-    patchShebangs $out/share/commutecompass/openclaw-send.sh
+    substituteInPlace $out/share/commutecompass/openclaw-send.sh \
+      --replace-fail '#!/usr/bin/env bash' '#!${bash}/bin/bash'
   '';
 
   pythonImportsCheck = [ "commutecompass" ];
