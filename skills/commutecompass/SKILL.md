@@ -5,9 +5,7 @@ version: 0.1.0
 metadata:
   openclaw:
     requires:
-      env: [COMMUTECOMPASS_CONFIG]
-      bins: [commutecompass]
-    primaryEnv: COMMUTECOMPASS_CONFIG
+      bins: [commutecompass-skill]
     emoji: "🧭"
     homepage: https://github.com/Multipixelone/commutecompass
 ---
@@ -19,8 +17,12 @@ schedule (morning digest at ~06:00, poll loop every minute) and pushes Telegram
 messages through OpenClaw. Your job here is to handle on-demand questions and
 adjustments.
 
-All scripts read the config path from `$COMMUTECOMPASS_CONFIG`. They print to
-stdout; you should relay that stdout back to the user.
+All scripts shell out to `commutecompass-skill`, a wrapper installed by the
+NixOS module that sources the secrets env file and points at the right
+`config.toml`. The wrapper expects the invoking user to be a member of the
+`commutecompass` group; the systemd timers continue to run as the
+`commutecompass` user with EnvironmentFile= injected directly. Scripts print
+to stdout; relay that stdout back to the user.
 
 ## Dispatch
 
@@ -41,8 +43,7 @@ stdout; you should relay that stdout back to the user.
 `adjust` needs the Google Calendar event ID. It's not in the digest text. To
 get it:
 
-1. Run `commutecompass --config "$COMMUTECOMPASS_CONFIG" digest-preview` (i.e.
-   `scripts/digest.sh`).
+1. Run `scripts/digest.sh` (`commutecompass-skill digest-preview`).
 2. The DB-cached plans match what's shown in the digest. Use the user's
    description (event title, time) to pick the right one. If the digest is
    ambiguous, ask the user which event they mean.

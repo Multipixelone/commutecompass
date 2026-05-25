@@ -45,7 +45,7 @@ OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.t
            OPENCLAW_TARGET=$CHAT_ID /opt/commutecompass/contrib/openclaw-send.sh
 ```
 
-Point your OpenClaw instance at `skills/commutecompass/` (set `COMMUTECOMPASS_CONFIG` in OpenClaw's env), and the chat commands are live. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
+Point your OpenClaw instance at `skills/commutecompass/`, and the chat commands are live. The scripts shell out to `commutecompass-skill`, a wrapper the NixOS module installs when `services.commutecompass.skill.users` is set; it sources the secrets env file and points at `/etc/commutecompass/config.toml`, so the calling session needs no preamble. Outside NixOS, ship an equivalent wrapper on PATH. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
 
 ## Development
 
