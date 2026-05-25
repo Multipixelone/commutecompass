@@ -216,6 +216,12 @@ in {
       message = "services.commutecompass.dataDir must be under /var/lib/ (got: ${cfg.dataDir})";
     }];
 
+    # Expose the CLI system-wide so admins can run `commutecompass morning`,
+    # `commutecompass send-test`, etc. from any shell. The CLI's --config
+    # default is /etc/commutecompass/config.toml — same path environment.etc
+    # below writes to — so no extra wrapping is needed.
+    environment.systemPackages = [ cfg.package ];
+
     users.users = lib.mkIf cfg.createUser {
       ${cfg.user} = {
         isSystemUser = true;
