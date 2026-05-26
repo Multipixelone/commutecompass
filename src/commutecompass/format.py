@@ -3,8 +3,41 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from commutecompass.models import Alert, Plan, Route
+
+
+def _fmt_time(dt: datetime) -> str:
+    """Render a datetime as 12-hour wall-clock time without a leading zero.
+
+    Built explicitly because ``%-I`` is a GNU strftime extension: it raises
+    on macOS and Windows and silently leaves the literal ``-I`` on some
+    libcs.  Avoiding it keeps the formatter portable across dev machines.
+    """
+    hour12 = dt.hour % 12 or 12
+    suffix = "AM" if dt.hour < 12 else "PM"
+    return f"{hour12}:{dt.minute:02d} {suffix}"
+
+
+def _fmt_day_of_month(dt: datetime) -> str:
+    """Render ``dt.day`` with no leading zero.  ``%-d`` is also a GNU extension."""
+    return str(dt.day)
+
+
+# Human-readable rendering for ``Plan.error`` codes.  Anything not listed here
+# falls through to the raw error string (escaped) — so adding a new code never
+# breaks rendering, it just shows the code until we add a friendly label.
+_PLAN_ERROR_LABELS: dict[str, str] = {
+    "location_unresolved": "Could not figure out the location",
+    "no_route": "No transit route found",
+    "too_imminent": "Event too imminent — leave now, no prep window",
+}
+
+
+def _plan_error_label(code: str) -> str:
+    """Map a plan-error code to a human-readable label, escaped for MarkdownV2."""
+    return escape_md(_PLAN_ERROR_LABELS.get(code, code))
 
 # Tuning knob — raise to require stricter subway share before using subway label
 SUBWAY_MAJORITY_THRESHOLD = 0.5
@@ -105,7 +138,7 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
     from commutecompass.timeutil import now_nyc
 
     today = now_nyc()
-    date_str = today.strftime("%A, %b %-d").replace("  ", " ")
+    date_str = f"{today.strftime('%A, %b')} {_fmt_day_of_month(today)}"
     lines = [f"*Today — {date_str}*\n"]
 
     if not plans:
@@ -131,7 +164,7 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
 def _format_plan_summary(plan: Plan) -> str:
     """Format a single plan summary block for the digest."""
     event = plan.event
-    start_str = event.start.strftime("%-I:%M %p")
+    start_str = event.start.strftime("%I:%M %p").lstrip("0")
 
     lines = []
     cal_lower = event.calendar_name.lower()
@@ -153,13 +186,13 @@ def _format_plan_summary(plan: Plan) -> str:
     lines.append(f"  {start_str} at {escape_md(location)}")
 
     if plan.error:
-        lines.append(f"  ❌ {escape_md(plan.error)}")
+        lines.append(f"  ❌ {_plan_error_label(plan.error)}")
         lines.append("")
         return "\n".join(lines)
 
     if plan.prep_at and plan.leave_at:
-        prep_str = plan.prep_at.strftime("%-I:%M %p")
-        leave_str = plan.leave_at.strftime("%-I:%M %p")
+        prep_str = plan.prep_at.strftime("%I:%M %p").lstrip("0")
+        leave_str = plan.leave_at.strftime("%I:%M %p").lstrip("0")
         lines.append(f"  Start prep: {prep_str} · Leave: {leave_str}")
 
     if plan.route:
@@ -288,8 +321,8 @@ def _route_summary_detailed(route: Route) -> str:
     for leg in route.legs:
         if leg.mode == "TRANSIT" and leg.system:
             line = leg.line or ""
-            depart = leg.depart_at.strftime("%-I:%M %p")
-            arrive = leg.arrive_at.strftime("%-I:%M %p")
+            depart = leg.depart_at.strftime("%I:%M %p").lstrip("0")
+            arrive = leg.arrive_at.strftime("%I:%M %p").lstrip("0")
             if leg.system == "MTA Subway":
                 lines.append(f"{line} train, {depart} → {arrive}")
             elif leg.system == "LIRR":
@@ -317,15 +350,15 @@ def format_prep_ping(plan: Plan) -> str:
         return (
             f"⏰ *Start getting ready*\n"
             f"{escape_md(title)}\n"
-            f"⚠️ Could not compute route: {escape_md(plan.error)}"
+            f"⚠️ {_plan_error_label(plan.error)}"
         )
 
     leave_str = ""
     if plan.leave_at:
-        leave_str = plan.leave_at.strftime("%-I:%M %p")
+        leave_str = plan.leave_at.strftime("%I:%M %p").lstrip("0")
 
     title = escape_md(plan.event.title)
-    start_str = plan.event.start.strftime("%-I:%M %p")
+    start_str = plan.event.start.strftime("%I:%M %p").lstrip("0")
 
     lines = [
         "⏰ *Start getting ready*",
@@ -348,10 +381,10 @@ def format_leave_ping(plan: Plan) -> str:
     """
     if plan.error:
         title = plan.event.title
-        return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {escape_md(plan.error)}"
+        return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {_plan_error_label(plan.error)}"
 
     title = escape_md(plan.event.title)
-    start_str = plan.event.start.strftime("%-I:%M %p")
+    start_str = plan.event.start.strftime("%I:%M %p").lstrip("0")
     location = escape_md(_compact_location(plan.event.location_raw, fallback="unknown location"))
 
     lines = [
@@ -379,7 +412,7 @@ def format_location_update(old_plan: Plan, new_plan: Plan) -> str:
         MarkdownV2-safe Telegram message.
     """
     title = escape_md(new_plan.event.title)
-    start_str = new_plan.event.start.strftime("%-I:%M %p")
+    start_str = new_plan.event.start.strftime("%I:%M %p").lstrip("0")
 
     lines = [
         "📍 *Location update*",
@@ -387,18 +420,18 @@ def format_location_update(old_plan: Plan, new_plan: Plan) -> str:
     ]
 
     if new_plan.error:
-        lines.append(f"⚠️ {escape_md(new_plan.error)}")
+        lines.append(f"⚠️ {_plan_error_label(new_plan.error)}")
         return "\n".join(lines)
 
     if old_plan.leave_at and new_plan.leave_at:
-        old_str = old_plan.leave_at.strftime("%-I:%M %p")
-        new_str = new_plan.leave_at.strftime("%-I:%M %p")
+        old_str = old_plan.leave_at.strftime("%I:%M %p").lstrip("0")
+        new_str = new_plan.leave_at.strftime("%I:%M %p").lstrip("0")
         if old_str != new_str:
             lines.append(f"Leave by {new_str} \\(was {old_str}\\)")
         else:
             lines.append(f"Leave by {new_str}")
     elif new_plan.leave_at:
-        lines.append(f"Leave by {new_plan.leave_at.strftime('%-I:%M %p')}")
+        lines.append(f"Leave by {new_plan.leave_at.strftime('%I:%M %p').lstrip('0')}")
 
     if new_plan.route:
         lines.append(escape_md(_route_summary(new_plan.route)))
@@ -423,7 +456,7 @@ def format_service_update(plan: Plan, alert: Alert, new_route: Route) -> str:
 
     lines = [
         f"{severity} *Service Change*",
-        f"{title} at {plan.event.start.strftime('%-I:%M %p')}",
+        f"{title} at {plan.event.start.strftime('%I:%M %p').lstrip('0')}",
         f"{header}",
     ]
 
@@ -431,6 +464,6 @@ def format_service_update(plan: Plan, alert: Alert, new_route: Route) -> str:
         lines.append(escape_md(_route_summary(new_route)))
 
     if plan.leave_at:
-        lines.append(f"Leave by {plan.leave_at.strftime('%-I:%M %p')}")
+        lines.append(f"Leave by {plan.leave_at.strftime('%I:%M %p').lstrip('0')}")
 
     return "\n".join(lines)

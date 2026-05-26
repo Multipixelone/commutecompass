@@ -425,9 +425,9 @@ def adjust(ctx: click.Context, event_id: str, add_prep: int) -> None:
 
     direction = "earlier" if add_prep > 0 else "later"
     click.echo(
-        f"Adjusted prep for {event_id}: prep_at {new_prep_at.strftime('%-I:%M %p')} "
+        f"Adjusted prep for {event_id}: prep_at {new_prep_at.strftime('%I:%M %p').lstrip('0')} "
         f"({abs(add_prep)} min {direction}); leave_at "
-        f"{plan.leave_at.strftime('%-I:%M %p')} unchanged."
+        f"{plan.leave_at.strftime('%I:%M %p').lstrip('0')} unchanged."
     )
 
 

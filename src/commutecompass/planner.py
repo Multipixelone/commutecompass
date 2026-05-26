@@ -10,6 +10,7 @@ from commutecompass.geocode import GeocodeResult
 from commutecompass.models import Event, Origin, Plan, ZoneInfo
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
+from commutecompass.timeutil import now_nyc
 
 if TYPE_CHECKING:
     from commutecompass.store import Store
@@ -157,6 +158,19 @@ def plan_event(
 
     leave_at = event.start - travel - buffer
     prep_at = leave_at - prep
+
+    # Too-imminent guard: if leave_at is already in the past, the event was
+    # added to the calendar after the user would have needed to depart.
+    # Emit a structured error so the digest / chat surface can tell the user
+    # rather than silently storing a Plan with past times that will never fire.
+    if leave_at < now_nyc():
+        return Plan(
+            event=event.model_copy(update={"location_resolved": resolved}),
+            route=route,
+            leave_at=leave_at,
+            prep_at=prep_at,
+            error="too_imminent",
+        )
 
     return Plan(
         event=event.model_copy(update={"location_resolved": resolved}),
