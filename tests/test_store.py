@@ -861,6 +861,18 @@ def test_claim_ping_marks_fired_in_db(tmp_db_path: Path) -> None:
     assert not any(p.id == ping.id for p in pending)
 
 
+def test_is_alert_seen_today_per_day(tmp_db_path: Path) -> None:
+    """is_alert_seen_today is true after a same-day mark and false on a fresh DB."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    assert store.is_alert_seen_today("alert-x") is False
+    store.mark_alert_seen("alert-x", "evt-A")
+    assert store.is_alert_seen_today("alert-x") is True
+    # A different alert is not affected.
+    assert store.is_alert_seen_today("alert-y") is False
+
+
 def test_claim_ping_concurrent_threads_only_one_wins(tmp_db_path: Path) -> None:
     """Two threads racing to claim the same ping: exactly one returns True."""
     import threading

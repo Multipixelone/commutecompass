@@ -166,12 +166,21 @@ def _compact_location(location_raw: str | None, *, fallback: str) -> str:
     return ", ".join(lines)
 
 
-def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
+def format_digest(
+    plans: list[Plan],
+    alerts: list[Alert],
+    *,
+    operations_notes: list[str] | None = None,
+) -> str:
     """Format the daily digest message.
 
     Args:
         plans: All plans for today.
         alerts: Any alerts affecting today's routes.
+        operations_notes: Optional list of degraded-service messages to append
+            as an "Operations" footer (e.g. "MTA Subway alerts unavailable").
+            Each note is sanitised+escaped.  An empty list (or None) hides
+            the footer entirely.
 
     Returns:
         Formatted digest string ready for Telegram.
@@ -198,6 +207,12 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
             if alert.affected_routes:
                 routes_str = ", ".join(sorted(alert.affected_routes))
                 lines.append(f"  Routes: {escape_md(routes_str)}")
+
+    if operations_notes:
+        lines.append("")
+        lines.append("*Operations:*")
+        for note in operations_notes:
+            lines.append(f"⚙️ {escape_md(_sanitize_text(note))}")
 
     return "\n".join(lines)
 

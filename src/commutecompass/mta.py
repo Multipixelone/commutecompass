@@ -71,17 +71,26 @@ def fetch_alerts(
         client = httpx.Client(timeout=15.0)
         close_client = True
 
+    from commutecompass.retry import retry
+
+    failed_systems: list[str] = []
     try:
         for url, system in feed_urls:
+            def _do_fetch(u: str = url, s: str = system) -> list[Alert]:
+                return _fetch_feed(u, s, client)
             try:
-                alerts.extend(_fetch_feed(url, system, client))
+                alerts.extend(retry(_do_fetch, label=f"mta_feed({system})"))
             except Exception as exc:
                 logger.warning("Failed to fetch %s alerts from %s: %s", system, url, exc)
+                failed_systems.append(system)
 
     finally:
         if close_client:
             client.close()
 
+    # Expose which feeds went dark for the morning job's operations footer.
+    # Attribute lookup is the cheapest cross-call channel here.
+    fetch_alerts.last_failed_systems = failed_systems  # type: ignore[attr-defined]
     return alerts
 
 
