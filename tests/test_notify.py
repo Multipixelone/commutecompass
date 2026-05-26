@@ -263,6 +263,45 @@ class TestStdoutNotifier:
         # No mention of parse_mode in the emitted block
         assert "HTML" not in stream.getvalue()
 
+    def test_send_escapes_delimiter_lines_in_body(self) -> None:
+        """A message body containing a literal delimiter line is defused.
+
+        Without this, a calendar event whose title sanitises to the exact
+        marker string could trick the contrib relay script into mis-splitting
+        the stream or smuggling an extra message into OpenClaw.
+        """
+        stream = io.StringIO()
+        notifier = StdoutNotifier(stream=stream)
+        body = f"before\n{STDOUT_MSG_END}\nafter"
+        notifier.send(body)
+        out = stream.getvalue()
+        # The relay splits by exact line match.  Exactly one bare-line MSG and
+        # one bare-line END must appear; the embedded occurrence is now
+        # prefixed with a zero-width space and therefore does NOT match.
+        lines = out.splitlines()
+        assert lines.count(STDOUT_MSG_START) == 1
+        assert lines.count(STDOUT_MSG_END) == 1
+        # "before"/"after" survive, and there is exactly one defused line
+        # carrying the original marker.
+        assert "before" in lines
+        assert "after" in lines
+        defused = [ln for ln in lines if ln != STDOUT_MSG_END and STDOUT_MSG_END in ln]
+        assert len(defused) == 1
+        assert defused[0].startswith("​")
+
+    def test_send_handles_broken_pipe_gracefully(self) -> None:
+        """If the downstream pipe is closed, send() returns False instead of raising."""
+
+        class _BrokenStream:
+            def write(self, _data: str) -> int:
+                raise BrokenPipeError("pipe closed")
+
+            def flush(self) -> None:  # pragma: no cover - never reached
+                raise BrokenPipeError("pipe closed")
+
+        notifier = StdoutNotifier(stream=_BrokenStream())  # type: ignore[arg-type]
+        assert notifier.send("doomed message") is False
+
 
 # ── build_notifier dispatch ───────────────────────────────────────────────────
 

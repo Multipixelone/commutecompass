@@ -231,10 +231,17 @@ def run(config: Config) -> None:  # noqa: C901
         logger.warning("morning job: digest send failed")
 
     # ── 7. Log structured summary ────────────────────────────────────────────
+    unresolved = sum(1 for p in plans if p.error == "location_unresolved")
+    no_route = sum(1 for p in plans if p.error == "no_route")
+    too_imminent = sum(1 for p in plans if p.error == "too_imminent")
     logger.info(
-        "morning_run_summary: events=%d plans=%d alerts=%d digest_sent=%s",
+        "morning_run_summary: events=%d plans=%d unresolved=%d no_route=%d "
+        "too_imminent=%d alerts=%d digest_sent=%s",
         len(events),
         len(plans),
+        unresolved,
+        no_route,
+        too_imminent,
         len(affecting_alerts),
         sent,
     )

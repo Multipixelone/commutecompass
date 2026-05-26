@@ -486,3 +486,117 @@ safety_buffer_minutes = 5
         assert result.exit_code != 0
         # Error message should name the allowlist
         assert "prep.prep_minutes" in result.output
+
+
+# ─────────── adjust idempotency ────────────────────────────────────────────────
+
+
+class TestAdjustIdempotency:
+    """The --idempotency-key flag prevents stacked offsets on retried calls."""
+
+    def _config_for_tmp(self, tmp_path: Path) -> Config:
+        from commutecompass.config import (
+            Config,
+            MtaConfig,
+            OpencodeGoConfig,
+            Origin,
+            PathsConfig,
+            PrepConfig,
+            SchedulingConfig,
+        )
+
+        return Config(
+            origin=Origin(address="x", lat=40.7, lon=-74.0),
+            calendars=[],
+            prep=PrepConfig(),
+            scheduling=SchedulingConfig(),
+            paths=PathsConfig(
+                venues_file=str(tmp_path / "venues.yaml"),
+                db_path=str(tmp_path / "state.db"),
+                oauth_token_path=str(tmp_path / "token.json"),
+            ),
+            opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+            mta=MtaConfig(
+                subway_alerts_url="https://example.com/s",
+                lirr_alerts_url="https://example.com/l",
+                bus_alerts_url="https://example.com/b",
+            ),
+            google_maps_api_key="x",
+            google_oauth_client_secret_json="{}",
+            telegram_bot_token="123:abc",
+            telegram_chat_id=-1,
+            opencode_go_token="x",
+        )
+
+    def _seed_plan(self, cfg: Config) -> str:
+        """Create a today plan and return its event id."""
+        from datetime import timedelta
+
+        from commutecompass.models import Event, Plan
+        from commutecompass.store import Store
+        from commutecompass.timeutil import now_nyc
+
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+
+        now = now_nyc()
+        start = now + timedelta(hours=4)
+        event = Event(
+            id="evt-adjust-idem",
+            calendar_id="c", calendar_name="C",
+            title="Adjustable", start=start, end=start + timedelta(hours=1),
+        )
+        plan = Plan(
+            event=event,
+            leave_at=start - timedelta(minutes=45),
+            prep_at=start - timedelta(minutes=65),
+        )
+        store.upsert_plan(plan)
+        return event.id
+
+    def test_idempotency_key_makes_second_call_a_noop(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = self._config_for_tmp(tmp_path)
+        event_id = self._seed_plan(cfg)
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            r1 = runner.invoke(
+                cli,
+                ["adjust", event_id, "--add-prep", "30", "--idempotency-key", "k1"],
+            )
+            assert r1.exit_code == 0, r1.output
+
+            from commutecompass.store import Store
+            store = Store(cfg.paths.db_path)
+            after_first = store.get_plan(event_id)
+            assert after_first is not None
+            first_prep = after_first.prep_at
+
+            r2 = runner.invoke(
+                cli,
+                ["adjust", event_id, "--add-prep", "30", "--idempotency-key", "k1"],
+            )
+            assert r2.exit_code == 0, r2.output
+            assert "already applied" in r2.output.lower()
+
+            after_second = store.get_plan(event_id)
+            assert after_second is not None
+            # prep_at must not have shifted on the retry.
+            assert after_second.prep_at == first_prep
+
+    def test_adjust_missing_event_returns_not_found_exit(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = self._config_for_tmp(tmp_path)
+        from commutecompass.store import Store
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+
+        from commutecompass.cli import EXIT_NOT_FOUND
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(
+                cli, ["adjust", "does-not-exist", "--add-prep", "10"]
+            )
+        assert result.exit_code == EXIT_NOT_FOUND

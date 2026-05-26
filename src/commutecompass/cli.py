@@ -231,7 +231,7 @@ def plan(ctx: click.Context, event_id: str, here: bool) -> None:
         cl = store.get_current_location(max_age_minutes=None)
         if cl is None:
             click.echo("No stored current location. Run `poll` first or check Home Assistant.", err=True)
-            sys.exit(1)
+            sys.exit(EXIT_UNRESOLVED)
         origin_override = Origin(
             address=f"{cl.lat:.6f},{cl.lon:.6f}",
             lat=cl.lat,
@@ -250,7 +250,7 @@ def plan(ctx: click.Context, event_id: str, here: bool) -> None:
         )
         if not events:
             click.echo(f"Event {event_id} not found in today's calendars.")
-            sys.exit(1)
+            sys.exit(EXIT_NOT_FOUND)
         event = events[0]
     else:
         event = existing.event
@@ -309,7 +309,7 @@ def test_notify(ctx: click.Context) -> None:
         click.echo(f"Test message emitted via {cfg.notify.mode} notifier.", err=True)
     else:
         click.echo("Failed to send test message (see stderr for logs).", err=True)
-        sys.exit(1)
+        sys.exit(EXIT_TRANSIENT)
 
 
 # ─────────── where ───────────────────────────────────────────────────────────
@@ -370,8 +370,21 @@ def digest_preview(ctx: click.Context) -> None:
     help="Minutes to add to the prep buffer (negative shrinks it). "
     "Shifts prep_at earlier by this many minutes.",
 )
+@click.option(
+    "--idempotency-key",
+    type=str,
+    default=None,
+    help="Opaque key.  If supplied and previously seen, this invocation is a "
+    "no-op (exit 0).  Use a stable upstream correlation id so a retried "
+    "skill invocation does not stack adjustments.",
+)
 @click.pass_context
-def adjust(ctx: click.Context, event_id: str, add_prep: int) -> None:
+def adjust(
+    ctx: click.Context,
+    event_id: str,
+    add_prep: int,
+    idempotency_key: Optional[str],
+) -> None:
     """Shift today's prep time for EVENT_ID by --add-prep minutes.
 
     Use case: "I need to shower before this event, add 45 min" →
@@ -390,16 +403,24 @@ def adjust(ctx: click.Context, event_id: str, add_prep: int) -> None:
     cfg = _load_config(config_path)
 
     store = Store(Path(cfg.paths.db_path))
+
+    if idempotency_key is not None:
+        if not store.record_adjust_key(idempotency_key, event_id):
+            click.echo(
+                f"adjust {event_id}: idempotency key already applied — no-op."
+            )
+            return  # EXIT_OK by design — caller can retry safely
+
     plan = store.get_plan(event_id)
     if plan is None:
         click.echo(f"No plan found for event {event_id}.", err=True)
-        sys.exit(1)
+        sys.exit(EXIT_NOT_FOUND)
     if plan.prep_at is None or plan.leave_at is None:
         click.echo(
             f"Event {event_id} has no scheduled prep/leave time — cannot adjust.",
             err=True,
         )
-        sys.exit(1)
+        sys.exit(EXIT_UNRESOLVED)
 
     now = now_nyc()
     new_prep_at = plan.prep_at - timedelta(minutes=add_prep)
@@ -468,10 +489,10 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
         coerced = update_config_field(config_path, key, value)
     except ConfigSetError as exc:
         click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
+        sys.exit(EXIT_USAGE)
     except OSError as exc:
         click.echo(f"Error writing {config_path}: {exc}", err=True)
-        sys.exit(1)
+        sys.exit(EXIT_CONFIG)
     click.echo(f"{key} = {coerced!r}")
 
 

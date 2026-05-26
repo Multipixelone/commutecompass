@@ -114,6 +114,11 @@ class Store:
                     captured_at TEXT NOT NULL,
                     source TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS adjust_log (
+                    key TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
             """)
             # Ensure only one unfired ping per (event_id, kind).
             # Migrate existing duplicates first, keeping the row with the latest fire_at.
@@ -357,6 +362,25 @@ class Store:
                 (alert_id, event_id),
             ).fetchone()
         return row is not None
+
+    # ── Adjust idempotency log ──────────────────────────────────────────────────
+
+    def record_adjust_key(self, key: str, event_id: str) -> bool:
+        """Record an adjustment idempotency key; return True if new, False if dup.
+
+        OpenClaw (or any agent caller) may retry a flaky ``adjust`` invocation;
+        without dedup the prep time shifts on every retry.  Callers pass a
+        stable key (e.g. an upstream correlation id or a derived hash) — the
+        first call writes it and returns True, subsequent calls return False
+        and the CLI no-ops with exit 0.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO adjust_log (key, event_id, applied_at) "
+                "VALUES (?, ?, ?)",
+                (key, event_id, _now_iso()),
+            )
+            return cursor.rowcount == 1
 
     # ── Current location (singleton) ────────────────────────────────────────────
 

@@ -26,6 +26,27 @@ _MAX_MESSAGE_CHARS = 3900
 STDOUT_MSG_START = "===COMMUTECOMPASS-MSG==="
 STDOUT_MSG_END = "===COMMUTECOMPASS-END==="
 
+# Zero-width space prepended to any body line that would otherwise be parsed as
+# a delimiter.  Invisible in Telegram / chat clients but breaks the exact
+# string match in the contrib shell script (and any other naive line parser).
+_ZWSP = "​"
+
+
+def _escape_stdout_delimiters(body: str) -> str:
+    """Defuse any message line that exactly matches one of the framing markers.
+
+    Without this, a calendar event whose title sanitises to one of these
+    literal lines could trick the relay into mis-splitting a message — or, if
+    placed maliciously, smuggle an extra message into the OpenClaw queue.
+    The zero-width space keeps the visual content identical while breaking
+    the equality check.
+    """
+    lines = body.split("\n")
+    return "\n".join(
+        (_ZWSP + ln) if ln in (STDOUT_MSG_START, STDOUT_MSG_END) else ln
+        for ln in lines
+    )
+
 
 def _chunk_message(text: str) -> list[str]:
     """Split a message into chunks of at most _MAX_MESSAGE_CHARS chars.
@@ -133,8 +154,16 @@ class StdoutNotifier:
         self.stream = stream if stream is not None else sys.stdout
 
     def send(self, text: str, parse_mode: str = "MarkdownV2") -> bool:
-        self.stream.write(f"{STDOUT_MSG_START}\n{text}\n{STDOUT_MSG_END}\n")
-        self.stream.flush()
+        safe = _escape_stdout_delimiters(text)
+        try:
+            self.stream.write(f"{STDOUT_MSG_START}\n{safe}\n{STDOUT_MSG_END}\n")
+            self.stream.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # If our stdout pipe to openclaw-send.sh dies (consumer crashed,
+            # process backgrounded with stdout to /dev/null, etc.), log and
+            # return False rather than letting the entire job crash.
+            _logger.warning("StdoutNotifier write failed: %s", exc)
+            return False
         return True
 
 
