@@ -381,6 +381,60 @@ class Store:
             ).fetchone()
         return row is not None
 
+    # ── Diagnostics ────────────────────────────────────────────────────────────
+
+    def all_pings_today(self) -> list[PingEntry]:
+        """Return every ping (fired or not) whose fire_at falls in today's logical day."""
+        from commutecompass.timeutil import logical_day_bounds_nyc
+
+        day_start, day_end = logical_day_bounds_nyc()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, event_id, kind, fire_at, fired, fired_at, message
+                FROM pings
+                WHERE fire_at >= ? AND fire_at <= ?
+                ORDER BY fire_at
+                """,
+                (day_start.isoformat(), day_end.isoformat()),
+            ).fetchall()
+
+        return [
+            PingEntry(
+                id=row[0],
+                event_id=row[1],
+                kind=row[2],
+                fire_at=datetime.fromisoformat(row[3]),
+                fired=bool(row[4]),
+                fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
+                message=row[6],
+            )
+            for row in rows
+        ]
+
+    def geocode_cache_stats(self) -> dict[str, Any]:
+        """Return summary stats for the geocode cache: count + oldest/newest age."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), MIN(cached_at), MAX(cached_at) FROM geocode_cache"
+            ).fetchone()
+        count, oldest, newest = row[0], row[1], row[2]
+        return {"count": count, "oldest_cached_at": oldest, "newest_cached_at": newest}
+
+    def geocode_cache_list(self) -> list[dict[str, str]]:
+        """Return all geocode cache entries (raw query + cached timestamp)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT raw, cached_at FROM geocode_cache ORDER BY cached_at DESC"
+            ).fetchall()
+        return [{"raw": r[0], "cached_at": r[1]} for r in rows]
+
+    def geocode_cache_invalidate(self, raw: str) -> int:
+        """Delete a cached geocode entry; returns rows removed (0 or 1)."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM geocode_cache WHERE raw = ?", (raw,))
+            return cursor.rowcount
+
     # ── Adjust idempotency log ──────────────────────────────────────────────────
 
     def record_adjust_key(self, key: str, event_id: str) -> bool:

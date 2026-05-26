@@ -38,6 +38,7 @@ to stdout; relay that stdout back to the user.
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
 | "what's my prep buffer set to?" / "show me my config"                    | `scripts/config-show.sh`                          |
 | "set my prep buffer to 30 min" / "change quiet hours to ..."             | `scripts/config-set.sh <dotted.key> <value>`      |
+| "why didn't I get my morning ping?" / "show me the current state"        | `scripts/status.sh` (text) or `scripts/status.sh --json` |
 
 ## Resolving an event ID for `adjust`
 
