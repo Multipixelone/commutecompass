@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Iterator, Optional, cast
 
 import sqlite3
 
 from commutecompass.models import CurrentLocation, Plan, PingEntry, ResolvedLocation
+
+
+def _now_iso() -> str:
+    """Return the current time as an ISO-8601 string in NYC tz.
+
+    Centralised here so write paths never accidentally drop the tz offset.
+    """
+    # Local import to avoid a cycle at module load.
+    from commutecompass.timeutil import now_nyc
+
+    return now_nyc().isoformat()
 
 
 def _json_dumps(obj: object) -> str:
@@ -39,10 +51,33 @@ class Store:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a connection with WAL + busy_timeout enabled.
+
+        ``journal_mode=WAL`` lets readers and writers proceed concurrently,
+        which is the right mode for the morning/poll job overlap.  The busy
+        timeout gives competing writers a chance to acquire the lock instead
+        of immediately raising ``OperationalError``.  ``synchronous=NORMAL``
+        is safe under WAL and meaningfully faster than ``FULL``.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def init_schema(self) -> None:
         """Create all tables if they don't exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS plans (
                     event_id TEXT PRIMARY KEY,
@@ -106,7 +141,7 @@ class Store:
 
     def upsert_plan(self, plan: Plan) -> None:
         """Insert or replace a plan."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO plans (event_id, plan_json, planned_at, event_start)
@@ -119,14 +154,14 @@ class Store:
                 (
                     plan.event.id,
                     _json_dumps(plan.model_dump()),
-                    datetime.now().isoformat(),
+                    _now_iso(),
                     plan.event.start.isoformat(),
                 ),
             )
 
     def get_plan(self, event_id: str) -> Optional[Plan]:
         """Retrieve a plan by event ID."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT plan_json FROM plans WHERE event_id = ?", (event_id,)
             ).fetchone()
@@ -144,7 +179,7 @@ class Store:
 
         today_start, today_end = logical_day_bounds_nyc()
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT plan_json FROM plans
@@ -162,7 +197,7 @@ class Store:
 
     def delete_old_plans(self, before: datetime) -> int:
         """Delete plans with event_start before given datetime. Returns count deleted."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM plans WHERE event_start < ?", (before.isoformat(),)
             )
@@ -175,7 +210,7 @@ class Store:
 
         Re-scheduling a ping for the same (event_id, kind) replaces any existing unfired row.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             # Remove any existing unfired ping for the same (event_id, kind) first,
             # then insert the new ping.  Using INSERT OR REPLACE would clobber the id
             # which we want to keep from the caller's uuid, so we do it explicitly.
@@ -201,7 +236,7 @@ class Store:
 
     def cancel_pings(self, event_id: str) -> int:
         """Delete all pings for an event. Returns count cancelled."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM pings WHERE event_id = ?", (event_id,)
             )
@@ -209,7 +244,7 @@ class Store:
 
     def pending_pings(self, before: datetime) -> list[PingEntry]:
         """Return all unfired pings with fire_at <= before."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, event_id, kind, fire_at, fired, fired_at, message
@@ -236,18 +271,37 @@ class Store:
         return pings
 
     def mark_fired(self, ping_id: str, fired_at: datetime) -> None:
-        """Mark a ping as fired."""
-        with sqlite3.connect(self.db_path) as conn:
+        """Mark a ping as fired (unconditional; prefer ``claim_ping``)."""
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ?",
                 (fired_at.isoformat(), ping_id),
             )
 
+    def claim_ping(self, ping_id: str, fired_at: datetime) -> bool:
+        """Atomically claim a ping iff it has not yet been fired.
+
+        Returns True when the caller successfully transitioned ``fired = 0 -> 1``
+        and should now send the message.  Returns False if another concurrent
+        caller (or a previous run) already claimed it — in which case the
+        caller MUST NOT send, to avoid duplicate notifications.
+
+        Marking happens *before* the network send, so a failed send does not
+        cause a retry storm: a single attempt is the contract.  Observability
+        is provided by the caller (log + summary line).
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0",
+                (fired_at.isoformat(), ping_id),
+            )
+            return cursor.rowcount == 1
+
     # ── Geocode cache ───────────────────────────────────────────────────────────
 
     def cache_geocode(self, raw: str, resolved: ResolvedLocation) -> None:
         """Cache a geocode result."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO geocode_cache (raw, resolved_json, cached_at)
@@ -256,16 +310,18 @@ class Store:
                     resolved_json = excluded.resolved_json,
                     cached_at = excluded.cached_at
                 """,
-                (raw, _json_dumps(resolved.model_dump()), datetime.now().isoformat()),
+                (raw, _json_dumps(resolved.model_dump()), _now_iso()),
             )
 
     def get_geocode(self, raw: str, max_age_days: int = 30) -> Optional[ResolvedLocation]:
         """Retrieve a cached geocode result if it exists and is fresh."""
         from datetime import timedelta
 
-        cutoff = datetime.now() - timedelta(days=max_age_days)
+        from commutecompass.timeutil import now_nyc
 
-        with sqlite3.connect(self.db_path) as conn:
+        cutoff = now_nyc() - timedelta(days=max_age_days)
+
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT resolved_json FROM geocode_cache
@@ -283,19 +339,19 @@ class Store:
 
     def mark_alert_seen(self, alert_id: str, event_id: str) -> None:
         """Record that an alert has been seen for a given event."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO alerts_seen (alert_id, event_id, seen_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(alert_id, event_id) DO NOTHING
                 """,
-                (alert_id, event_id, datetime.now().isoformat()),
+                (alert_id, event_id, _now_iso()),
             )
 
     def is_alert_seen(self, alert_id: str, event_id: str) -> bool:
         """Return True if this alert has been seen for this event."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM alerts_seen WHERE alert_id = ? AND event_id = ? LIMIT 1",
                 (alert_id, event_id),
@@ -306,7 +362,7 @@ class Store:
 
     def upsert_current_location(self, loc: CurrentLocation) -> None:
         """Insert or replace the singleton current_location row."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO current_location (id, lat, lon, zone, captured_at, source, accuracy_m)
@@ -336,7 +392,7 @@ class Store:
 
         When max_age_minutes is set, return None if the row is older than that.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT lat, lon, zone, captured_at, source, accuracy_m "
                 "FROM current_location WHERE id = 'singleton'"

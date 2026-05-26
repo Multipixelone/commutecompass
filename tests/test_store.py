@@ -818,3 +818,71 @@ class TestCurrentLocation:
         with sqlite3.connect(tmp_db_path) as conn:
             cols = {row[1] for row in conn.execute("PRAGMA table_info(current_location)").fetchall()}
         assert "accuracy_m" in cols
+
+
+# ── claim_ping (atomic) tests ──────────────────────────────────────────────────
+
+
+def test_claim_ping_returns_true_first_time(tmp_db_path: Path) -> None:
+    """The first caller transitions fired 0→1 and gets True back."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    ping = make_ping("evt-claim-1", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+
+    now = datetime.now(timezone.utc)
+    assert store.claim_ping(ping.id, now) is True
+
+
+def test_claim_ping_returns_false_on_second_call(tmp_db_path: Path) -> None:
+    """A second claim on the same ping returns False (already fired)."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    ping = make_ping("evt-claim-2", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+
+    now = datetime.now(timezone.utc)
+    assert store.claim_ping(ping.id, now) is True
+    # Second claim must NOT re-fire; this is the race protection.
+    assert store.claim_ping(ping.id, now) is False
+
+
+def test_claim_ping_marks_fired_in_db(tmp_db_path: Path) -> None:
+    """After a successful claim the row is fired and excluded from pending."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    ping = make_ping("evt-claim-3", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+
+    now = datetime.now(timezone.utc)
+    store.claim_ping(ping.id, now)
+
+    pending = store.pending_pings(before=now + timedelta(hours=1))
+    assert not any(p.id == ping.id for p in pending)
+
+
+def test_claim_ping_concurrent_threads_only_one_wins(tmp_db_path: Path) -> None:
+    """Two threads racing to claim the same ping: exactly one returns True."""
+    import threading
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+    ping = make_ping("evt-race", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+
+    results: list[bool] = []
+    barrier = threading.Barrier(2)
+
+    def attempt() -> None:
+        barrier.wait()
+        results.append(store.claim_ping(ping.id, datetime.now(timezone.utc)))
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(1 for r in results if r) == 1, (
+        f"Expected exactly one winner, got {results}"
+    )
