@@ -1480,3 +1480,125 @@ def test_poll_location_replan_outside_window_is_noop(
 
     assert planner.calls == []  # no replan attempted
     assert notifier.sent == []
+
+
+def test_poll_location_replan_skips_leg_only_change(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A sub-threshold leave_at shift with only leg-set differences must not notify.
+
+    Reproduces the spam pattern where the planner flaps between two
+    near-equivalent options (Mixed transit vs Subway-C-only) at the same
+    leave time. Phase 5 should ignore these.
+    """
+    cfg = _ha_enabled(minimal_config)
+    now = now_nyc()
+
+    old_leave = now + timedelta(minutes=10)
+    old_prep = old_leave - timedelta(minutes=20)
+    old_plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=old_leave,
+        prep_at=old_prep,
+    )
+
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(old_plan)
+
+    # New plan: leave_at drifts by 1 minute, legs flip to a different system/line.
+    new_leave = old_leave + timedelta(minutes=1)
+    new_prep = new_leave - timedelta(minutes=20)
+    new_route = Route(
+        legs=[
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="A", headsign="Far Rockaway",
+                depart_at=new_leave, arrive_at=new_leave + timedelta(minutes=30),
+                duration_seconds=1800, summary="A train",
+            ),
+        ],
+        depart_at=new_leave,
+        arrive_at=new_leave + timedelta(minutes=30),
+        total_duration_seconds=1800,
+        transfers=0,
+    )
+    new_plan = Plan(event=today_events[0], route=new_route, leave_at=new_leave, prep_at=new_prep)
+
+    notifier = SpyNotifier()
+    planner = MockPlanner(plan=new_plan)
+
+    poll_run(
+        cfg,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    # No location update sent, and the stored plan is unchanged.
+    assert not any("Location update" in m for m in notifier.sent)
+    saved = store.get_plan(today_events[0].id)
+    assert saved is not None and saved.leave_at == old_leave
+
+
+def test_poll_mta_fetch_cached_within_ttl(
+    minimal_config: Config,
+) -> None:
+    """Two poll runs within the cache TTL must hit the MTA feed only once.
+
+    Exercises the production fetch path (no fetch_alerts_fn injection) by
+    patching commutecompass.mta.fetch_alerts. The module-level cache is reset
+    before and after so other tests are unaffected.
+    """
+    from commutecompass.jobs import poll as poll_mod
+
+    cfg = _ha_enabled(minimal_config)
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+
+    now = now_nyc()
+    later = now + timedelta(seconds=60)  # well under the 180s TTL
+
+    fetch_calls: list[dict[str, Any]] = []
+
+    def _counting_fetch(**kw: Any) -> list[Any]:
+        fetch_calls.append(kw)
+        return []
+
+    poll_mod._alerts_cache = None
+    try:
+        with patch("commutecompass.mta.fetch_alerts", _counting_fetch):
+            poll_run(
+                cfg,
+                store=store,
+                notifier=cast(TelegramNotifier, SpyNotifier()),
+                plan_event_fn=MockPlanner(plan=Plan(event=Event(
+                    id="evt-x", calendar_id="c", calendar_name="C",
+                    title="t", start=now, end=now,
+                ))),
+                now_fn=lambda: now,
+                ha_fetch_fn=lambda *a, **kw: None,
+            )
+            poll_run(
+                cfg,
+                store=store,
+                notifier=cast(TelegramNotifier, SpyNotifier()),
+                plan_event_fn=MockPlanner(plan=Plan(event=Event(
+                    id="evt-x", calendar_id="c", calendar_name="C",
+                    title="t", start=later, end=later,
+                ))),
+                now_fn=lambda: later,
+                ha_fetch_fn=lambda *a, **kw: None,
+            )
+
+        assert len(fetch_calls) == 1, (
+            f"expected 1 MTA fetch within TTL, got {len(fetch_calls)}"
+        )
+    finally:
+        poll_mod._alerts_cache = None

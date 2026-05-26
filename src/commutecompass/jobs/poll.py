@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 # Minimum time difference to trigger a service update (in seconds)
 _REPLAN_THRESHOLD_SECONDS = 5 * 60
 
+# How long to reuse a fetched MTA alert set inside the poll loop (in seconds).
+# Only applied when the caller did not inject a fetch_alerts_fn (tests bypass).
+_MTA_CACHE_TTL_SECONDS = 180
+
+# Module-level memo: (captured_at, (subway_url, lirr_url, bus_url), alerts).
+_alerts_cache: "tuple[datetime, tuple[str, str, str], list[Alert]] | None" = None
+
 
 def run(
     config: Config,
@@ -68,6 +75,7 @@ def run(
     from commutecompass.llm import OpencodeGoClient
 
     _store: Store = store or Store(config.paths.db_path)
+    _use_alerts_cache = fetch_alerts_fn is None
     _fetch_alerts: Callable[..., list[Alert]] = fetch_alerts_fn or _fetch
     _alerts_affecting: Callable[..., list[Alert]] = alerts_affecting_route_fn or _affecting
     _select_alerts: Callable[..., list[Alert]]
@@ -173,12 +181,31 @@ def run(
             logger.warning("Failed to send ping %s (%s)", ping.id, ping.kind)
 
     # ── Phase 3: fetch alerts ─────────────────────────────────────────────────
-    alerts = _fetch_alerts(
-        subway_url=config.mta.subway_alerts_url,
-        lirr_url=config.mta.lirr_alerts_url,
-        bus_url=config.mta.bus_alerts_url,
+    global _alerts_cache
+    url_key = (
+        config.mta.subway_alerts_url,
+        config.mta.lirr_alerts_url,
+        config.mta.bus_alerts_url,
     )
-    logger.debug("Fetched %d MTA alerts", len(alerts))
+    alerts: list[Alert] | None = None
+    if _use_alerts_cache and _alerts_cache is not None:
+        cached_at, cached_urls, cached_alerts = _alerts_cache
+        if cached_urls == url_key and (now - cached_at).total_seconds() < _MTA_CACHE_TTL_SECONDS:
+            alerts = cached_alerts
+            logger.debug(
+                "Reusing cached MTA alerts (%d, age %.0fs)",
+                len(alerts),
+                (now - cached_at).total_seconds(),
+            )
+    if alerts is None:
+        alerts = _fetch_alerts(
+            subway_url=url_key[0],
+            lirr_url=url_key[1],
+            bus_url=url_key[2],
+        )
+        logger.debug("Fetched %d MTA alerts", len(alerts))
+        if _use_alerts_cache:
+            _alerts_cache = (now, url_key, alerts)
 
     # ── Phase 4: process new affecting alerts ─────────────────────────────────
     today_plans = _store.today_plans()
@@ -269,7 +296,7 @@ def run(
                 logger.warning("Location replan failed for %s: %s", plan.event.id, exc)
                 continue
 
-            if not _route_significantly_different(plan, new_plan):
+            if not _location_update_significant(plan, new_plan):
                 continue
 
             msg = format_location_update(plan, new_plan)
@@ -281,6 +308,25 @@ def run(
             _store.upsert_plan(new_plan)
             _store.cancel_pings(plan.event.id)
             _schedule_pings_for_plan(new_plan, _store, now)
+
+
+def _location_update_significant(old_plan: Plan, new_plan: Plan) -> bool:
+    """Stricter check used only for Phase 5 location-driven updates.
+
+    Require leave_at to differ by at least _REPLAN_THRESHOLD_SECONDS. Leg-set
+    changes alone (e.g. Mixed vs Subway-only at the same leave time) are NOT
+    significant here — they're typically search noise between near-equivalent
+    options and would spam the user once a minute. Alert-driven service
+    updates (Phase 4) still use _route_significantly_different.
+    """
+    if new_plan.route is None:
+        return False
+    if old_plan.route is None:
+        return True
+    if old_plan.leave_at is None or new_plan.leave_at is None:
+        return False
+    diff = abs((new_plan.leave_at - old_plan.leave_at).total_seconds())
+    return diff >= _REPLAN_THRESHOLD_SECONDS
 
 
 def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
