@@ -161,7 +161,8 @@ def test_plan_event_resolves_location_and_computes_timings(
 ) -> None:
     """plan_event wires resolver + routing, computes leave_at/prep_at correctly."""
     with patch("commutecompass.resolver.resolve") as mock_resolve, \
-         patch("commutecompass.routing.plan_route") as mock_plan_route:
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 
@@ -206,6 +207,42 @@ def test_plan_event_location_unresolved(
     assert result.prep_at is None
 
 
+def test_plan_event_too_imminent_when_leave_in_past(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """When ``leave_at`` falls before ``now_nyc()``, surface a too_imminent error.
+
+    Otherwise the digest silently stores a Plan with past times that will
+    never fire — the user only finds out by missing the event.
+    """
+    # Push "now" past the computed leave_at (event 14:30, travel 55min, buffer
+    # 5min → leave_at 13:30; setting now = 14:00 puts leave_at in the past).
+    later = nyc_now.replace(hour=14, minute=0)
+
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=later):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        result = plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    assert result.error == "too_imminent"
+    # Times are still populated for diagnostic display, just flagged.
+    assert result.leave_at is not None
+    assert result.prep_at is not None
+
+
 def test_plan_event_no_route(
     event: Event,
     config: Config,
@@ -241,7 +278,8 @@ def test_plan_event_mode_override(
 ) -> None:
     """mode_override parameter is passed through to plan_route."""
     with patch("commutecompass.resolver.resolve") as mock_resolve, \
-         patch("commutecompass.routing.plan_route") as mock_plan_route:
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = mock_route
 

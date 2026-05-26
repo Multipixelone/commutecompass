@@ -343,15 +343,16 @@ class TestFormatDigest:
         assert "No events scheduled for today" in result
 
     def test_format_digest_error_plan(self) -> None:
-        """format_digest shows error plans with failure reason."""
+        """format_digest shows error plans with a human-readable failure reason."""
         event = make_event(id="evt1", title="Bad Event", start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc))
         plan = Plan(event=event, route=None, error="location_unresolved")
 
         result = format_digest([plan], [])
 
         assert "Bad Event" in result
-        # Error text is escaped (underscores become \_)
-        assert "location" in result and "unresolved" in result
+        # The code is rendered via _plan_error_label which produces a friendly
+        # phrase mentioning the location.
+        assert "location" in result.lower()
         assert "❌" in result
 
     def test_format_digest_no_route(self) -> None:
@@ -1085,7 +1086,7 @@ def test_format_location_update_includes_old_and_new_leave_times() -> None:
 
 
 def test_format_location_update_with_error_renders_warning() -> None:
-    """An error plan still produces a sane message (errors are escape_md'd)."""
+    """An error plan still produces a sane message with a friendly error label."""
     start = datetime(2026, 5, 9, 14, 30, tzinfo=timezone.utc)
     event = Event(
         id="evt-2", calendar_id="c", calendar_name="Test",
@@ -1094,5 +1095,43 @@ def test_format_location_update_with_error_renders_warning() -> None:
     old_plan = Plan(event=event)
     new_plan = Plan(event=event, error="no_route")
     msg = format_location_update(old_plan, new_plan)
-    assert "no\\_route" in msg
+    # _plan_error_label renders "no_route" as "No transit route found".
+    assert "transit route" in msg.lower()
     assert "📍" in msg
+
+
+# ── Portable strftime regression ───────────────────────────────────────────────
+
+def test_format_helpers_use_no_gnu_strftime_extensions() -> None:
+    """No format string in commutecompass/format.py uses %-I, %-d, etc.
+
+    These are GNU strftime extensions; they fail on macOS and Windows.
+    Pinning a regex regression test catches the next contributor who reaches
+    for ``%-`` without thinking about portability.
+    """
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).parent.parent / "src" / "commutecompass"
+    bad = re.compile(r"strftime\([^)]*%-[A-Za-z]")
+    offenders = []
+    for path in src.rglob("*.py"):
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            if bad.search(line):
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+    assert offenders == [], "GNU strftime extensions found:\n" + "\n".join(offenders)
+
+
+def test_fmt_time_renders_no_leading_zero() -> None:
+    """_fmt_time produces 12-hour wall-clock without a leading zero."""
+    from commutecompass.format import _fmt_time
+
+    morning = datetime(2026, 5, 26, 9, 5)
+    evening = datetime(2026, 5, 26, 21, 30)
+    midnight = datetime(2026, 5, 26, 0, 0)
+    noon = datetime(2026, 5, 26, 12, 0)
+
+    assert _fmt_time(morning) == "9:05 AM"
+    assert _fmt_time(evening) == "9:30 PM"
+    assert _fmt_time(midnight) == "12:00 AM"
+    assert _fmt_time(noon) == "12:00 PM"
