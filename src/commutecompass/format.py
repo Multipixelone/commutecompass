@@ -70,6 +70,47 @@ def _normalize_line(line: str) -> str:
     return line
 
 
+# Unicode bidirectional control characters — strip from user-supplied strings
+# so a stray RTL override in an event title cannot mangle the rendered message.
+_BIDI_CONTROLS = "‪‫‬‭‮⁦⁧⁨⁩"
+# Default maximum length for a sanitized field.  Long enough for realistic
+# event titles, short enough to keep digests legible and well under Telegram's
+# 4096-char message limit.
+_SANITIZE_MAX_LEN = 200
+
+
+def _sanitize_text(s: str | None, *, max_len: int = _SANITIZE_MAX_LEN) -> str:
+    """Strip control chars / bidi overrides and truncate, before MarkdownV2 escape.
+
+    Calendar feeds occasionally produce titles with embedded NULs, ANSI escapes
+    (when copy-pasted from terminals), or Unicode bidi overrides that flip the
+    visual order of the entire message.  None of those add information; all of
+    them can break MarkdownV2 parsing.  Newlines (\\n, \\r) are normalised to
+    spaces so a multi-line title doesn't collapse the digest layout.
+    """
+    if s is None:
+        return ""
+    # Drop bidi controls outright.
+    cleaned = s.translate({ord(c): None for c in _BIDI_CONTROLS})
+    # Strip other C0 / C1 control chars except tab (rare but harmless); convert
+    # any embedded newline to a single space so the field stays on one line.
+    out_chars: list[str] = []
+    for ch in cleaned:
+        codepoint = ord(ch)
+        if ch in ("\n", "\r"):
+            out_chars.append(" ")
+        elif ch == "\t":
+            out_chars.append(ch)
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0x9F:
+            continue  # other control char — drop
+        else:
+            out_chars.append(ch)
+    cleaned = "".join(out_chars)
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
+
+
 def escape_md(s: str) -> str:
     """Escape special characters for Telegram MarkdownV2.
 
@@ -153,7 +194,7 @@ def format_digest(plans: list[Plan], alerts: list[Alert]) -> str:
         lines.append("*Active service alerts:*")
         for alert in alerts:
             marker = "🔴" if alert.severity == "SEVERE" else "⚠️"
-            lines.append(f"{marker} {escape_md(alert.header)}")
+            lines.append(f"{marker} {escape_md(_sanitize_text(alert.header))}")
             if alert.affected_routes:
                 routes_str = ", ".join(sorted(alert.affected_routes))
                 lines.append(f"  Routes: {escape_md(routes_str)}")
@@ -178,12 +219,12 @@ def _format_plan_summary(plan: Plan) -> str:
         icon = "📅"
     else:
         icon = "📍"
-    lines.append(f"{icon} *{escape_md(event.title)}* \\({escape_md(event.calendar_name)}\\)")
+    lines.append(f"{icon} *{escape_md(_sanitize_text(event.title))}* \\({escape_md(_sanitize_text(event.calendar_name))}\\)")
     location_fallback = "Salt & Straw" if ("job" in cal_lower or "work" in cal_lower) else "(no location)"
     location = _compact_location(event.location_raw, fallback=location_fallback)
     if ("job" in cal_lower or "work" in cal_lower) and location.strip() == "(no location)":
         location = "Salt & Straw"
-    lines.append(f"  {start_str} at {escape_md(location)}")
+    lines.append(f"  {start_str} at {escape_md(_sanitize_text(location))}")
 
     if plan.error:
         lines.append(f"  ❌ {_plan_error_label(plan.error)}")
@@ -346,7 +387,7 @@ def format_prep_ping(plan: Plan) -> str:
         Formatted prep ping string.
     """
     if plan.error:
-        title = plan.event.title
+        title = _sanitize_text(plan.event.title)
         return (
             f"⏰ *Start getting ready*\n"
             f"{escape_md(title)}\n"
@@ -357,7 +398,7 @@ def format_prep_ping(plan: Plan) -> str:
     if plan.leave_at:
         leave_str = plan.leave_at.strftime("%I:%M %p").lstrip("0")
 
-    title = escape_md(plan.event.title)
+    title = escape_md(_sanitize_text(plan.event.title))
     start_str = plan.event.start.strftime("%I:%M %p").lstrip("0")
 
     lines = [
@@ -380,12 +421,12 @@ def format_leave_ping(plan: Plan) -> str:
         Formatted leave ping string.
     """
     if plan.error:
-        title = plan.event.title
+        title = _sanitize_text(plan.event.title)
         return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {_plan_error_label(plan.error)}"
 
-    title = escape_md(plan.event.title)
+    title = escape_md(_sanitize_text(plan.event.title))
     start_str = plan.event.start.strftime("%I:%M %p").lstrip("0")
-    location = escape_md(_compact_location(plan.event.location_raw, fallback="unknown location"))
+    location = escape_md(_sanitize_text(_compact_location(plan.event.location_raw, fallback="unknown location")))
 
     lines = [
         "🚶 *Leave now*",
@@ -411,7 +452,7 @@ def format_location_update(old_plan: Plan, new_plan: Plan) -> str:
     Returns:
         MarkdownV2-safe Telegram message.
     """
-    title = escape_md(new_plan.event.title)
+    title = escape_md(_sanitize_text(new_plan.event.title))
     start_str = new_plan.event.start.strftime("%I:%M %p").lstrip("0")
 
     lines = [
@@ -450,8 +491,8 @@ def format_service_update(plan: Plan, alert: Alert, new_route: Route) -> str:
     Returns:
         Formatted service update string.
     """
-    title = escape_md(plan.event.title)
-    header = escape_md(alert.header)
+    title = escape_md(_sanitize_text(plan.event.title))
+    header = escape_md(_sanitize_text(alert.header))
     severity = "🔴" if alert.severity == "SEVERE" else "⚠️"
 
     lines = [
