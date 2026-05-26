@@ -222,7 +222,8 @@ def run(config: Config) -> None:  # noqa: C901
     )
 
     # ── 6. Build and send digest ──────────────────────────────────────────────
-    digest = format_digest(plans, affecting_alerts)
+    ops_notes = _operations_notes(plans, all_alerts)
+    digest = format_digest(plans, affecting_alerts, operations_notes=ops_notes)
     notifier = build_notifier(config)
     sent = notifier.send(digest)
     if sent:
@@ -245,6 +246,37 @@ def run(config: Config) -> None:  # noqa: C901
         len(affecting_alerts),
         sent,
     )
+
+
+def _operations_notes(plans: list[Plan], all_alerts: list[Alert]) -> list[str]:
+    """Build the "Operations:" footer items for the morning digest.
+
+    Surfaces degraded-service signals that today would only land in stderr:
+    MTA feeds that went silent after retries, plans whose location couldn't
+    be resolved, and plans that were stored with "too_imminent" / "no_route".
+    """
+    notes: list[str] = []
+
+    # Per-feed MTA failures reported by fetch_alerts (set as an attribute).
+    failed_feeds: list[str] = getattr(fetch_alerts, "last_failed_systems", [])
+    for system in failed_feeds:
+        notes.append(f"{system} alerts unavailable — retried and gave up")
+
+    unresolved_titles = [
+        p.event.title for p in plans if p.error == "location_unresolved"
+    ]
+    if unresolved_titles:
+        names = ", ".join(unresolved_titles[:3])
+        more = "" if len(unresolved_titles) <= 3 else f" (+{len(unresolved_titles) - 3} more)"
+        notes.append(f"Unresolved location: {names}{more}")
+
+    too_imminent = sum(1 for p in plans if p.error == "too_imminent")
+    if too_imminent:
+        notes.append(
+            f"{too_imminent} event(s) too imminent for a prep window"
+        )
+
+    return notes
 
 
 def _plan_event_safe(

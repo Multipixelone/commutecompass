@@ -262,15 +262,29 @@ def run(
             route_changed = _route_significantly_different(plan, new_plan)
 
             if route_changed:
-                # Send service update
-                from commutecompass.format import format_service_update
+                # Daily dedup: if the same alert already triggered a
+                # service_update for any of today's events, the user has been
+                # told.  We still replan + reschedule pings (silent fix-up)
+                # but suppress the duplicate notification.
+                already_announced_today = _store.is_alert_seen_today(alert.id)
 
-                if new_plan.route is not None:
-                    msg = format_service_update(plan, alert, new_plan.route)
-                    if _notifier.send(msg):
-                        logger.info("Sent service_update for event %s", plan.event.id)
-                    else:
-                        logger.warning("Failed to send service_update for event %s", plan.event.id)
+                if not already_announced_today:
+                    from commutecompass.format import format_service_update
+
+                    if new_plan.route is not None:
+                        msg = format_service_update(plan, alert, new_plan.route)
+                        if _notifier.send(msg):
+                            logger.info("Sent service_update for event %s", plan.event.id)
+                        else:
+                            logger.warning(
+                                "Failed to send service_update for event %s", plan.event.id
+                            )
+                else:
+                    logger.debug(
+                        "Alert %s already announced today — silently re-planning event %s",
+                        alert.id,
+                        plan.event.id,
+                    )
 
                 # Upsert new plan
                 _store.upsert_plan(new_plan)

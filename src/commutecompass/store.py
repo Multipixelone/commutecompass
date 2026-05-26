@@ -363,6 +363,24 @@ class Store:
             ).fetchone()
         return row is not None
 
+    def is_alert_seen_today(self, alert_id: str) -> bool:
+        """Return True if this alert was already announced today for any event.
+
+        Used to deduplicate service_update messages so a single delayed train
+        line that affects three of today's events doesn't generate three
+        notifications.  The first event still triggers a message and the
+        underlying replan; subsequent events replan silently.
+        """
+        from commutecompass.timeutil import logical_day_bounds_nyc
+
+        day_start, _day_end = logical_day_bounds_nyc()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM alerts_seen WHERE alert_id = ? AND seen_at >= ? LIMIT 1",
+                (alert_id, day_start.isoformat()),
+            ).fetchone()
+        return row is not None
+
     # ── Adjust idempotency log ──────────────────────────────────────────────────
 
     def record_adjust_key(self, key: str, event_id: str) -> bool:

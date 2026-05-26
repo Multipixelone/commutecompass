@@ -1604,6 +1604,124 @@ def test_poll_mta_fetch_cached_within_ttl(
         poll_mod._alerts_cache = None
 
 
+# ── Daily alert dedup across events ───────────────────────────────────────────
+
+
+def test_poll_dedups_same_alert_across_multiple_events(
+    minimal_config: Config,
+    sample_route: Route,
+) -> None:
+    """One alert affecting two events on the same day yields exactly one send.
+
+    Daily dedup spares the user from getting "C train delayed" three times
+    just because three of today's events use the C line.  The poll still
+    silently re-plans each affected event; only the *notification* is
+    suppressed for the second one onward.
+    """
+    now = now_nyc()
+    base_start = now + timedelta(hours=3)
+
+    event_a = Event(
+        id="evt-a",
+        calendar_id="cal-001",
+        calendar_name="Test",
+        title="Event A",
+        start=base_start,
+        end=base_start + timedelta(hours=1),
+        location_raw="200 Example St, New York, NY",
+    )
+    event_b = Event(
+        id="evt-b",
+        calendar_id="cal-001",
+        calendar_name="Test",
+        title="Event B",
+        start=base_start + timedelta(hours=2),
+        end=base_start + timedelta(hours=3),
+        location_raw="200 Example St, New York, NY",
+    )
+
+    plan_a = Plan(
+        event=event_a,
+        route=sample_route,
+        leave_at=event_a.start - timedelta(minutes=45),
+        prep_at=event_a.start - timedelta(minutes=65),
+    )
+    plan_b = Plan(
+        event=event_b,
+        route=sample_route,
+        leave_at=event_b.start - timedelta(minutes=45),
+        prep_at=event_b.start - timedelta(minutes=65),
+    )
+
+    alert = Alert(
+        id="alert-shared",
+        header="C train delays",
+        description="Big delays on the C.",
+        affected_routes={"C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[(now - timedelta(hours=1), now + timedelta(hours=5))],
+        severity="WARNING",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan_a)
+    store.upsert_plan(plan_b)
+
+    # New plan that triggers a "route change" so service_update fires for the
+    # first event, then would fire for the second if dedup weren't in place.
+    def _replanned(event: Event) -> Plan:
+        new_leave = event.start - timedelta(minutes=20)
+        new_route = Route(
+            legs=[
+                TransitLeg(
+                    mode="TRANSIT",
+                    system="MTA Subway",
+                    line="C",
+                    headsign="Fulton St (delayed)",
+                    depart_at=new_leave - timedelta(minutes=20),
+                    arrive_at=new_leave,
+                    duration_seconds=1200,
+                    summary="Delayed C",
+                ),
+            ],
+            depart_at=new_leave - timedelta(minutes=20),
+            arrive_at=new_leave,
+            total_duration_seconds=1200,
+            transfers=0,
+        )
+        return Plan(
+            event=event,
+            route=new_route,
+            leave_at=new_leave,
+            prep_at=new_leave - timedelta(minutes=20),
+        )
+
+    def planner(event: Event, **_kw: object) -> Plan:
+        return _replanned(event)
+
+    notifier = SpyNotifier()
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda alerts, route, at_time: [alert]
+        if alert in alerts
+        else [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=planner,
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    # Exactly one service_update message reaches the user, even though the
+    # alert affected both today's events.  Both events are still replanned;
+    # we just don't spam the second notification.
+    service_msgs = [m for m in notifier.sent if "Service Change" in m or "service" in m.lower()]
+    assert len(service_msgs) == 1, f"Expected 1 service_update, got {len(service_msgs)}: {notifier.sent}"
+
+
 # ── Atomic claim semantics ────────────────────────────────────────────────────
 
 

@@ -1175,6 +1175,30 @@ def test_format_digest_sanitises_malicious_title() -> None:
     assert len(title_lines) == 1
 
 
+def test_format_digest_appends_operations_footer_when_notes_present() -> None:
+    """The Operations footer surfaces degraded-service notes to the user."""
+    event = make_event(id="ok", title="OK Event", start=datetime(2026, 5, 26, 9, 30, tzinfo=timezone.utc))
+    plan = Plan(event=event, route=None, leave_at=None, prep_at=None)
+    notes = [
+        "MTA Subway alerts unavailable — retried and gave up",
+        "Unresolved location: Mystery Event",
+    ]
+    out = format_digest([plan], [], operations_notes=notes)
+    assert "Operations" in out
+    assert "unavailable" in out
+    assert "Mystery Event" in out
+    assert out.count("⚙️") == 2
+
+
+def test_format_digest_omits_operations_footer_when_clean() -> None:
+    event = make_event(id="ok", title="OK Event", start=datetime(2026, 5, 26, 9, 30, tzinfo=timezone.utc))
+    plan = Plan(event=event, route=None, leave_at=None, prep_at=None)
+    out_no_notes = format_digest([plan], [], operations_notes=None)
+    out_empty = format_digest([plan], [], operations_notes=[])
+    assert "Operations" not in out_no_notes
+    assert "Operations" not in out_empty
+
+
 def test_fmt_time_renders_no_leading_zero() -> None:
     """_fmt_time produces 12-hour wall-clock without a leading zero."""
     from commutecompass.format import _fmt_time
