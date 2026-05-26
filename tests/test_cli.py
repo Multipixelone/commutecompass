@@ -600,3 +600,135 @@ class TestAdjustIdempotency:
                 cli, ["adjust", "does-not-exist", "--add-prep", "10"]
             )
         assert result.exit_code == EXIT_NOT_FOUND
+
+
+# ─────────── status command ───────────────────────────────────────────────────
+
+
+class TestStatusCommand:
+    """`commutecompass status` returns a snapshot of today's state."""
+
+    def _config(self, tmp_path: Path) -> Config:
+        from commutecompass.config import (
+            Config, MtaConfig, OpencodeGoConfig, Origin, PathsConfig,
+            PrepConfig, SchedulingConfig,
+        )
+
+        return Config(
+            origin=Origin(address="x", lat=40.7, lon=-74.0),
+            calendars=[],
+            prep=PrepConfig(),
+            scheduling=SchedulingConfig(),
+            paths=PathsConfig(
+                venues_file=str(tmp_path / "venues.yaml"),
+                db_path=str(tmp_path / "state.db"),
+                oauth_token_path=str(tmp_path / "token.json"),
+            ),
+            opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+            mta=MtaConfig(
+                subway_alerts_url="https://example.com/s",
+                lirr_alerts_url="https://example.com/l",
+                bus_alerts_url="https://example.com/b",
+            ),
+            google_maps_api_key="x",
+            google_oauth_client_secret_json="{}",
+            telegram_bot_token="123:abc",
+            telegram_chat_id=-1,
+            opencode_go_token="x",
+        )
+
+    def test_status_text_on_empty_db(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        from commutecompass.store import Store
+        Store(cfg.paths.db_path).init_schema()
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "plans today: 0" in result.output
+        assert "pings today: 0" in result.output
+        assert "location: (none)" in result.output
+
+    def test_status_json_shape(self, runner: CliRunner, tmp_path: Path) -> None:
+        import json as _json
+
+        cfg = self._config(tmp_path)
+        from commutecompass.store import Store
+        Store(cfg.paths.db_path).init_schema()
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output)
+        assert set(payload.keys()) >= {
+            "now", "plans", "pings", "current_location", "geocode_cache",
+        }
+        assert payload["plans"] == []
+        assert payload["pings"] == []
+
+
+# ─────────── geocode-cache command ─────────────────────────────────────────────
+
+
+class TestGeocodeCacheCommand:
+    def _config(self, tmp_path: Path) -> Config:
+        from commutecompass.config import (
+            Config, MtaConfig, OpencodeGoConfig, Origin, PathsConfig,
+            PrepConfig, SchedulingConfig,
+        )
+
+        return Config(
+            origin=Origin(address="x", lat=40.7, lon=-74.0),
+            calendars=[],
+            prep=PrepConfig(),
+            scheduling=SchedulingConfig(),
+            paths=PathsConfig(
+                venues_file=str(tmp_path / "venues.yaml"),
+                db_path=str(tmp_path / "state.db"),
+                oauth_token_path=str(tmp_path / "token.json"),
+            ),
+            opencode_go=OpencodeGoConfig(endpoint="https://example.com"),
+            mta=MtaConfig(
+                subway_alerts_url="https://example.com/s",
+                lirr_alerts_url="https://example.com/l",
+                bus_alerts_url="https://example.com/b",
+            ),
+            google_maps_api_key="x",
+            google_oauth_client_secret_json="{}",
+            telegram_bot_token="123:abc",
+            telegram_chat_id=-1,
+            opencode_go_token="x",
+        )
+
+    def test_invalidate_existing_entry(self, runner: CliRunner, tmp_path: Path) -> None:
+        from commutecompass.models import ResolvedLocation
+        from commutecompass.store import Store
+
+        cfg = self._config(tmp_path)
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+        store.cache_geocode(
+            "Old Workplace",
+            ResolvedLocation(kind="address", value="x", lat=1.0, lon=2.0, source="geocode"),
+        )
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            r = runner.invoke(
+                cli, ["geocode-cache", "--invalidate", "Old Workplace"]
+            )
+        assert r.exit_code == 0, r.output
+        assert "removed" in r.output.lower()
+        # Entry is gone.
+        assert store.get_geocode("Old Workplace") is None
+
+    def test_invalidate_missing_entry_exits_not_found(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = self._config(tmp_path)
+        from commutecompass.cli import EXIT_NOT_FOUND
+        from commutecompass.store import Store
+
+        Store(cfg.paths.db_path).init_schema()
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            r = runner.invoke(cli, ["geocode-cache", "--invalidate", "Nothing"])
+        assert r.exit_code == EXIT_NOT_FOUND

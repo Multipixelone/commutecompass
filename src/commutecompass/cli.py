@@ -335,6 +335,157 @@ def where(ctx: click.Context) -> None:
     click.echo(f"lat={cl.lat:.6f} lon={cl.lon:.6f} zone={cl.zone or '-'} age={age_seconds}s source={cl.source}")
 
 
+# ─────────── status ──────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human-readable text.")
+@click.pass_context
+def status(ctx: click.Context, as_json: bool) -> None:
+    """Snapshot of today's plans, pings, location, and cache state.
+
+    Designed as a diagnostic command for "why didn't I get my 8am ping today?"
+    and as a skill the agent can call when the user asks operational
+    questions.  Pure read — no API calls, no notifications.
+    """
+    import json as _json
+
+    from commutecompass.store import Store
+    from commutecompass.timeutil import now_nyc
+
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    store = Store(Path(cfg.paths.db_path))
+    now = now_nyc()
+    plans = store.today_plans()
+    pings = store.all_pings_today()
+    location = store.get_current_location(max_age_minutes=None)
+    cache_stats = store.geocode_cache_stats()
+
+    payload: dict[str, object] = {
+        "now": now.isoformat(),
+        "plans": [
+            {
+                "event_id": p.event.id,
+                "title": p.event.title,
+                "start": p.event.start.isoformat(),
+                "leave_at": p.leave_at.isoformat() if p.leave_at else None,
+                "prep_at": p.prep_at.isoformat() if p.prep_at else None,
+                "error": p.error,
+                "resolved_source": (
+                    p.event.location_resolved.source
+                    if p.event.location_resolved
+                    else None
+                ),
+            }
+            for p in plans
+        ],
+        "pings": [
+            {
+                "id": p.id,
+                "event_id": p.event_id,
+                "kind": p.kind,
+                "fire_at": p.fire_at.isoformat(),
+                "fired": p.fired,
+                "fired_at": p.fired_at.isoformat() if p.fired_at else None,
+            }
+            for p in pings
+        ],
+        "current_location": (
+            {
+                "lat": location.lat,
+                "lon": location.lon,
+                "zone": location.zone,
+                "captured_at": location.captured_at.isoformat(),
+                "age_seconds": int((now - location.captured_at).total_seconds()),
+                "source": location.source,
+                "accuracy_m": location.accuracy_m,
+            }
+            if location
+            else None
+        ),
+        "geocode_cache": cache_stats,
+    }
+
+    if as_json:
+        click.echo(_json.dumps(payload, indent=2, default=str))
+        return
+
+    # Human-readable text mode
+    click.echo(f"now: {now.isoformat()}")
+    click.echo(f"plans today: {len(plans)}")
+    for plan in plans:
+        marker = "✗" if plan.error else "·"
+        leave = plan.leave_at.strftime("%I:%M %p").lstrip("0") if plan.leave_at else "—"
+        prep = plan.prep_at.strftime("%I:%M %p").lstrip("0") if plan.prep_at else "—"
+        err = f" error={plan.error}" if plan.error else ""
+        click.echo(f"  {marker} {plan.event.id[:12]} {plan.event.title!r} prep={prep} leave={leave}{err}")
+    click.echo(f"pings today: {len(pings)} ({sum(1 for x in pings if x.fired)} fired)")
+    for ping in pings:
+        state = "fired" if ping.fired else "pending"
+        fa = ping.fire_at.strftime("%I:%M %p").lstrip("0")
+        click.echo(f"  {state} {ping.kind} {ping.event_id[:12]} at {fa}")
+    if location:
+        age = int((now - location.captured_at).total_seconds())
+        click.echo(
+            f"location: lat={location.lat:.5f} lon={location.lon:.5f} "
+            f"zone={location.zone or '-'} age={age}s source={location.source}"
+        )
+    else:
+        click.echo("location: (none)")
+    cnt = cache_stats["count"]
+    oldest = cache_stats["oldest_cached_at"] or "—"
+    newest = cache_stats["newest_cached_at"] or "—"
+    click.echo(f"geocode_cache: {cnt} entries, oldest={oldest} newest={newest}")
+
+
+# ─────────── geocode-cache ───────────────────────────────────────────────────
+
+
+@cli.command(name="geocode-cache")
+@click.option("--list", "as_list", is_flag=True, help="List all cached entries.")
+@click.option("--invalidate", type=str, default=None, help="Delete the cache entry for this raw query string.")
+@click.pass_context
+def geocode_cache(ctx: click.Context, as_list: bool, invalidate: Optional[str]) -> None:
+    """Inspect or invalidate cached geocode lookups.
+
+    The cache is keyed on the raw query string the resolver passed to Google
+    Geocoding.  Use ``--list`` to see what's cached and ``--invalidate <raw>``
+    to drop a stale entry (e.g. after a venue moves).
+    """
+    from commutecompass.store import Store
+
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+    store = Store(Path(cfg.paths.db_path))
+
+    if invalidate is not None:
+        removed = store.geocode_cache_invalidate(invalidate)
+        if removed:
+            click.echo(f"removed cache entry for {invalidate!r}")
+        else:
+            click.echo(f"no cache entry for {invalidate!r}")
+            sys.exit(EXIT_NOT_FOUND)
+        return
+
+    if as_list:
+        entries = store.geocode_cache_list()
+        if not entries:
+            click.echo("geocode cache is empty")
+            return
+        for e in entries:
+            click.echo(f"{e['cached_at']}  {e['raw']}")
+        return
+
+    # Default: just print summary.
+    stats = store.geocode_cache_stats()
+    click.echo(
+        f"{stats['count']} entries (oldest={stats['oldest_cached_at']}, "
+        f"newest={stats['newest_cached_at']})"
+    )
+
+
 # ─────────── digest-preview ──────────────────────────────────────────────────
 
 
