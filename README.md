@@ -18,6 +18,7 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`init-db`](./src/commutecompass/store.py) — initialize the SQLite schema
 - [`morning`](./src/commutecompass/jobs/) — run the morning digest job
 - [`poll`](./src/commutecompass/jobs/) — run the per-minute poll loop
+- [`tomorrow`](./src/commutecompass/jobs/) — push tomorrow's earliest prep time to the configured HA script (pull-model alarm)
 - [`plan`](./src/commutecompass/planner.py) — replan a single event (debug)
 - [`digest-preview`](./src/commutecompass/cli.py) — print today's digest from cache without sending
 - [`adjust EVENT_ID --add-prep N`](./src/commutecompass/cli.py) — shift a plan's prep time by N minutes
@@ -88,6 +89,24 @@ script:
 ```
 
 CommuteCompass POSTs `{"title": "CommuteCompass", "message": "<ping body>", ...extra_data}` to the configured service. If the call fails, the primary notifier's send is **not** rolled back — the ping is still marked fired and won't repeat next minute.
+
+### Pull-model tomorrow alarm
+
+iOS won't let *any* third party create real Clock-app alarms — only Shortcuts running on-device can. The `commutecompass tomorrow` subcommand bridges that gap without keeping the phone in the loop in real time:
+
+1. CommuteCompass plans tomorrow's events evening-of, picks the earliest `prep_at`, and POSTs it to an HA script.
+2. The HA script stores the datetime in an `input_datetime` helper.
+3. A daily 21:00 Shortcuts automation on your iPhone (set to "Run Immediately") reads the helper via the HA REST API and creates a Clock-app alarm at that time. No tapping required.
+
+Enable it with:
+
+```toml
+[home_assistant.tomorrow]
+enabled = true
+script  = "script.commute_set_tomorrow_alarm"
+```
+
+Drop [`examples/ha/commute_tomorrow_alarm.yaml`](./examples/ha/commute_tomorrow_alarm.yaml) into your HA config (it includes both the `input_datetime` helper and the script, plus the Shortcuts recipe in comments at the bottom). Then schedule `commutecompass tomorrow` to run on an evening systemd timer (e.g. 20:45 NYC); it skips silently when there's nothing on the calendar.
 
 ## Development
 

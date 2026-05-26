@@ -34,6 +34,7 @@ to stdout; relay that stdout back to the user.
 | "I need 45 min to shower before <event>" / "shift prep earlier by N min" | `scripts/digest.sh` (find id) → `scripts/adjust.sh <event_id> --add-prep 45` |
 | "send me today's digest again" / "force-run morning"                     | `scripts/morning.sh`                              |
 | "run a poll cycle now" / "check alerts now"                              | `scripts/poll.sh`                                 |
+| "what time will my alarm be tomorrow?" / "preview tomorrow's wake time"  | `scripts/tomorrow.sh` (dry-run; no HA push)       |
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
 | "what's my prep buffer set to?" / "show me my config"                    | `scripts/config-show.sh`                          |
 | "set my prep buffer to 30 min" / "change quiet hours to ..."             | `scripts/config-set.sh <dotted.key> <value>`      |

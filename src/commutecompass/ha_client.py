@@ -151,6 +151,49 @@ def call_service(
     return True
 
 
+def push_tomorrow_alarm(
+    base_url: str,
+    token: str,
+    service: str,
+    alarm_at: datetime,
+    *,
+    extra_data: Optional[dict[str, object]] = None,
+    timeout: float = 5.0,
+) -> bool:
+    """POST tomorrow's alarm time to an HA script as ``domain.service``.
+
+    Body: ``{"datetime": "<iso-8601 NYC-local>", **extra_data}``. The HA
+    script is expected to copy that value into an ``input_datetime`` helper
+    that an iOS Shortcut polls each evening. Returns the underlying
+    ``call_service`` result (False on any failure; never raises).
+
+    ``service`` must be of the form ``"domain.service"`` (e.g.
+    ``script.commute_set_tomorrow_alarm``). Returns False for malformed
+    service names.
+
+    Field name: the payload key is ``alarm_at`` rather than ``datetime``
+    because ``datetime`` is a reserved Jinja namespace in Home Assistant
+    (it resolves to the Python module). The matching HA script must declare
+    a field called ``alarm_at`` and reference it as ``{{ alarm_at }}``.
+    """
+    if not (base_url and token and service):
+        return False
+    domain, sep, name = service.partition(".")
+    if not sep or not domain or not name:
+        _logger.warning(
+            "push_tomorrow_alarm: service %r is not 'domain.service' — skipping",
+            service,
+        )
+        return False
+
+    payload: dict[str, object] = {"alarm_at": alarm_at.isoformat()}
+    if extra_data:
+        payload.update(extra_data)
+    return call_service(
+        base_url, token, domain, name, data=payload, timeout=timeout
+    )
+
+
 def fetch_zones(
     base_url: str,
     token: str,

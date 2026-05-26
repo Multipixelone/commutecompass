@@ -57,6 +57,7 @@ commutecompass --help
 commutecompass --config examples/config.toml init-db
 commutecompass --config examples/config.toml morning
 commutecompass --config examples/config.toml poll
+commutecompass --config examples/config.toml tomorrow --dry-run
 ```
 
 ## Architecture map (quick)
@@ -70,6 +71,7 @@ commutecompass --config examples/config.toml poll
 - `notify.py`: dispatches between `TelegramNotifier` and `StdoutNotifier` per `[notify].mode`; `build_notifier(config)` is the only entry point job code should use
 - `jobs/morning.py`: daily planning + digest
 - `jobs/poll.py`: due pings + alert-triggered replanning
+- `jobs/tomorrow.py`: evening push of tomorrow's earliest prep_at to an HA script (pull-model wake alarm)
 - `skills/commutecompass/`: OpenClaw skill (SKILL.md + scripts/ + references/); model-invoked dispatch for chat queries and adjustments
 - `contrib/openclaw-send.sh`: cron/systemd glue that splits stdout-mode messages and pipes each one to `openclaw message send`
 

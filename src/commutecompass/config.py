@@ -83,6 +83,14 @@ class HomeAssistantAlarmConfig(BaseModel):
     extra_data: dict[str, Any] = {}
 
 
+class HomeAssistantTomorrowConfig(BaseModel):
+    """Pull-model tomorrow alarm — see models.HomeAssistantTomorrowConfig."""
+
+    enabled: bool = False
+    script: str = ""
+    extra_data: dict[str, Any] = {}
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -93,6 +101,7 @@ class HomeAssistantConfig(BaseModel):
     min_gps_accuracy_meters: int = 500
     zone_origins: list[ZoneOrigin] = []
     alarm: HomeAssistantAlarmConfig = HomeAssistantAlarmConfig()
+    tomorrow: HomeAssistantTomorrowConfig = HomeAssistantTomorrowConfig()
 
 
 class NotifyConfig(BaseModel):
