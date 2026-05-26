@@ -90,6 +90,14 @@ let
       serviceConfig.ExecStart =
         "${pkgs.bash}/bin/bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'";
     };
+
+  # For subcommands that don't emit chat messages and so don't need the
+  # openclaw pipe (e.g. `tomorrow` — pushes to HA, logs, no Telegram).
+  mkPlainService = subcommand: description:
+    lib.recursiveUpdate serviceDefaults {
+      inherit description;
+      serviceConfig.ExecStart = "${exe} ${subcommand}";
+    };
 in {
   options.services.commutecompass = {
     enable = lib.mkEnableOption "commutecompass NYC commute orchestrator";
@@ -226,6 +234,19 @@ in {
       description = "OnBootSec delay before the first poll fires after boot.";
     };
 
+    tomorrowTime = lib.mkOption {
+      type = lib.types.str;
+      default = "20:45:00";
+      description = ''
+        OnCalendar spec for the tomorrow-alarm push timer (pull-model wake
+        alarm — see README "Pull-model tomorrow alarm"). Should fire before
+        the iOS Shortcuts automation that polls Home Assistant; the default
+        20:45 leaves a 15-minute margin for the 21:00 Shortcut.
+
+        A no-op when [home_assistant.tomorrow] is disabled in config.toml.
+      '';
+    };
+
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
@@ -309,8 +330,9 @@ in {
       "z ${cfg.dataDir}      0750 ${cfg.user} ${cfg.group} -"
     ];
 
-    systemd.services."commutecompass-morning" = mkService "morning" "commutecompass morning digest";
-    systemd.services."commutecompass-poll"    = mkService "poll"    "commutecompass poll tick";
+    systemd.services."commutecompass-morning"  = mkService      "morning"  "commutecompass morning digest";
+    systemd.services."commutecompass-poll"     = mkService      "poll"     "commutecompass poll tick";
+    systemd.services."commutecompass-tomorrow" = mkPlainService "tomorrow" "commutecompass tomorrow-alarm push";
 
     systemd.timers."commutecompass-morning" = {
       description = "Daily morning digest timer";
@@ -327,6 +349,18 @@ in {
       timerConfig = {
         OnBootSec = cfg.pollOnBootSec;
         OnUnitActiveSec = cfg.pollInterval;
+      };
+    };
+
+    systemd.timers."commutecompass-tomorrow" = {
+      description = "Evening tomorrow-alarm push timer";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.tomorrowTime;
+        # Persistent so a missed evening run (host down at 20:45) fires on
+        # next boot. Still useful if the user wakes up the machine later that
+        # evening — the alarm will be ready before the Shortcut polls at 21:00.
+        Persistent = true;
       };
     };
   };
