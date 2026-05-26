@@ -11,15 +11,18 @@ from pathlib import Path
 import tomllib
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
 class Origin(BaseModel):
     address: str
-    lat: float
-    lon: float
+    # Geographic bounds — bare minimum to catch swapped lat/lon, missing
+    # decimal points, etc.  Worldwide rather than NYC-specific so the same
+    # validation applies if the operator generalises the tool later.
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
     subway_station: str = ""
     lirr_station: str = ""
 
@@ -31,13 +34,13 @@ class CalendarSpec(BaseModel):
 
 
 class PrepConfig(BaseModel):
-    prep_minutes: int = 20
-    safety_buffer_minutes: int = 5
+    prep_minutes: int = Field(default=20, ge=0, le=24 * 60)
+    safety_buffer_minutes: int = Field(default=5, ge=0, le=24 * 60)
 
 
 class SchedulingConfig(BaseModel):
     morning_run_time: dt_time = dt_time(6, 0)
-    poll_interval_seconds: int = 60
+    poll_interval_seconds: int = Field(default=60, ge=1, le=86_400)
     quiet_hours_start: dt_time | None = None
     quiet_hours_end: dt_time | None = None
 
@@ -68,8 +71,8 @@ class LocationOverride(BaseModel):
 class ZoneOrigin(BaseModel):
     zone: str
     address: str
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
     subway_station: str = ""
     lirr_station: str = ""
 
@@ -96,12 +99,23 @@ class HomeAssistantConfig(BaseModel):
     base_url: str = ""
     entity_id: str = ""
     home_zone: str = "home"
-    max_age_minutes: int = 30
-    replan_window_minutes: int = 30
-    min_gps_accuracy_meters: int = 500
+    max_age_minutes: int = Field(default=30, ge=0, le=24 * 60)
+    replan_window_minutes: int = Field(default=30, ge=0, le=24 * 60)
+    # 0 disables the accuracy filter; otherwise reject readings worse than this.
+    min_gps_accuracy_meters: int = Field(default=500, ge=0, le=1_000_000)
     zone_origins: list[ZoneOrigin] = []
     alarm: HomeAssistantAlarmConfig = HomeAssistantAlarmConfig()
     tomorrow: HomeAssistantTomorrowConfig = HomeAssistantTomorrowConfig()
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        """When set, the URL must start with http:// or https:// (no path traversal)."""
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(
+                f"home_assistant.base_url must start with http(s)://, got {v!r}"
+            )
+        return v.rstrip("/")
 
 
 class NotifyConfig(BaseModel):

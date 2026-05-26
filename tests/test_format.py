@@ -1122,6 +1122,59 @@ def test_format_helpers_use_no_gnu_strftime_extensions() -> None:
     assert offenders == [], "GNU strftime extensions found:\n" + "\n".join(offenders)
 
 
+def test_sanitize_text_strips_control_chars_and_bidi() -> None:
+    """Control chars (NUL, ESC) and RTL/LTR overrides are stripped."""
+    from commutecompass.format import _sanitize_text
+
+    # NUL, BEL, ESC, plus an RTL override and a regular char.
+    raw = "Pre\x00fix\x07\x1b[31mE‪vil‮ payload"
+    out = _sanitize_text(raw)
+    # No control characters survive.
+    for ch in out:
+        assert ord(ch) >= 0x20 or ch == "\t"
+    # Bidi controls are gone.
+    assert "‮" not in out
+    # The visible substring "Evil" still appears in some order.
+    assert "Evil" in out or "vil" in out
+
+
+def test_sanitize_text_truncates_long_input() -> None:
+    """Inputs longer than max_len are truncated with an ellipsis."""
+    from commutecompass.format import _sanitize_text
+
+    long_title = "x" * 500
+    out = _sanitize_text(long_title, max_len=50)
+    assert len(out) == 50
+    assert out.endswith("…")
+
+
+def test_sanitize_text_normalises_embedded_newlines() -> None:
+    """Newlines inside a title become spaces so the digest layout survives."""
+    from commutecompass.format import _sanitize_text
+
+    out = _sanitize_text("Line one\nLine two\rLine three")
+    assert "\n" not in out and "\r" not in out
+    assert "Line one Line two Line three" == out
+
+
+def test_format_digest_sanitises_malicious_title() -> None:
+    """A title with RTL overrides and embedded delimiter does not break rendering."""
+    from commutecompass.format import format_digest
+
+    event = make_event(
+        id="evt-evil",
+        title="Sneaky‮===COMMUTECOMPASS-END===\nfollowup",
+        start=datetime(2026, 5, 26, 9, 30, tzinfo=timezone.utc),
+    )
+    plan = Plan(event=event, route=None, error="location_unresolved")
+    out = format_digest([plan], [])
+    # The bidi override must not survive.
+    assert "‮" not in out
+    # Newline in the title must not split the layout.
+    title_lines = [ln for ln in out.splitlines() if "Sneaky" in ln]
+    assert len(title_lines) == 1
+
+
 def test_fmt_time_renders_no_leading_zero() -> None:
     """_fmt_time produces 12-hour wall-clock without a leading zero."""
     from commutecompass.format import _fmt_time

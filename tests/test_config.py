@@ -659,3 +659,58 @@ poll_interval_seconds = 60
             "notify.mode",
         ]:
             assert key in CONFIG_SET_ALLOWLIST
+
+
+# ─────────── Pydantic field validation ─────────────────────────────────────────
+
+
+class TestPydanticValidation:
+    """Round-trip cases for the new Field(ge/le) and field_validator constraints."""
+
+    def test_origin_rejects_swapped_or_oob_coords(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import Origin
+
+        with pytest.raises(ValidationError):
+            Origin(address="x", lat=200.0, lon=0.0)  # lat > 90
+        with pytest.raises(ValidationError):
+            Origin(address="x", lat=0.0, lon=-200.0)  # lon < -180
+
+    def test_prep_rejects_negative_buffer(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import PrepConfig
+
+        with pytest.raises(ValidationError):
+            PrepConfig(prep_minutes=-1, safety_buffer_minutes=5)
+        with pytest.raises(ValidationError):
+            PrepConfig(prep_minutes=20, safety_buffer_minutes=-30)
+
+    def test_scheduling_rejects_zero_poll_interval(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import SchedulingConfig
+
+        with pytest.raises(ValidationError):
+            SchedulingConfig(poll_interval_seconds=0)
+        # Sensible value still works
+        SchedulingConfig(poll_interval_seconds=60)
+
+    def test_ha_base_url_must_be_http(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import HomeAssistantConfig
+
+        with pytest.raises(ValidationError):
+            HomeAssistantConfig(base_url="ftp://ha.example.com")
+        # Trailing slash is stripped to keep URL joins clean.
+        ha = HomeAssistantConfig(base_url="https://ha.example.com/")
+        assert ha.base_url == "https://ha.example.com"
+
+    def test_ha_base_url_empty_is_allowed(self) -> None:
+        """Empty base_url is fine when home_assistant is disabled."""
+        from commutecompass.config import HomeAssistantConfig
+
+        ha = HomeAssistantConfig()
+        assert ha.base_url == ""
