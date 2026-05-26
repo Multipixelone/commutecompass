@@ -83,9 +83,36 @@ commutecompass --config examples/config.toml tomorrow --dry-run
 2. **Telegram MarkdownV2 is strict**
    - Escape user/content fields with `escape_md()`.
    - Literal markdown-sensitive punctuation in formatted templates (e.g. `(` and `)`) must also be escaped when needed.
+   - Always wrap user-supplied strings (event titles, calendar names, alert
+     headers, locations) with `_sanitize_text(...)` *before* `escape_md`.
+     The sanitiser strips control chars, Unicode bidi overrides, and
+     truncates to 200 chars.
 
 3. **Non-actionable locations**
    - Placeholder locations like “Location available once RSVP’d” should short-circuit in resolver (no unnecessary LLM call).
+
+4. **Portable strftime**
+   - Do not introduce `%-I` or `%-d` strftime specifiers — they are GNU
+     extensions that raise on macOS and Windows.  Use the `_fmt_time` /
+     `_fmt_day_of_month` helpers in `format.py` or `.strftime("%I:%M %p").lstrip("0")`.
+     `tests/test_format.py` has a regression test that fails on `%-`.
+
+5. **CLI exit codes**
+   - `cli.py` exposes `EXIT_OK=0`, `EXIT_USAGE=64`, `EXIT_NOT_FOUND=65`,
+     `EXIT_UNRESOLVED=66`, `EXIT_TRANSIENT=75`, `EXIT_CONFIG=78`.  New
+     `sys.exit()` calls should use these so agent callers can distinguish
+     failure modes without parsing logs.
+
+6. **Ping firing contract**
+   - Use `store.claim_ping(id, now)` (atomic 0→1 transition) before
+     sending a notification, not `mark_fired` after.  This is the race
+     protection against overlapping poll cycles.  Send failures are
+     logged but NOT retried — claim-and-send is one-shot by design.
+
+7. **OpenClaw stdout protocol**
+   - `notify.StdoutNotifier` escapes any body line that exactly matches
+     `STDOUT_MSG_START` / `STDOUT_MSG_END` with a zero-width space.  If
+     you add a new framing marker, also extend `_escape_stdout_delimiters`.
 
 ## Code style expectations
 
@@ -103,7 +130,8 @@ If you change any of these, update tests and mention in PR notes:
 - scheduling semantics in jobs,
 - new CLI subcommands or removed ones — update `skills/commutecompass/SKILL.md` (dispatch table) and add/remove the corresponding script under `skills/commutecompass/scripts/`,
 - `CONFIG_SET_ALLOWLIST` in `config.py` — keep `skills/commutecompass/references/config-allowlist.md` in sync,
-- the stdout-mode delimiters in `notify.py` — `contrib/openclaw-send.sh` parses them and must match.
+- the stdout-mode delimiters in `notify.py` — `contrib/openclaw-send.sh` parses them and must match, and `_escape_stdout_delimiters` must learn the new markers,
+- CLI exit codes — extend `SKILL.md`'s "Exit code conventions" table.
 
 ## PR / commit checklist
 
