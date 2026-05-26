@@ -70,4 +70,22 @@ purpose.
   start and can't be moved without a replan. If the user wants to leave
   earlier/later, that requires a different change (calendar edit or route
   override).
+- `adjust` accepts `--idempotency-key <opaque>`. If you (the agent) might
+  retry the same request, pass a stable key (e.g. an upstream correlation id,
+  or `<event_id>:<add_prep>:<YYYYMMDD>`) so duplicate retries no-op rather
+  than stacking the offset.
 - See `references/examples.md` for end-to-end chat → command mappings.
+
+## Exit code conventions
+
+Commands use the following exit codes so an agent caller can distinguish
+failure modes without parsing log output:
+
+| Code | Meaning                                                    |
+|------|------------------------------------------------------------|
+| 0    | Success.                                                   |
+| 64   | Usage / bad arguments (Click already uses 2; we use 64 for `config set` rejects). |
+| 65   | Subject not found (no plan / event / location row).        |
+| 66   | Data could not be resolved (no current location, no route, prep/leave missing). |
+| 75   | Transient failure: job lock held by another process; retry next cycle. |
+| 78   | Config error (missing env var, malformed TOML).            |
