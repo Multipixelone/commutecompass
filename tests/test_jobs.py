@@ -1602,3 +1602,135 @@ def test_poll_mta_fetch_cached_within_ttl(
         )
     finally:
         poll_mod._alerts_cache = None
+
+
+# ── Atomic claim semantics ────────────────────────────────────────────────────
+
+
+def test_poll_ping_marked_fired_even_when_primary_send_fails(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """When the primary notifier returns False, the ping is still consumed.
+
+    The claim-then-send contract is "one attempt per ping": a flaky network
+    must not turn a single missed send into a retry storm on every subsequent
+    poll cycle.
+    """
+    now = now_nyc()
+
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=leave_at - timedelta(minutes=20),
+    )
+    due_ping = PingEntry(
+        id="ping-one-shot",
+        event_id=today_events[0].id,
+        kind="leave",
+        fire_at=now - timedelta(minutes=5),
+        fired=False,
+        message="leave now",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(due_ping)
+
+    failing = SpyNotifier(return_value=False)
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, failing),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    # The notifier was invoked exactly once with the message.
+    assert failing.sent == ["leave now"]
+
+    # A second poll a minute later must NOT retry: claim already consumed.
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, failing),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now + timedelta(minutes=1),
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+    assert failing.sent == ["leave now"]
+
+
+def test_poll_quiet_hours_leaves_unclaimed_for_later(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A prep ping suppressed by quiet hours must remain claimable later.
+
+    Quiet hours suppression filters BEFORE the atomic claim — otherwise a
+    suppressed ping would be silently consumed and never delivered.
+    """
+    from datetime import time as _time
+
+    now = now_nyc()
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    plan = Plan(
+        event=today_events[0],
+        route=sample_route,
+        leave_at=leave_at,
+        prep_at=leave_at - timedelta(minutes=20),
+    )
+    prep_ping = PingEntry(
+        id="ping-prep-quiet",
+        event_id=today_events[0].id,
+        kind="prep",
+        fire_at=now - timedelta(minutes=5),
+        fired=False,
+        message="start prep",
+    )
+
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(prep_ping)
+
+    # Quiet-hours window covering 'now' in NYC local.
+    nyc_now = now.astimezone(NYC_TZ)
+    minimal_config.scheduling.quiet_hours_start = _time(
+        (nyc_now.hour - 1) % 24, 0
+    )
+    minimal_config.scheduling.quiet_hours_end = _time(
+        (nyc_now.hour + 1) % 24, 59
+    )
+
+    notifier = SpyNotifier()
+
+    poll_run(
+        minimal_config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: now,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+    # Suppressed: not sent and not claimed
+    assert notifier.sent == []
+    pending = store.pending_pings(before=now + timedelta(hours=1))
+    assert any(p.id == "ping-prep-quiet" for p in pending), (
+        "Quiet-hours suppression must NOT consume the ping; it should remain "
+        "pending so a later poll outside the quiet window can claim it."
+    )

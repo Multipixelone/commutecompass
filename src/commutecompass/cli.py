@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import click
 
 from commutecompass.config import ConfigError  # noqa: F401
+from commutecompass.joblock import JobLock, LockHeld, lock_path_for
 from commutecompass.models import CalendarSpec
 
 if TYPE_CHECKING:
@@ -17,6 +18,15 @@ if TYPE_CHECKING:
 
 # Default config path
 _CONFIG_DEFAULT = "/etc/commutecompass/config.toml"
+
+# Process exit codes (sysexits-inspired).  These let the OpenClaw skill — or
+# any other agent caller — distinguish kinds of failure without parsing logs.
+EXIT_OK = 0
+EXIT_USAGE = 64       # bad CLI arguments
+EXIT_NOT_FOUND = 65   # subject doesn't exist (event/plan)
+EXIT_UNRESOLVED = 66  # data could not be resolved (location/route)
+EXIT_TRANSIENT = 75   # transient failure (job lock held, external API down)
+EXIT_CONFIG = 78      # config error
 
 _logger = logging.getLogger(__name__)
 
@@ -33,7 +43,22 @@ def _load_config(config_path: Path) -> "Config":
         return config_mod.load_config(config_path)
     except ConfigError as exc:
         click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
+        sys.exit(EXIT_CONFIG)
+
+
+def _run_with_job_lock(cfg: "Config", job_name: str, fn: "Callable[[], None]") -> None:
+    """Wrap a job invocation in a non-blocking flock so morning/poll cannot overlap.
+
+    If another process already holds the lock, exit ``EXIT_TRANSIENT`` so cron
+    / systemd will simply retry next cycle without producing a hard failure.
+    """
+    lock = JobLock(lock_path_for(cfg.paths.db_path, job_name), job_name=job_name)
+    try:
+        with lock:
+            fn()
+    except LockHeld as exc:
+        click.echo(f"{job_name}: {exc}", err=True)
+        sys.exit(EXIT_TRANSIENT)
 
 
 # ─────────── Click group ──────────────────────────────────────────────────────
@@ -110,7 +135,7 @@ def morning(ctx: click.Context) -> None:
 
     from commutecompass.jobs.morning import run as morning_run
 
-    morning_run(cfg)
+    _run_with_job_lock(cfg, "morning", lambda: morning_run(cfg))
 
 
 # ─────────── poll ─────────────────────────────────────────────────────────────
@@ -125,7 +150,7 @@ def poll(ctx: click.Context) -> None:
 
     from commutecompass.jobs.poll import run as poll_run
 
-    poll_run(cfg)
+    _run_with_job_lock(cfg, "poll", lambda: poll_run(cfg))
 
 
 # ─────────── tomorrow ────────────────────────────────────────────────────────

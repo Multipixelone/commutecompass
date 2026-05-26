@@ -160,25 +160,40 @@ def run(
     )
 
     # ── Phase 2: fire due pings ───────────────────────────────────────────────
+    # Atomic claim-then-send: every ping we try to send is first claimed in a
+    # single UPDATE so two concurrent poll runs cannot both pick up the same
+    # row.  Failure modes are surfaced as warnings and counted in the summary;
+    # we deliberately do NOT retry on send failure (no retry storm).
     due_pings = _store.pending_pings(before=now)
     for ping in due_pings:
-        # During quiet hours, only fire 'leave' pings
+        # During quiet hours, only fire 'leave' pings — leave the row unfired
+        # so a future poll (after quiet hours end) can still claim it.
         if in_quiet_hours and ping.kind != "leave":
             logger.debug("Suppressing %s ping during quiet hours", ping.kind)
             continue
 
-        if _notifier.send(ping.message):
-            _store.mark_fired(ping.id, now)
+        if not _store.claim_ping(ping.id, now):
+            logger.debug("Ping %s already claimed by another runner", ping.id)
+            continue
+
+        sent_ok = _notifier.send(ping.message)
+        if sent_ok:
             logger.info("Fired ping %s (%s)", ping.id, ping.kind)
-            # Additive HA alarm: fire AFTER the primary notification is marked
-            # so an HA outage cannot un-fire the ping or cause repeat sends.
-            if _ha_alarm is not None and ping.kind in _ha_alarm_kinds:
-                if not _ha_alarm.send(ping.message):
-                    logger.warning(
-                        "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
-                    )
         else:
-            logger.warning("Failed to send ping %s (%s)", ping.id, ping.kind)
+            logger.warning(
+                "Send failed for claimed ping %s (%s) — not retrying",
+                ping.id,
+                ping.kind,
+            )
+
+        # Additive HA alarm: fire AFTER the primary send attempt regardless of
+        # its outcome (claim already consumed the row).  An HA outage cannot
+        # un-fire the ping or cause repeat sends.
+        if sent_ok and _ha_alarm is not None and ping.kind in _ha_alarm_kinds:
+            if not _ha_alarm.send(ping.message):
+                logger.warning(
+                    "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
+                )
 
     # ── Phase 3: fetch alerts ─────────────────────────────────────────────────
     global _alerts_cache
