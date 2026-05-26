@@ -95,6 +95,26 @@ class HomeAssistantAlarmConfig(BaseModel):
     extra_data: dict[str, Any] = Field(default_factory=dict)
 
 
+class HomeAssistantTomorrowConfig(BaseModel):
+    """Pull-model alarm: push tomorrow's earliest prep_at into an HA helper.
+
+    Designed for an iOS Shortcuts automation that polls HA each evening,
+    reads the resulting state, and creates a wake alarm on-device. No HA
+    automation is required on the receiving side beyond the script this
+    block points at.
+
+    ``script`` is the HA service to call as ``"domain.service"`` (typically
+    ``script.commute_set_tomorrow_alarm``). The service receives a single
+    ``datetime`` variable in ISO-8601 form (NYC-local with offset). It is
+    expected to write that value into an ``input_datetime`` helper that
+    the Shortcut reads. ``extra_data`` is merged into the JSON body.
+    """
+
+    enabled: bool = False
+    script: str = ""
+    extra_data: dict[str, Any] = Field(default_factory=dict)
+
+
 class HomeAssistantConfig(BaseModel):
     enabled: bool = False
     base_url: str = ""
@@ -105,6 +125,9 @@ class HomeAssistantConfig(BaseModel):
     min_gps_accuracy_meters: int = 500
     zone_origins: list[ZoneOrigin] = Field(default_factory=list)
     alarm: HomeAssistantAlarmConfig = Field(default_factory=HomeAssistantAlarmConfig)
+    tomorrow: HomeAssistantTomorrowConfig = Field(
+        default_factory=HomeAssistantTomorrowConfig
+    )
 
 
 class NotifyConfig(BaseModel):

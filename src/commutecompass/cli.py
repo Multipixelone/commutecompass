@@ -128,6 +128,42 @@ def poll(ctx: click.Context) -> None:
     poll_run(cfg)
 
 
+# ─────────── tomorrow ────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Plan tomorrow and print the earliest prep time, but skip the HA push.",
+)
+@click.pass_context
+def tomorrow(ctx: click.Context, dry_run: bool) -> None:
+    """Push tomorrow's earliest prep time to the configured HA script.
+
+    Designed to run from a systemd timer in the evening (e.g. 21:00 NYC).
+    Plans tomorrow's events, picks the earliest prep_at, and POSTs it to
+    ``[home_assistant.tomorrow].script`` so an iOS Shortcut can poll HA
+    and set an on-device wake alarm. Today's planned state is left alone.
+    """
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    from commutecompass.jobs.tomorrow import run as tomorrow_run
+
+    chosen = tomorrow_run(cfg, dry_run=dry_run)
+    if chosen is None:
+        click.echo("No plan-able commutes tomorrow — nothing pushed.")
+        return
+
+    assert chosen.prep_at is not None
+    suffix = " (dry-run — HA push skipped)" if dry_run else ""
+    click.echo(
+        f"Tomorrow earliest prep: {chosen.prep_at.isoformat()} "
+        f"event={chosen.event.id} ({chosen.event.title}){suffix}"
+    )
+
+
 # ─────────── plan EVENT_ID ───────────────────────────────────────────────────
 
 

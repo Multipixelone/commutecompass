@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from commutecompass.ha_client import call_service, fetch_location, fetch_zones
+from commutecompass.ha_client import (
+    call_service,
+    fetch_location,
+    fetch_zones,
+    push_tomorrow_alarm,
+)
 
 
 def _mock_get_response(status: int, payload: object) -> httpx.Response:
@@ -257,3 +264,57 @@ class TestCallService:
             call_service("http://ha", "tok", "script", "s")
 
         assert mock_instance.post.call_args.kwargs["json"] == {}
+
+
+class TestPushTomorrowAlarm:
+    def _alarm_at(self) -> datetime:
+        return datetime(2026, 5, 26, 5, 42, tzinfo=ZoneInfo("America/New_York"))
+
+    def test_happy_path_posts_iso_datetime(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            ok = push_tomorrow_alarm(
+                "http://ha", "tok", "script.commute_set_tomorrow_alarm",
+                self._alarm_at(),
+            )
+
+        assert ok is True
+        call_args = mock_instance.post.call_args
+        assert call_args.args[0] == (
+            "http://ha/api/services/script/commute_set_tomorrow_alarm"
+        )
+        assert call_args.kwargs["json"] == {
+            "alarm_at": "2026-05-26T05:42:00-04:00",
+        }
+
+    def test_extra_data_merged(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            mock_instance = mock_client.return_value.__enter__.return_value
+            mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
+
+            push_tomorrow_alarm(
+                "http://ha", "tok", "script.commute_set_tomorrow_alarm",
+                self._alarm_at(),
+                extra_data={"label": "commute"},
+            )
+
+        body = mock_instance.post.call_args.kwargs["json"]
+        assert body["alarm_at"] == "2026-05-26T05:42:00-04:00"
+        assert body["label"] == "commute"
+
+    def test_bad_service_returns_false(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            ok = push_tomorrow_alarm(
+                "http://ha", "tok", "no_dot_here", self._alarm_at(),
+            )
+        assert ok is False
+        mock_client.assert_not_called()
+
+    def test_empty_inputs_short_circuit(self) -> None:
+        with patch("httpx.Client") as mock_client:
+            assert push_tomorrow_alarm("", "tok", "script.x", self._alarm_at()) is False
+            assert push_tomorrow_alarm("http://ha", "", "script.x", self._alarm_at()) is False
+            assert push_tomorrow_alarm("http://ha", "tok", "", self._alarm_at()) is False
+        mock_client.assert_not_called()

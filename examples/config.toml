@@ -111,6 +111,22 @@ min_gps_accuracy_meters = 500
 # # volume = 1.0
 # # name = "alarm.caf"
 
+# ── Home Assistant tomorrow-alarm pull channel (optional) ────────────────────
+# Pull-model alarm. The `commutecompass tomorrow` subcommand (run on an
+# evening systemd timer ~21:00) plans tomorrow's events, picks the earliest
+# prep_at, and POSTs it to the HA script below. The script writes that value
+# into an input_datetime helper that an iOS Shortcut polls on its own
+# schedule to create a wake-up alarm on-device. Reuses [home_assistant]
+# .base_url and HOME_ASSISTANT_TOKEN.
+#
+# See examples/ha/commute_tomorrow_alarm.yaml for the matching HA YAML
+# (input_datetime helper + script) and the Shortcuts recipe.
+# [home_assistant.tomorrow]
+# enabled = true
+# script  = "script.commute_set_tomorrow_alarm"
+# [home_assistant.tomorrow.extra_data]
+# # label = "commute"   # merged into the JSON body POSTed to HA
+
 [[calendars]]
 id = "theatre-calendar@example.com"
 name = "Theatre"
