@@ -10,7 +10,7 @@ from typing import Any, Iterator, Optional, cast
 
 import sqlite3
 
-from commutecompass.models import CurrentLocation, Plan, PingEntry, ResolvedLocation
+from commutecompass.models import AdjustRow, CurrentLocation, Plan, PingEntry, ResolvedLocation
 
 
 def _now_iso() -> str:
@@ -119,7 +119,23 @@ class Store:
                     event_id TEXT NOT NULL,
                     applied_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS event_mutes (
+                    event_id TEXT PRIMARY KEY,
+                    muted_at TEXT NOT NULL,
+                    expires_at TEXT
+                );
             """)
+            # Migrate adjust_log: add columns required for `undo` (single-step
+            # restoration of the exact previous prep_at + undone flag).
+            adj_cols = {row[1] for row in conn.execute("PRAGMA table_info(adjust_log)").fetchall()}
+            if "add_prep_minutes" not in adj_cols:
+                conn.execute("ALTER TABLE adjust_log ADD COLUMN add_prep_minutes INTEGER")
+            if "prev_prep_at" not in adj_cols:
+                conn.execute("ALTER TABLE adjust_log ADD COLUMN prev_prep_at TEXT")
+            if "undone" not in adj_cols:
+                conn.execute(
+                    "ALTER TABLE adjust_log ADD COLUMN undone INTEGER NOT NULL DEFAULT 0"
+                )
             # Ensure only one unfired ping per (event_id, kind).
             # Migrate existing duplicates first, keeping the row with the latest fire_at.
             cursor = conn.execute("PRAGMA table_info(pings)")
@@ -453,6 +469,167 @@ class Store:
                 (key, event_id, _now_iso()),
             )
             return cursor.rowcount == 1
+
+    def record_adjust(
+        self,
+        event_id: str,
+        add_prep_minutes: int,
+        prev_prep_at: datetime,
+        *,
+        key: Optional[str] = None,
+    ) -> Optional[str]:
+        """Record a full adjustment row so ``undo`` can restore the prior prep_at.
+
+        When ``key`` is provided, behaves like ``record_adjust_key`` w.r.t.
+        deduplication — a previously-seen key returns ``None`` (caller no-ops).
+        When ``key`` is ``None``, an ``auto:<uuid>`` key is generated so the row
+        is uniquely addressable but the caller doesn't have to invent one.
+        """
+        import uuid
+
+        actual_key = key if key is not None else f"auto:{uuid.uuid4()}"
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO adjust_log
+                    (key, event_id, applied_at, add_prep_minutes, prev_prep_at, undone)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    actual_key,
+                    event_id,
+                    _now_iso(),
+                    add_prep_minutes,
+                    prev_prep_at.isoformat(),
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return actual_key
+
+    def last_adjust(self, event_id: Optional[str] = None) -> Optional[AdjustRow]:
+        """Return the most recent non-undone adjust row, optionally filtered to one event.
+
+        ``undo`` calls this to find the row to revert.  Rows where
+        ``add_prep_minutes`` is NULL (created by the legacy
+        ``record_adjust_key`` path before the schema was extended) are skipped
+        — there's no recorded ``prev_prep_at`` to restore.
+        """
+        sql = (
+            "SELECT key, event_id, applied_at, add_prep_minutes, prev_prep_at, undone "
+            "FROM adjust_log "
+            "WHERE undone = 0 AND add_prep_minutes IS NOT NULL AND prev_prep_at IS NOT NULL "
+        )
+        params: tuple[Any, ...] = ()
+        if event_id is not None:
+            sql += "AND event_id = ? "
+            params = (event_id,)
+        sql += "ORDER BY applied_at DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        return AdjustRow(
+            key=row[0],
+            event_id=row[1],
+            applied_at=datetime.fromisoformat(row[2]),
+            add_prep_minutes=int(row[3]),
+            prev_prep_at=datetime.fromisoformat(row[4]),
+            undone=bool(row[5]),
+        )
+
+    def mark_adjust_undone(self, key: str) -> bool:
+        """Flip ``undone=1`` for the named row; return True if a row was updated."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE adjust_log SET undone = 1 WHERE key = ? AND undone = 0",
+                (key,),
+            )
+            return cursor.rowcount == 1
+
+    # ── Mute ledger ────────────────────────────────────────────────────────────
+
+    def mute_event(
+        self, event_id: str, *, expires_at: Optional[datetime] = None
+    ) -> None:
+        """Suppress all pings for ``event_id`` until ``expires_at`` (or forever).
+
+        Enforced in ``jobs.poll`` before notifying on a claimed ping — see the
+        ``is_muted`` check there.  Idempotent: re-muting the same event with a
+        new expiry just updates the row.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO event_mutes (event_id, muted_at, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    muted_at = excluded.muted_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    event_id,
+                    _now_iso(),
+                    expires_at.isoformat() if expires_at else None,
+                ),
+            )
+
+    def unmute_event(self, event_id: str) -> int:
+        """Remove the mute record for ``event_id``; returns rows removed (0 or 1)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM event_mutes WHERE event_id = ?", (event_id,)
+            )
+            return cursor.rowcount
+
+    def is_muted(self, event_id: str) -> bool:
+        """Return True if ``event_id`` has a non-expired mute record.
+
+        ``expires_at`` IS NULL means "forever"; otherwise the mute is active
+        only while ``now() < expires_at``.  Past-expiry rows are left in place
+        for inspection but report as not muted.
+        """
+        from commutecompass.timeutil import now_nyc
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT expires_at FROM event_mutes WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        expires_at = row[0]
+        if expires_at is None:
+            return True
+        return now_nyc() < datetime.fromisoformat(expires_at)
+
+    # ── Pending-ping lookup ────────────────────────────────────────────────────
+
+    def get_pending_ping(self, event_id: str, kind: str) -> Optional[PingEntry]:
+        """Return the unfired ping (if any) for ``(event_id, kind)``.
+
+        Used by ``snooze`` to look up the ping it's about to shift or skip.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, event_id, kind, fire_at, fired, fired_at, message
+                FROM pings
+                WHERE event_id = ? AND kind = ? AND fired = 0
+                """,
+                (event_id, kind),
+            ).fetchone()
+        if row is None:
+            return None
+        return PingEntry(
+            id=row[0],
+            event_id=row[1],
+            kind=row[2],
+            fire_at=datetime.fromisoformat(row[3]),
+            fired=bool(row[4]),
+            fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
+            message=row[6],
+        )
 
     # ── Current location (singleton) ────────────────────────────────────────────
 

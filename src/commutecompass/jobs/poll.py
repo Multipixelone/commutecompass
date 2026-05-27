@@ -172,6 +172,20 @@ def run(
             logger.debug("Suppressing %s ping during quiet hours", ping.kind)
             continue
 
+        # Honor `commutecompass mute <event>` / `mute --today`. The mute
+        # ledger is forward-looking only; a row already fired stays fired.
+        # We claim the ping anyway so the user's intent is recorded (it
+        # doesn't re-fire on the next poll); the send is just skipped.
+        if _store.is_muted(ping.event_id):
+            if _store.claim_ping(ping.id, now):
+                logger.info(
+                    "Muted event %s — skipping %s ping %s",
+                    ping.event_id,
+                    ping.kind,
+                    ping.id,
+                )
+            continue
+
         if not _store.claim_ping(ping.id, now):
             logger.debug("Ping %s already claimed by another runner", ping.id)
             continue

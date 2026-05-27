@@ -714,3 +714,114 @@ class TestPydanticValidation:
 
         ha = HomeAssistantConfig()
         assert ha.base_url == ""
+
+
+# ── delete_config_field / list_overridden_allowlist_keys (`config unset`/`reset`) ──
+
+
+class TestDeleteConfigField:
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text(body)
+        return p
+
+    def test_delete_removes_leaf_and_keeps_siblings(self, tmp_path: Path) -> None:
+        from commutecompass.config import delete_config_field
+
+        p = self._write(
+            tmp_path,
+            """\
+[scheduling]
+quiet_hours_start = "22:00"
+quiet_hours_end = "07:00"
+""",
+        )
+        removed = delete_config_field(p, "scheduling.quiet_hours_start")
+        assert removed is True
+        body = p.read_text()
+        assert "quiet_hours_start" not in body
+        assert "quiet_hours_end" in body
+
+    def test_delete_absent_key_returns_false(self, tmp_path: Path) -> None:
+        from commutecompass.config import delete_config_field
+
+        p = self._write(tmp_path, "[scheduling]\n")
+        assert delete_config_field(p, "scheduling.quiet_hours_start") is False
+
+    def test_delete_unknown_key_raises(self, tmp_path: Path) -> None:
+        from commutecompass.config import ConfigSetError, delete_config_field
+
+        p = self._write(tmp_path, "[scheduling]\n")
+        with pytest.raises(ConfigSetError):
+            delete_config_field(p, "telegram_bot_token")
+
+    def test_delete_nested_key_walks_subsections(self, tmp_path: Path) -> None:
+        """Three-level keys like ``home_assistant.alarm.enabled`` walk subsections."""
+        from commutecompass.config import delete_config_field
+
+        p = self._write(
+            tmp_path,
+            """\
+[home_assistant.alarm]
+enabled = true
+service = "script.boom"
+""",
+        )
+        assert delete_config_field(p, "home_assistant.alarm.enabled") is True
+        body = p.read_text()
+        assert "enabled" not in body
+        # Sibling field on the same subtable must be preserved.
+        assert "script.boom" in body
+
+
+class TestListOverriddenAllowlistKeys:
+    def test_returns_only_allowlisted_keys_that_are_present(
+        self, tmp_path: Path
+    ) -> None:
+        from commutecompass.config import list_overridden_allowlist_keys
+
+        p = tmp_path / "config.toml"
+        p.write_text(
+            """\
+[prep]
+prep_minutes = 30
+
+[scheduling]
+quiet_hours_start = "22:00"
+""",
+        )
+        present = list_overridden_allowlist_keys(p)
+        assert set(present) == {"prep.prep_minutes", "scheduling.quiet_hours_start"}
+
+    def test_returns_empty_when_no_overrides(self, tmp_path: Path) -> None:
+        from commutecompass.config import list_overridden_allowlist_keys
+
+        p = tmp_path / "config.toml"
+        p.write_text("[other]\nthing = 1\n")
+        assert list_overridden_allowlist_keys(p) == []
+
+
+class TestExpandedAllowlist:
+    """The HA toggle keys added for OpenClaw chat tweaks must round-trip."""
+
+    def _write(self, tmp_path: Path) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text("[home_assistant]\n")
+        return p
+
+    def test_ha_replan_window_int(self, tmp_path: Path) -> None:
+        from commutecompass.config import update_config_field
+
+        p = self._write(tmp_path)
+        assert update_config_field(p, "home_assistant.replan_window_minutes", "45") == 45
+        body = p.read_text()
+        assert "replan_window_minutes = 45" in body
+
+    def test_ha_alarm_enabled_bool(self, tmp_path: Path) -> None:
+        """Nested 3-level key writes into ``[home_assistant.alarm]``."""
+        from commutecompass.config import update_config_field
+
+        p = self._write(tmp_path)
+        assert update_config_field(p, "home_assistant.alarm.enabled", "true") is True
+        body = p.read_text()
+        assert "enabled = true" in body

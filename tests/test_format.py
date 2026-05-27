@@ -1199,6 +1199,68 @@ def test_format_digest_omits_operations_footer_when_clean() -> None:
     assert "Operations" not in out_empty
 
 
+# ── Short event ID surfacing for OpenClaw selectors ──────────────────────────
+
+
+def test_format_digest_surfaces_8_char_id_token() -> None:
+    """Every plan summary carries a `[shortid]` token agents can quote back."""
+    event = make_event(
+        id="a1b2c3d4ffffffff",
+        title="Show",
+        calendar_name="Theatre",
+        start=datetime(2026, 5, 26, 19, 0, tzinfo=timezone.utc),
+    )
+    plan = Plan(event=event, route=None, leave_at=None, prep_at=None)
+
+    out = format_digest([plan], [])
+    # MarkdownV2-safe form: brackets escaped, code-span on the id.
+    assert "a1b2c3d4" in out
+    assert "\\[" in out and "\\]" in out
+
+
+def test_format_digest_emits_selector_footer_when_plans_present() -> None:
+    """A short hint at the bottom tells OpenClaw how to refer to events."""
+    event = make_event(id="aaaaaaaabbbb", title="X", start=datetime(2026, 5, 26, 9, 0, tzinfo=timezone.utc))
+    plan = Plan(event=event, route=None, leave_at=None, prep_at=None)
+
+    out = format_digest([plan], [])
+    assert "today:N" in out
+    assert "next" in out
+
+
+def test_format_digest_no_footer_when_no_plans() -> None:
+    """Empty-day digest is short — no selector hint to clutter it."""
+    out = format_digest([], [])
+    assert "today:N" not in out
+
+
+def test_short_event_id_takes_first_eight_chars() -> None:
+    from commutecompass.format import short_event_id
+
+    assert short_event_id("a1b2c3d4ffff") == "a1b2c3d4"
+    assert short_event_id("short") == "short"
+
+
+def test_format_alerts_block_matches_digest_rendering() -> None:
+    """The extracted helper renders the same body as the inline digest used to."""
+    from commutecompass.format import format_alerts_block
+    from commutecompass.models import Alert
+
+    alert = Alert(
+        id="x",
+        header="Train delays",
+        description="",
+        affected_routes={"A", "C"},
+        affected_systems={"MTA Subway"},
+        active_periods=[],
+        severity="WARNING",
+    )
+    block = format_alerts_block([alert])
+    assert "*Active service alerts:*" in block
+    assert "Train delays" in block
+    assert "A, C" in block
+
+
 def test_fmt_time_renders_no_leading_zero() -> None:
     """_fmt_time produces 12-hour wall-clock without a leading zero."""
     from commutecompass.format import _fmt_time

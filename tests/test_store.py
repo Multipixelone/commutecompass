@@ -898,3 +898,196 @@ def test_claim_ping_concurrent_threads_only_one_wins(tmp_db_path: Path) -> None:
     assert sum(1 for r in results if r) == 1, (
         f"Expected exactly one winner, got {results}"
     )
+
+
+# ── adjust_log (record_adjust / last_adjust / mark_adjust_undone) ─────────────
+
+
+def test_record_adjust_with_explicit_key_dedups_on_retry(tmp_db_path: Path) -> None:
+    """A second record_adjust with the same key returns None (no-op)."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    prev = datetime.now(timezone.utc)
+    k1 = store.record_adjust("evt-1", add_prep_minutes=30, prev_prep_at=prev, key="k-stable")
+    assert k1 == "k-stable"
+
+    k2 = store.record_adjust("evt-1", add_prep_minutes=30, prev_prep_at=prev, key="k-stable")
+    assert k2 is None
+
+
+def test_record_adjust_without_key_generates_auto_key(tmp_db_path: Path) -> None:
+    """When key=None each call gets a unique auto-key — no collision."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    prev = datetime.now(timezone.utc)
+    a = store.record_adjust("evt-1", add_prep_minutes=15, prev_prep_at=prev)
+    b = store.record_adjust("evt-1", add_prep_minutes=15, prev_prep_at=prev)
+    assert a is not None and b is not None and a != b
+    assert a.startswith("auto:") and b.startswith("auto:")
+
+
+def test_last_adjust_returns_most_recent_non_undone(tmp_db_path: Path) -> None:
+    """last_adjust ignores undone rows and returns the latest applied_at."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    base = datetime.now(timezone.utc)
+    # Three rows, last-applied wins.
+    store.record_adjust("evt-A", add_prep_minutes=10, prev_prep_at=base, key="k1")
+    store.record_adjust("evt-A", add_prep_minutes=20, prev_prep_at=base, key="k2")
+    store.record_adjust("evt-A", add_prep_minutes=30, prev_prep_at=base, key="k3")
+
+    row = store.last_adjust("evt-A")
+    assert row is not None
+    assert row.key == "k3"
+    assert row.add_prep_minutes == 30
+
+    # Undoing k3 should bubble k2 to the top.
+    assert store.mark_adjust_undone("k3") is True
+    row = store.last_adjust("evt-A")
+    assert row is not None and row.key == "k2"
+
+
+def test_last_adjust_filters_by_event_id(tmp_db_path: Path) -> None:
+    """Passing event_id restricts which adjust history we walk."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    base = datetime.now(timezone.utc)
+    store.record_adjust("evt-A", add_prep_minutes=10, prev_prep_at=base, key="kA")
+    store.record_adjust("evt-B", add_prep_minutes=20, prev_prep_at=base, key="kB")
+
+    row = store.last_adjust("evt-A")
+    assert row is not None and row.event_id == "evt-A"
+
+    row = store.last_adjust("evt-B")
+    assert row is not None and row.event_id == "evt-B"
+
+    row = store.last_adjust(None)
+    assert row is not None  # global: either one is acceptable
+
+
+def test_last_adjust_returns_none_for_legacy_keyless_rows(tmp_db_path: Path) -> None:
+    """A row recorded via the legacy record_adjust_key path (no prev_prep_at) is skipped."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    assert store.record_adjust_key("legacy-k", "evt-legacy") is True
+    # No add_prep_minutes / prev_prep_at populated — last_adjust must skip.
+    assert store.last_adjust("evt-legacy") is None
+
+
+def test_mark_adjust_undone_twice_is_noop(tmp_db_path: Path) -> None:
+    """A second mark_adjust_undone on the same key returns False."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    store.record_adjust(
+        "evt-X", add_prep_minutes=5, prev_prep_at=datetime.now(timezone.utc), key="k"
+    )
+    assert store.mark_adjust_undone("k") is True
+    assert store.mark_adjust_undone("k") is False
+
+
+# ── event_mutes (mute_event / is_muted / unmute_event) ────────────────────────
+
+
+def test_mute_event_with_no_expiry_is_muted_forever(tmp_db_path: Path) -> None:
+    """An open-ended mute reports muted=True regardless of wall-clock."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    assert store.is_muted("evt-1") is False
+    store.mute_event("evt-1")
+    assert store.is_muted("evt-1") is True
+
+
+def test_mute_event_with_future_expiry_is_muted_until_then(tmp_db_path: Path) -> None:
+    """Setting expires_at in the future keeps the event muted."""
+    from commutecompass.timeutil import now_nyc
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    future = now_nyc() + timedelta(hours=2)
+    store.mute_event("evt-1", expires_at=future)
+    assert store.is_muted("evt-1") is True
+
+
+def test_mute_event_with_past_expiry_reports_unmuted(tmp_db_path: Path) -> None:
+    """A row whose expires_at is already in the past does NOT count as muted."""
+    from commutecompass.timeutil import now_nyc
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    past = now_nyc() - timedelta(seconds=10)
+    store.mute_event("evt-1", expires_at=past)
+    assert store.is_muted("evt-1") is False
+
+
+def test_unmute_event_removes_mute(tmp_db_path: Path) -> None:
+    """unmute_event drops the row so subsequent is_muted is False."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    store.mute_event("evt-1")
+    assert store.is_muted("evt-1") is True
+
+    removed = store.unmute_event("evt-1")
+    assert removed == 1
+    assert store.is_muted("evt-1") is False
+
+
+def test_mute_event_overwrites_previous_expiry(tmp_db_path: Path) -> None:
+    """Re-muting the same event updates expires_at in place."""
+    from commutecompass.timeutil import now_nyc
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    past = now_nyc() - timedelta(seconds=10)
+    store.mute_event("evt-1", expires_at=past)
+    assert store.is_muted("evt-1") is False
+
+    # Re-mute forever — the past expiry must be overwritten.
+    store.mute_event("evt-1")
+    assert store.is_muted("evt-1") is True
+
+
+# ── get_pending_ping ───────────────────────────────────────────────────────────
+
+
+def test_get_pending_ping_returns_unfired_row(tmp_db_path: Path) -> None:
+    """The unfired prep ping for an event is round-tripped."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    ping = make_ping("evt-snooze", fire_offset_minutes=30)
+    store.schedule_ping(ping)
+
+    found = store.get_pending_ping("evt-snooze", kind="prep")
+    assert found is not None
+    assert found.event_id == "evt-snooze"
+    assert found.kind == "prep"
+
+
+def test_get_pending_ping_skips_fired(tmp_db_path: Path) -> None:
+    """A fired ping is not returned — even if it's the only row for that event."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+
+    ping = make_ping("evt-fired", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+    store.claim_ping(ping.id, datetime.now(timezone.utc))
+
+    assert store.get_pending_ping("evt-fired", kind="prep") is None
+
+
+def test_get_pending_ping_missing_returns_none(tmp_db_path: Path) -> None:
+    """No row at all → None."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.get_pending_ping("nope", kind="prep") is None

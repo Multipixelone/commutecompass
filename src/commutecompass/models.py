@@ -242,3 +242,18 @@ class ZoneInfo(BaseModel):
     lon: float
     radius_m: float = 0.0
     entity_id: str = ""
+
+
+class AdjustRow(BaseModel):
+    """One row from ``adjust_log`` — what the most recent prep shift did.
+
+    Used by ``undo`` to restore the exact prior ``prep_at`` (rather than
+    re-applying the inverse offset and re-clamping against ``now``).
+    """
+
+    key: str
+    event_id: str
+    applied_at: datetime
+    add_prep_minutes: int
+    prev_prep_at: Optional[datetime] = None
+    undone: bool = False

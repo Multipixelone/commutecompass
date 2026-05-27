@@ -150,8 +150,8 @@ class TestCommandHelp:
     def test_plan_help_requires_event_id(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["plan", "--help"])
         assert result.exit_code == 0
-        # Should show EVENT_ID argument
-        assert "EVENT_ID" in result.output
+        # `plan` now takes a SELECTOR (next / today:N / id / fuzzy title).
+        assert "SELECTOR" in result.output
 
     def test_test_notify_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["test-notify", "--help"])
@@ -732,3 +732,447 @@ class TestGeocodeCacheCommand:
         with mock.patch("commutecompass.config.load_config", return_value=cfg):
             r = runner.invoke(cli, ["geocode-cache", "--invalidate", "Nothing"])
         assert r.exit_code == EXIT_NOT_FOUND
+
+
+# ─────────── snooze / mute / unmute / undo / mta-alerts ──────────────────────
+
+
+def _seed_today_plan(
+    tmp_path: Path,
+    *,
+    event_id: str = "evt-abc",
+    title: str = "Standup",
+) -> tuple[Config, Store, Plan]:
+    """Seed a single today-plan with prep/leave that survive the 2am NYC boundary.
+
+    The seeded ``event.start`` is anchored inside ``logical_day_bounds_nyc()``
+    so ``today_plans()`` always returns it.  ``prep_at`` and ``leave_at`` are
+    derived from ``event.start`` (clamped to be a few minutes after ``now``)
+    so commands that operate on pending pings still find something pending.
+    """
+    from datetime import timedelta
+
+    from commutecompass.models import Event, Plan as _Plan
+    from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
+
+    cfg = _fake_config(tmp_path)
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+
+    now = now_nyc()
+    day_start, day_end = logical_day_bounds_nyc()
+
+    # Pick an event.start safely inside (now, day_end) — preferring mid-day
+    # but clamping to day_end - 5min so the row stays in today's window.
+    event_start = max(day_start + timedelta(hours=12), now + timedelta(minutes=90))
+    event_start = min(event_start, day_end - timedelta(minutes=5))
+    if event_start <= now + timedelta(minutes=15):
+        pytest.skip("Test runs across the NYC logical-day boundary; rerun.")
+
+    prep_at = max(event_start - timedelta(minutes=60), now + timedelta(minutes=5))
+    leave_at = max(event_start - timedelta(minutes=30), now + timedelta(minutes=10))
+
+    event = Event(
+        id=event_id,
+        calendar_id="cal-1",
+        calendar_name="Job",
+        title=title,
+        start=event_start,
+        end=event_start + timedelta(hours=1),
+    )
+    plan = _Plan(event=event, leave_at=leave_at, prep_at=prep_at)
+    store.upsert_plan(plan)
+    return cfg, store, plan
+
+
+class TestSnoozeCommand:
+    """`commutecompass snooze SELECTOR --minutes N | --skip` operates on prep pings."""
+
+    def test_snooze_shifts_prep_ping_forward(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from datetime import timedelta
+
+        from commutecompass.models import PingEntry
+        from commutecompass.timeutil import now_nyc
+
+        cfg, store, plan = _seed_today_plan(tmp_path)
+        # Schedule a real pending prep ping at plan.prep_at.
+        assert plan.prep_at is not None
+        store.schedule_ping(
+            PingEntry(
+                id="ping-1",
+                event_id="evt-abc",
+                kind="prep",
+                fire_at=plan.prep_at,
+                fired=False,
+                message="prep!",
+            )
+        )
+
+        original_fire = plan.prep_at
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["snooze", "evt-abc", "--minutes", "20"])
+
+        assert result.exit_code == 0, result.output
+        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        prep = [p for p in pending if p.event_id == "evt-abc" and p.kind == "prep"]
+        assert len(prep) == 1
+        # The new fire_at is ~20 minutes after the original (allowing ms drift).
+        delta = (prep[0].fire_at - original_fire).total_seconds() / 60
+        assert 19.5 < delta < 20.5
+
+    def test_snooze_skip_marks_ping_fired(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from datetime import timedelta
+
+        from commutecompass.models import PingEntry
+        from commutecompass.timeutil import now_nyc
+
+        cfg, store, plan = _seed_today_plan(tmp_path)
+        assert plan.prep_at is not None
+        store.schedule_ping(
+            PingEntry(
+                id="ping-skip",
+                event_id="evt-abc",
+                kind="prep",
+                fire_at=plan.prep_at,
+                fired=False,
+                message="prep!",
+            )
+        )
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["snooze", "evt-abc", "--skip"])
+
+        assert result.exit_code == 0, result.output
+        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        assert not any(p.event_id == "evt-abc" and p.kind == "prep" for p in pending)
+
+    def test_snooze_requires_one_of_minutes_or_skip(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_USAGE
+
+        cfg, _, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["snooze", "evt-abc"])
+        assert result.exit_code == EXIT_USAGE
+
+    def test_snooze_with_no_pending_ping_exits_not_found(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_NOT_FOUND
+
+        # Seed a plan but no ping at all.
+        cfg, _, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["snooze", "evt-abc", "--minutes", "10"])
+        assert result.exit_code == EXIT_NOT_FOUND
+
+
+class TestMuteCommand:
+    """`mute SELECTOR` and `mute --today` suppress upcoming pings."""
+
+    def test_mute_event_sets_mute_and_cancels_pings(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.models import PingEntry
+
+        cfg, store, plan = _seed_today_plan(tmp_path)
+        assert plan.prep_at is not None
+        store.schedule_ping(
+            PingEntry(
+                id="p-1", event_id="evt-abc", kind="prep",
+                fire_at=plan.prep_at, fired=False, message="prep",
+            )
+        )
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["mute", "evt-abc"])
+
+        assert result.exit_code == 0, result.output
+        assert store.is_muted("evt-abc") is True
+        from datetime import timedelta
+        from commutecompass.timeutil import now_nyc
+        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        assert not any(p.event_id == "evt-abc" for p in pending)
+
+    def test_mute_today_mutes_all_plans(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg, store, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["mute", "--today"])
+        assert result.exit_code == 0, result.output
+        assert store.is_muted("evt-abc") is True
+
+    def test_mute_requires_selector_or_today_flag(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_USAGE
+
+        cfg, _, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["mute"])
+        assert result.exit_code == EXIT_USAGE
+
+
+class TestUnmuteCommand:
+    def test_unmute_lifts_mute(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg, store, _ = _seed_today_plan(tmp_path)
+        store.mute_event("evt-abc")
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["unmute", "evt-abc"])
+
+        assert result.exit_code == 0, result.output
+        assert store.is_muted("evt-abc") is False
+
+
+class TestUndoCommand:
+    """`undo` restores prev_prep_at recorded in the adjust_log."""
+
+    def test_undo_reverts_last_adjust(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg, store, plan = _seed_today_plan(tmp_path)
+        assert plan.prep_at is not None
+        original_prep = plan.prep_at
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            r1 = runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "30"])
+            assert r1.exit_code == 0, r1.output
+
+            after_adjust = store.get_plan("evt-abc")
+            assert after_adjust is not None and after_adjust.prep_at is not None
+            assert after_adjust.prep_at != original_prep
+
+            r2 = runner.invoke(cli, ["undo", "evt-abc"])
+            assert r2.exit_code == 0, r2.output
+
+        restored = store.get_plan("evt-abc")
+        assert restored is not None and restored.prep_at is not None
+        # ISO round-trip preserves the value exactly (modulo microseconds).
+        assert abs((restored.prep_at - original_prep).total_seconds()) < 1
+
+    def test_undo_with_no_history_exits_not_found(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_NOT_FOUND
+
+        cfg, _, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["undo", "evt-abc"])
+        assert result.exit_code == EXIT_NOT_FOUND
+
+    def test_undo_two_steps_walks_back_history(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Single-step undo + repeat: each call removes one row from history."""
+        cfg, store, plan = _seed_today_plan(tmp_path)
+        assert plan.prep_at is not None
+        original_prep = plan.prep_at
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "10"])
+            after_first = store.get_plan("evt-abc")
+            assert after_first is not None and after_first.prep_at is not None
+            first_prep = after_first.prep_at
+
+            runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "20"])
+
+            # First undo should restore to first_prep, not to original.
+            runner.invoke(cli, ["undo"])
+            after_undo1 = store.get_plan("evt-abc")
+            assert after_undo1 is not None and after_undo1.prep_at is not None
+            assert abs((after_undo1.prep_at - first_prep).total_seconds()) < 1
+
+            # Second undo should restore to original.
+            runner.invoke(cli, ["undo"])
+            after_undo2 = store.get_plan("evt-abc")
+            assert after_undo2 is not None and after_undo2.prep_at is not None
+            assert abs((after_undo2.prep_at - original_prep).total_seconds()) < 1
+
+
+class TestMtaAlertsCommand:
+    """`mta-alerts` filters fresh alerts against today's planned routes."""
+
+    def test_mta_alerts_no_plans_message(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _fake_config(tmp_path)
+        Store(cfg.paths.db_path).init_schema()
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["mta-alerts"])
+        assert result.exit_code == 0
+        assert "nothing to filter" in result.output.lower() or "no planned" in result.output.lower()
+
+    def test_mta_alerts_renders_affecting_alerts(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from datetime import timedelta
+
+        from commutecompass.models import Alert, Event, Plan as _Plan, Route, TransitLeg
+        from commutecompass.timeutil import now_nyc
+
+        cfg = _fake_config(tmp_path)
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+        now = now_nyc()
+        depart = now + timedelta(minutes=30)
+        arrive = depart + timedelta(minutes=20)
+        leg = TransitLeg(
+            mode="TRANSIT", system="MTA Subway", line="A",
+            depart_at=depart, arrive_at=arrive, duration_seconds=1200,
+            summary="A from X to Y",
+        )
+        route = Route(
+            legs=[leg], depart_at=depart, arrive_at=arrive,
+            total_duration_seconds=1200, transfers=0,
+        )
+        event = Event(
+            id="evt-mta",
+            calendar_id="cal", calendar_name="Cal", title="Show",
+            start=arrive + timedelta(minutes=10), end=arrive + timedelta(hours=2),
+        )
+        store.upsert_plan(
+            _Plan(event=event, route=route, leave_at=depart, prep_at=depart - timedelta(minutes=20))
+        )
+
+        alert = Alert(
+            id="alert-A-1",
+            header="A train delays",
+            description="Signal problem on the A.",
+            affected_routes={"A"},
+            affected_systems={"MTA Subway"},
+            active_periods=[(depart - timedelta(hours=1), depart + timedelta(hours=2))],
+            severity="WARNING",
+        )
+
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), \
+            mock.patch("commutecompass.mta.fetch_alerts", return_value=[alert]):
+            result = runner.invoke(cli, ["mta-alerts"])
+
+        assert result.exit_code == 0, result.output
+        assert "A train delays" in result.output
+        assert "Active service alerts" in result.output
+
+
+# ─────────── config unset / reset ─────────────────────────────────────────────
+
+
+class TestConfigUnset:
+    def _toml_with_quiet_hours(self, tmp_path: Path) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text(
+            """\
+[scheduling]
+quiet_hours_start = "22:00"
+quiet_hours_end = "07:00"
+"""
+        )
+        return p
+
+    def test_unset_removes_key_from_toml(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        p = self._toml_with_quiet_hours(tmp_path)
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "unset", "scheduling.quiet_hours_start"]
+        )
+        assert result.exit_code == 0, result.output
+        body = p.read_text()
+        assert "quiet_hours_start" not in body
+        assert "quiet_hours_end" in body  # other key untouched
+
+    def test_unset_unknown_key_rejected(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_USAGE
+
+        p = self._toml_with_quiet_hours(tmp_path)
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "unset", "secret.thing"]
+        )
+        assert result.exit_code == EXIT_USAGE
+
+    def test_unset_idempotent_when_already_absent(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        p = tmp_path / "config.toml"
+        p.write_text("[scheduling]\n")  # no key present
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "unset", "scheduling.quiet_hours_start"]
+        )
+        assert result.exit_code == 0
+        assert "already unset" in result.output.lower() or "default" in result.output.lower()
+
+
+class TestConfigReset:
+    def _toml_with_overrides(self, tmp_path: Path) -> Path:
+        p = tmp_path / "config.toml"
+        p.write_text(
+            """\
+[prep]
+prep_minutes = 30
+
+[scheduling]
+quiet_hours_start = "22:00"
+quiet_hours_end = "07:00"
+"""
+        )
+        return p
+
+    def test_reset_without_yes_lists_overrides_and_refuses(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_USAGE
+
+        p = self._toml_with_overrides(tmp_path)
+        result = runner.invoke(cli, ["--config", str(p), "config", "reset"])
+        assert result.exit_code == EXIT_USAGE
+        assert "prep.prep_minutes" in result.output
+        # File unchanged.
+        body = p.read_text()
+        assert "prep_minutes = 30" in body
+
+    def test_reset_with_yes_removes_all_allowlisted_overrides(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        p = self._toml_with_overrides(tmp_path)
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "reset", "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        body = p.read_text()
+        # All three allowlisted overrides should be gone.
+        assert "prep_minutes" not in body
+        assert "quiet_hours_start" not in body
+        assert "quiet_hours_end" not in body
+
+
+# ─────────── plan --from ──────────────────────────────────────────────────────
+
+
+class TestPlanFromOption:
+    """`plan SELECTOR --from <address>` is a preview that never saves."""
+
+    def test_plan_help_lists_from_option(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["plan", "--help"])
+        assert result.exit_code == 0
+        assert "--from" in result.output
+        assert "preview" in result.output.lower()
+
+    def test_plan_here_and_from_are_mutually_exclusive(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.cli import EXIT_USAGE
+
+        cfg, _, _ = _seed_today_plan(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(
+                cli, ["plan", "evt-abc", "--here", "--from", "X"]
+            )
+        assert result.exit_code == EXIT_USAGE
+        assert "mutually exclusive" in result.output.lower()
