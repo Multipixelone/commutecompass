@@ -197,16 +197,15 @@ def format_digest(
     else:
         for plan in plans:
             lines.append(_format_plan_summary(plan))
+        # Footer hint so OpenClaw / the user knows how to refer to an event in
+        # follow-up commands like `adjust`, `mute`, `snooze`.
+        lines.append(escape_md(
+            "Refer to an event by its [id], by today:N, or by 'next'."
+        ))
 
     if alerts:
         lines.append("")
-        lines.append("*Active service alerts:*")
-        for alert in alerts:
-            marker = "🔴" if alert.severity == "SEVERE" else "⚠️"
-            lines.append(f"{marker} {escape_md(_sanitize_text(alert.header))}")
-            if alert.affected_routes:
-                routes_str = ", ".join(sorted(alert.affected_routes))
-                lines.append(f"  Routes: {escape_md(routes_str)}")
+        lines.append(format_alerts_block(alerts))
 
     if operations_notes:
         lines.append("")
@@ -217,10 +216,38 @@ def format_digest(
     return "\n".join(lines)
 
 
+def format_alerts_block(alerts: list[Alert]) -> str:
+    """Render the "Active service alerts" block.
+
+    Extracted from ``format_digest`` so the ``mta-alerts`` CLI command can
+    reuse the exact same rendering (severity marker, route list) instead of
+    re-inventing it.
+    """
+    lines = ["*Active service alerts:*"]
+    for alert in alerts:
+        marker = "🔴" if alert.severity == "SEVERE" else "⚠️"
+        lines.append(f"{marker} {escape_md(_sanitize_text(alert.header))}")
+        if alert.affected_routes:
+            routes_str = ", ".join(sorted(alert.affected_routes))
+            lines.append(f"  Routes: {escape_md(routes_str)}")
+    return "\n".join(lines)
+
+
+def short_event_id(event_id: str) -> str:
+    """Return the 8-char short form used in the digest's `[id]` token.
+
+    Stable across the day (Google Calendar event IDs are immutable for a
+    given event), and accepted directly by ``selector.resolve_event_selector``
+    via its hex-prefix path.
+    """
+    return event_id[:8]
+
+
 def _format_plan_summary(plan: Plan) -> str:
     """Format a single plan summary block for the digest."""
     event = plan.event
     start_str = event.start.strftime("%I:%M %p").lstrip("0")
+    short_id = short_event_id(event.id)
 
     lines = []
     cal_lower = event.calendar_name.lower()
@@ -239,7 +266,11 @@ def _format_plan_summary(plan: Plan) -> str:
     location = _compact_location(event.location_raw, fallback=location_fallback)
     if ("job" in cal_lower or "work" in cal_lower) and location.strip() == "(no location)":
         location = "Salt & Straw"
-    lines.append(f"  {start_str} at {escape_md(_sanitize_text(location))}")
+    # `[short_id]` is MarkdownV2-escaped via escape_md on the bracket chars; the
+    # id itself is hex so no escape is needed for its body.
+    lines.append(
+        f"  \\[`{short_id}`\\] {start_str} at {escape_md(_sanitize_text(location))}"
+    )
 
     if plan.error:
         lines.append(f"  ❌ {_plan_error_label(plan.error)}")

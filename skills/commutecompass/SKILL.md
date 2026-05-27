@@ -30,28 +30,44 @@ to stdout; relay that stdout back to the user.
 |--------------------------------------------------------------------------|---------------------------------------------------|
 | "what's on for today?" / "what's my next event?"                         | `scripts/digest.sh`                               |
 | "where am I right now according to HA?"                                  | `scripts/where.sh`                                |
-| "replan event X" / "what's the route for X?"                             | `scripts/plan-event.sh <event_id>`                |
-| "I need 45 min to shower before <event>" / "shift prep earlier by N min" | `scripts/digest.sh` (find id) → `scripts/adjust.sh <event_id> --add-prep 45` |
+| "replan event X" / "what's the route for X?"                             | `scripts/plan-event.sh <selector>`                |
+| "what if I were leaving from <address>?"                                 | `scripts/plan-event.sh <selector> --from "<addr>"` (preview only) |
+| "I need 45 min to shower before <event>" / "shift prep earlier by N min" | `scripts/adjust.sh <selector> --add-prep 45`      |
+| "undo that adjust" / "revert the last shift"                             | `scripts/undo.sh [<selector>]`                    |
+| "snooze my prep ping 10 min" / "skip the next prep ping"                 | `scripts/snooze.sh <selector> --minutes 10` *or* `--skip` |
+| "mute pings for event X" / "mute everything today"                       | `scripts/mute.sh <selector>` *or* `scripts/mute.sh --today` |
+| "unmute event X"                                                         | `scripts/unmute.sh <selector>`                    |
+| "what alerts are hitting my commute today?"                              | `scripts/mta-alerts.sh`                           |
 | "send me today's digest again" / "force-run morning"                     | `scripts/morning.sh`                              |
 | "run a poll cycle now" / "check alerts now"                              | `scripts/poll.sh`                                 |
 | "what time will my alarm be tomorrow?" / "preview tomorrow's wake time"  | `scripts/tomorrow.sh` (dry-run; no HA push)       |
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
 | "what's my prep buffer set to?" / "show me my config"                    | `scripts/config-show.sh`                          |
-| "set my prep buffer to 30 min" / "change quiet hours to ..."             | `scripts/config-set.sh <dotted.key> <value>`      |
+| "set my prep buffer to 30 min"                                           | `scripts/config-set.sh <dotted.key> <value>`      |
+| "turn off quiet hours" / "remove that override"                          | `scripts/config-unset.sh <dotted.key>`            |
+| "reset all my config tweaks"                                             | `scripts/config-reset.sh --yes`                   |
 | "why didn't I get my morning ping?" / "show me the current state"        | `scripts/status.sh` (text) or `scripts/status.sh --json` |
 
-## Resolving an event ID for `adjust`
+## Selectors
 
-`adjust` needs the Google Calendar event ID. It's not in the digest text. To
-get it:
+Every event-scoped command (`plan-event`, `adjust`, `snooze`, `mute`,
+`unmute`, `undo`) accepts a `SELECTOR` instead of a raw event ID. The
+digest now prints an `[8-char-id]` token for every plan, but you usually
+don't need to quote it — use whichever of these is most natural:
 
-1. Run `scripts/digest.sh` (`commutecompass-skill digest-preview`).
-2. The DB-cached plans match what's shown in the digest. Use the user's
-   description (event title, time) to pick the right one. If the digest is
-   ambiguous, ask the user which event they mean.
-3. If you don't have the ID directly visible, ask the user to forward you the
-   leave-ping for that event (the ID isn't currently surfaced in the digest;
-   consider asking before guessing).
+| Form              | Meaning                                                |
+|-------------------|--------------------------------------------------------|
+| `next`            | The soonest plan whose start time is after now.        |
+| `today:N`         | 1-indexed pick from today's plans (`today:1`, `today:2`…). |
+| `[8 hex chars]`   | The short ID printed in the digest (e.g. `a1b2c3d4`).  |
+| Full event ID     | Exact match against the Google Calendar event id.      |
+| Title fragment    | Fuzzy match against today's titles (rapidfuzz).        |
+
+Failure modes the CLI exits with:
+
+- `EXIT_NOT_FOUND` (65) — the selector matched nothing.
+- `EXIT_UNRESOLVED` (66) — the selector was ambiguous (two events share an
+  ID prefix, or two titles fuzz-match equally). Ask the user which one.
 
 ## `config set` allowlist
 
@@ -65,8 +81,9 @@ purpose.
 - `morning` and `poll` mutate state (fire pings, send messages). Confirm with
   the user before running them on demand if the cause for the user's request is
   unclear.
-- `digest-preview`, `where`, `plan-event`, and `config-show` are pure reads —
-  invoke freely.
+- `digest-preview`, `where`, `plan-event` (without `--from`), `config-show`,
+  and `mta-alerts` are pure reads — invoke freely. `plan-event --from <addr>`
+  is also a read (preview only; never saves).
 - `adjust` only shifts `prep_at`. The `leave_at` is governed by route+event
   start and can't be moved without a replan. If the user wants to leave
   earlier/later, that requires a different change (calendar edit or route
@@ -75,6 +92,14 @@ purpose.
   retry the same request, pass a stable key (e.g. an upstream correlation id,
   or `<event_id>:<add_prep>:<YYYYMMDD>`) so duplicate retries no-op rather
   than stacking the offset.
+- `undo` reverts one adjust at a time and walks history on repeat calls. Each
+  call restores `prep_at` to the exact value captured before that adjust.
+- `mute` is forward-looking: a ping that has already fired stays fired. To
+  silence an already-sent prep ping, use `snooze --skip` *before* it fires.
+- `mute --today` cancels pending pings and re-mutes them until end-of-day;
+  the next morning's digest will repopulate as normal.
+- `snooze` only operates on **prep** pings. Leave pings are operationally
+  critical and intentionally non-snoozable from chat.
 - See `references/examples.md` for end-to-end chat → command mappings.
 
 ## Exit code conventions

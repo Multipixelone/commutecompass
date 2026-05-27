@@ -298,6 +298,17 @@ def _coerce_notify_mode(value: str) -> str:
     return value
 
 
+def _coerce_bool(value: str) -> bool:
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+    v = value.strip().lower()
+    if v in truthy:
+        return True
+    if v in falsy:
+        return False
+    raise ValueError(f"expected a boolean (true/false), got {value!r}")
+
+
 CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     "prep.prep_minutes": _coerce_int,
     "prep.safety_buffer_minutes": _coerce_int,
@@ -306,11 +317,58 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     "scheduling.quiet_hours_start": _coerce_hhmm,
     "scheduling.quiet_hours_end": _coerce_hhmm,
     "notify.mode": _coerce_notify_mode,
+    # HA toggles — safe to flip from chat ("turn off the loud alarm").
+    "home_assistant.alarm.enabled": _coerce_bool,
+    "home_assistant.tomorrow.enabled": _coerce_bool,
+    "home_assistant.replan_window_minutes": _coerce_int,
+    "home_assistant.max_age_minutes": _coerce_int,
 }
 
 
 class ConfigSetError(Exception):
     """Raised by ``update_config_field`` for an invalid key or value."""
+
+
+def _split_dotted(dotted_key: str) -> tuple[list[str], str]:
+    """Split a dotted key into (intermediate_tables, leaf_key).
+
+    For ``prep.prep_minutes`` returns ``(["prep"], "prep_minutes")``.  For
+    ``home_assistant.alarm.enabled`` returns
+    ``(["home_assistant", "alarm"], "enabled")``.
+    """
+    parts = dotted_key.split(".")
+    if len(parts) < 2:
+        raise ConfigSetError(
+            f"{dotted_key!r} must be of the form 'section.key' (or 'section.subsection.key')"
+        )
+    return parts[:-1], parts[-1]
+
+
+def _walk_or_create(doc: Any, path_parts: list[str]) -> Any:
+    """Walk into ``doc`` along ``path_parts``, creating empty tables as needed."""
+    import tomlkit
+
+    node = doc
+    for p in path_parts:
+        sub = node.get(p) if hasattr(node, "get") else None
+        if sub is None:
+            sub = tomlkit.table()
+            node[p] = sub
+        node = sub
+    return node
+
+
+def _walk_or_none(doc: Any, path_parts: list[str]) -> Any:
+    """Walk into ``doc`` along ``path_parts``; return None if any segment is missing."""
+    node = doc
+    for p in path_parts:
+        if not hasattr(node, "get"):
+            return None
+        sub = node.get(p)
+        if sub is None:
+            return None
+        node = sub
+    return node
 
 
 def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
@@ -339,20 +397,64 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     with open(toml_path, encoding="utf-8") as fh:
         doc = tomlkit.parse(fh.read())
 
-    section_name, _, leaf = dotted_key.partition(".")
-    if not leaf:
-        raise ConfigSetError(f"{dotted_key!r} must be of the form 'section.key'")
-
-    section = doc.get(section_name)
-    if section is None:
-        section = tomlkit.table()
-        doc[section_name] = section
-    section[leaf] = coerced
+    path_parts, leaf = _split_dotted(dotted_key)
+    node = _walk_or_create(doc, path_parts)
+    node[leaf] = coerced
 
     with open(toml_path, "w", encoding="utf-8") as fh:
         fh.write(tomlkit.dumps(doc))
 
     return coerced
+
+
+def delete_config_field(toml_path: Path, dotted_key: str) -> bool:
+    """Delete an allowlisted field from ``toml_path`` so the Pydantic default applies.
+
+    Returns True if a key was removed, False if it was already absent.  Raises
+    ``ConfigSetError`` for keys outside ``CONFIG_SET_ALLOWLIST`` — the same
+    refusal surface as ``update_config_field`` keeps secrets/paths immutable
+    via the skill.
+    """
+    if dotted_key not in CONFIG_SET_ALLOWLIST:
+        allowed = ", ".join(sorted(CONFIG_SET_ALLOWLIST))
+        raise ConfigSetError(
+            f"{dotted_key!r} is not unsettable from `config unset`. Allowed: {allowed}"
+        )
+
+    import tomlkit
+
+    with open(toml_path, encoding="utf-8") as fh:
+        doc = tomlkit.parse(fh.read())
+
+    path_parts, leaf = _split_dotted(dotted_key)
+    node = _walk_or_none(doc, path_parts)
+    if node is None or leaf not in node:
+        return False
+    del node[leaf]
+
+    with open(toml_path, "w", encoding="utf-8") as fh:
+        fh.write(tomlkit.dumps(doc))
+    return True
+
+
+def list_overridden_allowlist_keys(toml_path: Path) -> list[str]:
+    """Return every allowlisted dotted key currently present in ``toml_path``.
+
+    Used by ``config reset`` to preview what would be removed before the user
+    confirms with ``--yes``.
+    """
+    import tomlkit
+
+    with open(toml_path, encoding="utf-8") as fh:
+        doc = tomlkit.parse(fh.read())
+
+    present: list[str] = []
+    for key in CONFIG_SET_ALLOWLIST:
+        path_parts, leaf = _split_dotted(key)
+        node = _walk_or_none(doc, path_parts)
+        if node is not None and hasattr(node, "get") and leaf in node:
+            present.append(key)
+    return present
 
 
 def render_config_toml(cfg: Config) -> str:
