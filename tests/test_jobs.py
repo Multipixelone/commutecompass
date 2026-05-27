@@ -101,6 +101,29 @@ def store(tmp_path: Path) -> Store:
 
 
 @pytest.fixture
+def wide_today_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Widen ``logical_day_bounds_nyc()`` so today-based store queries don't
+    miss test events near the 02:00 NYC boundary.
+
+    Several poll/morning tests construct events at ``now + timedelta(hours=3)``.
+    When CI happens to run shortly after midnight NYC, ``now + 3h`` crosses
+    the logical-day cutoff and ``store.today_plans()`` returns an empty list,
+    causing time-of-day flakes. This fixture replaces the bounds with a
+    ±24h window around real ``now_nyc()`` for the duration of the test.
+
+    Store/job code imports ``logical_day_bounds_nyc`` lazily inside each
+    method, so patching the attribute on ``commutecompass.timeutil`` is enough.
+    """
+    from commutecompass import timeutil
+
+    def _wide_bounds(reference: Optional[datetime] = None, **_: Any) -> tuple[datetime, datetime]:
+        anchor = timeutil.to_nyc(reference) if reference is not None else timeutil.now_nyc()
+        return (anchor - timedelta(hours=24), anchor + timedelta(hours=24))
+
+    monkeypatch.setattr(timeutil, "logical_day_bounds_nyc", _wide_bounds)
+
+
+@pytest.fixture
 def today_events() -> list[Event]:
     """Two events today: one with location, one without."""
     now = now_nyc()
@@ -382,6 +405,7 @@ def test_morning_run_cancel_stale_pings(
     tmp_path: Path,
     today_events: list[Event],
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     """Events removed from the calendar have their pings cancelled."""
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
@@ -703,6 +727,7 @@ def test_poll_new_alert_triggers_replan_and_service_update(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     """A newly-affecting alert causes replan, service_update send, upsert, and mark-seen."""
     now = now_nyc()
@@ -926,6 +951,7 @@ def test_poll_no_duplicate_service_updates_for_seen_alert(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     """A seen alert does not cause a second service update when re-encountered."""
     now = now_nyc()
@@ -1028,6 +1054,7 @@ def test_poll_uses_select_alerts_fn_for_smarter_filtering(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     now = now_nyc()
 
@@ -1198,6 +1225,7 @@ def test_poll_location_replan_sends_update_when_route_shifts(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     """Within replan window, a shifted leave_at triggers a location update."""
     cfg = _ha_enabled(minimal_config)
@@ -1610,6 +1638,7 @@ def test_poll_mta_fetch_cached_within_ttl(
 def test_poll_dedups_same_alert_across_multiple_events(
     minimal_config: Config,
     sample_route: Route,
+    wide_today_window: None,
 ) -> None:
     """One alert affecting two events on the same day yields exactly one send.
 
