@@ -408,6 +408,64 @@ location = "123 Example Ave, Brooklyn, NY 11201"
         assert cfg.location_overrides[1].calendar_id == "cal-b"
 
 
+class TestModeOverrides:
+    def test_backward_compat_no_mode_overrides_section(
+        self, minimal_toml: Path, required_env: dict[str, str]
+    ) -> None:
+        """Config without a mode_overrides section yields an empty list."""
+        _apply_env(required_env)
+        cfg = load_config(minimal_toml)
+        assert cfg.mode_overrides == []
+
+    def test_mode_override_parses(self, tmp_path: Path, required_env: dict[str, str]) -> None:
+        """A [[mode_overrides]] block parses into a ModeOverride."""
+        _apply_env(required_env)
+        toml = """
+[origin]
+address = "123 Example Ave, Brooklyn, NY 11201"
+lat = 40.6950
+lon = -73.9890
+subway_station = "Jay St-MetroTech"
+lirr_station = "Atlantic Terminal"
+
+[prep]
+prep_minutes = 20
+
+[scheduling]
+morning_run_time = "06:00"
+poll_interval_seconds = 60
+
+[paths]
+venues_file = "/etc/commutecompass/known_venues.yaml"
+db_path = "/var/lib/commutecompass/state.db"
+oauth_token_path = "/var/lib/commutecompass/google_token.json"
+
+[opencode_go]
+endpoint = "https://opencode-go.example/v1/chat/completions"
+
+[mta]
+subway_alerts_url = "https://example.com/subway"
+lirr_alerts_url   = "https://example.com/lirr"
+bus_alerts_url    = "https://example.com/bus"
+
+[[calendars]]
+id = "job-cal"
+name = "Job"
+
+[[mode_overrides]]
+location_contains = "200 Example St"
+mode = "bicycling"
+"""
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(p)
+
+        assert len(cfg.mode_overrides) == 1
+        ov = cfg.mode_overrides[0]
+        assert ov.location_contains == "200 Example St"
+        assert ov.mode == "bicycling"
+
+
 class TestHomeAssistant:
     """HOME_ASSISTANT_TOKEN is required only when [home_assistant].enabled = true."""
 

@@ -11,6 +11,7 @@ from commutecompass.config import (
     CalendarSpec,
     HomeAssistantConfig,
     LocationOverride,
+    ModeOverride,
     MtaConfig,
     OpencodeGoConfig,
     Origin,
@@ -26,7 +27,12 @@ from commutecompass.models import (
     Route,
     TransitLeg,
 )
-from commutecompass.planner import effective_origin, plan_event, get_effective_location
+from commutecompass.planner import (
+    effective_origin,
+    get_effective_location,
+    get_effective_mode,
+    plan_event,
+)
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.timeutil import NYC_TZ
@@ -744,3 +750,198 @@ def test_effective_origin_rejects_low_accuracy_fix(config: Config) -> None:
     # Bad fix → fall back to config.origin (with station hints)
     assert result.lat == cfg.origin.lat
     assert result.subway_station == cfg.origin.subway_station
+
+
+# ── Mode Override tests ─────────────────────────────────────────────────────────
+
+def test_get_effective_mode_no_overrides(config: Config) -> None:
+    """With no mode_overrides configured, returns None (caller defaults)."""
+    assert config.mode_overrides == []
+    assert get_effective_mode("200 Example St, New York, NY 10001", config) is None
+
+
+def test_get_effective_mode_substring_match_case_insensitive(config: Config) -> None:
+    """A case-insensitive substring match returns the configured mode."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="example st", mode="bicycling"),
+    ]
+    assert get_effective_mode("200 Example St, New York, NY 10001", config) == "bicycling"
+
+
+def test_get_effective_mode_no_match(config: Config) -> None:
+    """A non-matching location returns None."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="Brooklyn Navy Yard", mode="bicycling"),
+    ]
+    assert get_effective_mode("200 Example St, New York, NY 10001", config) is None
+
+
+def test_get_effective_mode_first_match_wins(config: Config) -> None:
+    """When multiple rules match, the first one in the list applies."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="Example", mode="bicycling"),
+        ModeOverride(location_contains="Example St", mode="driving"),
+    ]
+    assert get_effective_mode("200 Example St, New York, NY 10001", config) == "bicycling"
+
+
+def test_get_effective_mode_empty_location(config: Config) -> None:
+    """An empty/None effective location never matches."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="Example", mode="bicycling"),
+    ]
+    assert get_effective_mode("", config) is None
+
+
+def test_plan_event_uses_mode_override_config(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """A matching mode_override forces the mode passed to plan_route."""
+    # event.location_raw == "200 Example St, New York, NY 10001"
+    config.mode_overrides = [
+        ModeOverride(location_contains="Example St", mode="bicycling"),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    _, kwargs = mock_plan_route.call_args
+    assert kwargs["mode"] == "bicycling"
+
+
+def test_plan_event_cli_override_beats_mode_override_config(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """An explicit CLI mode_override takes precedence over a config rule."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="Example St", mode="bicycling"),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+            mode_override="driving",
+        )
+
+    _, kwargs = mock_plan_route.call_args
+    assert kwargs["mode"] == "driving"
+
+
+def test_plan_event_event_mode_override_beats_config(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """event.mode_override takes precedence over a matching config rule."""
+    event.mode_override = "walking"
+    config.mode_overrides = [
+        ModeOverride(location_contains="Example St", mode="bicycling"),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    _, kwargs = mock_plan_route.call_args
+    assert kwargs["mode"] == "walking"
+
+
+def test_plan_event_no_mode_match_defaults_transit(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """With no matching rule and no other override, mode defaults to transit."""
+    config.mode_overrides = [
+        ModeOverride(location_contains="Somewhere Else", mode="bicycling"),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    _, kwargs = mock_plan_route.call_args
+    assert kwargs["mode"] == "transit"
+
+
+def test_plan_event_mode_override_matches_post_location_override(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """Mode rule matches the effective location (after location_overrides)."""
+    # The raw event location wouldn't match, but the location_override remaps it
+    # to an address that does — proving the two features compose.
+    event.location_raw = "Location available once RSVP'd"
+    config.location_overrides = [
+        LocationOverride(calendar_id="test-cal", location="500 Bike Lane, NY"),
+    ]
+    config.mode_overrides = [
+        ModeOverride(location_contains="Bike Lane", mode="bicycling"),
+    ]
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+        mock_plan_route.return_value = mock_route
+
+        plan_event(
+            event,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    _, kwargs = mock_plan_route.call_args
+    assert kwargs["mode"] == "bicycling"
