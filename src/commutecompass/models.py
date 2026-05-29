@@ -59,6 +59,18 @@ class LocationOverride(BaseModel):
     location: str
 
 
+class ModeOverride(BaseModel):
+    """Force a travel mode for events whose (effective) location matches.
+
+    ``location_contains`` is matched case-insensitively as a substring against
+    the event's effective location (after ``location_overrides`` are applied).
+    First matching rule wins. Handy for "always bike to work".
+    """
+
+    location_contains: str
+    mode: Literal["transit", "driving", "walking", "bicycling"]
+
+
 class ZoneOrigin(BaseModel):
     """Per-zone origin override with subway/LIRR hints.
 
@@ -143,6 +155,7 @@ class Config(BaseModel):
     opencode_go: OpencodeGoConfig
     mta: MtaConfig
     location_overrides: list[LocationOverride] = []
+    mode_overrides: list[ModeOverride] = []
     home_assistant: HomeAssistantConfig = HomeAssistantConfig()
     notify: NotifyConfig = NotifyConfig()
     google_maps_api_key: str = ""
