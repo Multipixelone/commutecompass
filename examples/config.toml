@@ -157,3 +157,13 @@ calendar_id = "job-calendar@example.com"
 location = "200 Example St, New York, NY 10001"
 # # title_contains is optional — omit to override ALL events in that calendar.
 # # title_contains = "Office Hours"
+
+# ── Travel-Mode Overrides ───────────────────────────────────────────────────
+# Force a travel mode for any event whose (effective) location contains the
+# given text, case-insensitive. First match wins. Handy for "always bike to
+# work" — the digest then shows the bike duration instead of a transit route.
+# Valid modes: "transit", "driving", "walking", "bicycling".
+#
+[[mode_overrides]]
+location_contains = "200 Example St"
+mode = "bicycling"

@@ -31,6 +31,23 @@ def get_effective_location(
     return event.location_raw or ""
 
 
+def get_effective_mode(
+    effective_location: str,
+    config: Config,
+) -> Optional[Literal["transit", "driving", "walking", "bicycling"]]:
+    """Return the forced travel mode if the location matches a mode_override.
+
+    ``location_contains`` is matched case-insensitively as a substring against
+    the (effective) location. First matching rule wins. Returns None when no
+    rule matches so callers can fall back to their default.
+    """
+    hay = (effective_location or "").lower()
+    for ov in config.mode_overrides:
+        if ov.location_contains.lower() in hay:
+            return ov.mode
+    return None
+
+
 def effective_origin(
     config: Config,
     store: "Store",
@@ -116,13 +133,16 @@ def plan_event(
     from commutecompass.routing import plan_route
     from commutecompass.geocode import geocode
 
-    # Determine travel mode
-    mode: Literal["transit", "driving", "walking", "bicycling"] = (
-        mode_override or event.mode_override or "transit"
-    )
-
     # Step 1: resolve location (override applied first)
     raw_location = get_effective_location(event, config)
+
+    # Determine travel mode (CLI > event > location-based config > default)
+    mode: Literal["transit", "driving", "walking", "bicycling"] = (
+        mode_override
+        or event.mode_override
+        or get_effective_mode(raw_location, config)
+        or "transit"
+    )
 
     def geocoder(addr: str) -> Optional[GeocodeResult]:
         return geocode(addr, config.google_maps_api_key)
