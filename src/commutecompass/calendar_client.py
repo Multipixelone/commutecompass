@@ -56,7 +56,7 @@ class CalendarClient:
             try:
                 from google.auth.transport.requests import Request
 
-                creds.refresh(Request())
+                creds.refresh(Request())  # type: ignore[no-untyped-call]
                 self._save_credentials(creds)
             except RefreshError as exc:
                 raise AuthError(
