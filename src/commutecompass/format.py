@@ -200,7 +200,7 @@ def format_digest(
         # Footer hint so OpenClaw / the user knows how to refer to an event in
         # follow-up commands like `adjust`, `mute`, `snooze`.
         lines.append(escape_md(
-            "Refer to an event by its [id], by today:N, or by 'next'."
+            "Refer to an event by today:N, or by 'next'."
         ))
 
     if alerts:
@@ -247,7 +247,6 @@ def _format_plan_summary(plan: Plan) -> str:
     """Format a single plan summary block for the digest."""
     event = plan.event
     start_str = event.start.strftime("%I:%M %p").lstrip("0")
-    short_id = short_event_id(event.id)
 
     lines = []
     cal_lower = event.calendar_name.lower()
@@ -266,10 +265,8 @@ def _format_plan_summary(plan: Plan) -> str:
     location = _compact_location(event.location_raw, fallback=location_fallback)
     if ("job" in cal_lower or "work" in cal_lower) and location.strip() == "(no location)":
         location = "Salt & Straw"
-    # `[short_id]` is MarkdownV2-escaped via escape_md on the bracket chars; the
-    # id itself is hex so no escape is needed for its body.
     lines.append(
-        f"  \\[`{short_id}`\\] {start_str} at {escape_md(_sanitize_text(location))}"
+        f"  {start_str} at {escape_md(_sanitize_text(location))}"
     )
 
     if plan.error:

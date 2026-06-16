@@ -1202,8 +1202,13 @@ def test_format_digest_omits_operations_footer_when_clean() -> None:
 # ── Short event ID surfacing for OpenClaw selectors ──────────────────────────
 
 
-def test_format_digest_surfaces_8_char_id_token() -> None:
-    """Every plan summary carries a `[shortid]` token agents can quote back."""
+def test_format_digest_does_not_surface_event_id() -> None:
+    """The digest must not leak the Google Calendar event ID to the user.
+
+    Selectors like `today:N` and `next` are sufficient for follow-up
+    commands, so the `[shortid]` token that used to be quoted back here
+    has been dropped from the rendered message.
+    """
     event = make_event(
         id="a1b2c3d4ffffffff",
         title="Show",
@@ -1213,9 +1218,7 @@ def test_format_digest_surfaces_8_char_id_token() -> None:
     plan = Plan(event=event, route=None, leave_at=None, prep_at=None)
 
     out = format_digest([plan], [])
-    # MarkdownV2-safe form: brackets escaped, code-span on the id.
-    assert "a1b2c3d4" in out
-    assert "\\[" in out and "\\]" in out
+    assert "a1b2c3d4" not in out
 
 
 def test_format_digest_emits_selector_footer_when_plans_present() -> None:

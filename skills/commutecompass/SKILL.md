@@ -52,14 +52,14 @@ to stdout; relay that stdout back to the user.
 
 Every event-scoped command (`plan-event`, `adjust`, `snooze`, `mute`,
 `unmute`, `undo`) accepts a `SELECTOR` instead of a raw event ID. The
-digest now prints an `[8-char-id]` token for every plan, but you usually
-don't need to quote it — use whichever of these is most natural:
+digest no longer prints the calendar event ID — use whichever of these
+is most natural:
 
 | Form              | Meaning                                                |
 |-------------------|--------------------------------------------------------|
 | `next`            | The soonest plan whose start time is after now.        |
 | `today:N`         | 1-indexed pick from today's plans (`today:1`, `today:2`…). |
-| `[8 hex chars]`   | The short ID printed in the digest (e.g. `a1b2c3d4`).  |
+| `[8 hex chars]`   | An 8+ char hex prefix of the Google Calendar event id, if you already have one (e.g. from a prior `plan-event` call). Not shown in the digest. |
 | Full event ID     | Exact match against the Google Calendar event id.      |
 | Title fragment    | Fuzzy match against today's titles (rapidfuzz).        |
 
