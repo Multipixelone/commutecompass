@@ -93,6 +93,23 @@ def _run_with_job_lock(cfg: "Config", job_name: str, fn: "Callable[[], None]") -
 @click.pass_context
 def cli(ctx: click.Context, config: Path) -> None:
     """commutecompass — NYC commute orchestrator."""
+    # Surface our own job-level INFO lines (e.g. "tomorrow job: fetched 0
+    # events for …") to stderr so systemd's journal captures them. Without
+    # this the root logger stays at WARNING and silent-success branches
+    # are impossible to distinguish from real failures after the fact.
+    # Root stays at WARNING so chatty deps (httpx/googleapiclient) don't
+    # spam the journal — and crucially don't leak the Google Maps API key
+    # via httpx INFO lines that log full request URLs.
+    # COMMUTECOMPASS_LOG_LEVEL=DEBUG widens both on demand.
+    import os as _os
+    _level_name = _os.environ.get("COMMUTECOMPASS_LOG_LEVEL", "INFO").upper()
+    _app_level = getattr(logging, _level_name, logging.INFO)
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("commutecompass").setLevel(_app_level)
+
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
 
