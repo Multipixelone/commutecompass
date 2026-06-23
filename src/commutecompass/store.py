@@ -157,6 +157,13 @@ class Store:
             cl_cols = {row[1] for row in conn.execute("PRAGMA table_info(current_location)").fetchall()}
             if "accuracy_m" not in cl_cols:
                 conn.execute("ALTER TABLE current_location ADD COLUMN accuracy_m REAL")
+            # Add send_attempts to pings: counts failed sends so the poll loop
+            # can bound cross-tick re-fire of actionable pings (see release_ping).
+            ping_cols = {row[1] for row in conn.execute("PRAGMA table_info(pings)").fetchall()}
+            if "send_attempts" not in ping_cols:
+                conn.execute(
+                    "ALTER TABLE pings ADD COLUMN send_attempts INTEGER NOT NULL DEFAULT 0"
+                )
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 
@@ -268,7 +275,7 @@ class Store:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, event_id, kind, fire_at, fired, fired_at, message
+                SELECT id, event_id, kind, fire_at, fired, fired_at, message, send_attempts
                 FROM pings
                 WHERE fired = 0 AND fire_at <= ?
                 ORDER BY fire_at
@@ -287,6 +294,7 @@ class Store:
                     fired=bool(row[4]),
                     fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
                     message=row[6],
+                    send_attempts=row[7],
                 )
             )
         return pings
@@ -307,14 +315,37 @@ class Store:
         caller (or a previous run) already claimed it — in which case the
         caller MUST NOT send, to avoid duplicate notifications.
 
-        Marking happens *before* the network send, so a failed send does not
-        cause a retry storm: a single attempt is the contract.  Observability
-        is provided by the caller (log + summary line).
+        Marking happens *before* the network send so two concurrent runners
+        cannot both send.  If the send then fails, the caller may hand the row
+        back with ``release_ping`` so a later poll re-attempts it (bounded by an
+        attempt cap + grace window).  Observability is provided by the caller
+        (log + summary line).
         """
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0",
                 (fired_at.isoformat(), ping_id),
+            )
+            return cursor.rowcount == 1
+
+    def release_ping(self, ping_id: str) -> bool:
+        """Hand a claimed ping back to the unfired pool after a failed send.
+
+        Atomically transitions ``fired = 1 -> 0`` and increments
+        ``send_attempts`` so the next poll picks the row up again.  Returns True
+        only when the row was actually claimed (``fired = 1``); a row already
+        re-fired or never claimed is left untouched.  The caller is responsible
+        for bounding re-fire (attempt cap + grace window) so this can never
+        storm.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pings
+                SET fired = 0, fired_at = NULL, send_attempts = send_attempts + 1
+                WHERE id = ? AND fired = 1
+                """,
+                (ping_id,),
             )
             return cursor.rowcount == 1
 

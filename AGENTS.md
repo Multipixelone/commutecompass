@@ -106,8 +106,14 @@ commutecompass --config examples/config.toml tomorrow --dry-run
 6. **Ping firing contract**
    - Use `store.claim_ping(id, now)` (atomic 0→1 transition) before
      sending a notification, not `mark_fired` after.  This is the race
-     protection against overlapping poll cycles.  Send failures are
-     logged but NOT retried — claim-and-send is one-shot by design.
+     protection against overlapping poll cycles.
+   - On send **failure** of an actionable ping (`prep`/`leave`), the poll
+     loop hands the row back with `store.release_ping(id)` (atomic 1→0,
+     bumps `send_attempts`) so a later poll re-fires it.  Re-fire is bounded:
+     only within `_SEND_RETRY_GRACE_SECONDS` of the scheduled `fire_at` (a
+     stale alarm is worse than none) and only up to `_MAX_SEND_ATTEMPTS`
+     (a broken notifier can never storm).  Other kinds, and pings past the
+     grace window or attempt cap, stay fired (give up) — never retried.
 
 7. **OpenClaw stdout protocol**
    - `notify.StdoutNotifier` escapes any body line that exactly matches

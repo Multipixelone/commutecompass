@@ -24,6 +24,15 @@ _REPLAN_THRESHOLD_SECONDS = 5 * 60
 # Only applied when the caller did not inject a fetch_alerts_fn (tests bypass).
 _MTA_CACHE_TTL_SECONDS = 180
 
+# Re-fire policy for actionable pings whose send failed transiently.  The claim
+# already consumed the row; on failure we hand it back (release_ping) so the
+# next poll re-attempts — but only for these kinds, only within the grace window
+# of their scheduled time (a stale alarm is worse than none), and only up to the
+# attempt cap so a persistently-broken notifier can never storm.
+_RETRYABLE_PING_KINDS = frozenset({"prep", "leave"})
+_MAX_SEND_ATTEMPTS = 5
+_SEND_RETRY_GRACE_SECONDS = 15 * 60
+
 # Module-level memo: (captured_at, (subway_url, lirr_url, bus_url), alerts).
 _alerts_cache: "tuple[datetime, tuple[str, str, str], list[Alert]] | None" = None
 
@@ -194,11 +203,32 @@ def run(
         if sent_ok:
             logger.info("Fired ping %s (%s)", ping.id, ping.kind)
         else:
-            logger.warning(
-                "Send failed for claimed ping %s (%s) — not retrying",
-                ping.id,
-                ping.kind,
+            # The claim already set fired=1.  For actionable pings still within
+            # their grace window and under the attempt cap, hand the row back so
+            # the next poll retries; otherwise leave it fired (give up) so a
+            # broken notifier can't storm or deliver a stale alarm.
+            attempt = ping.send_attempts + 1
+            within_grace = (now - ping.fire_at).total_seconds() <= _SEND_RETRY_GRACE_SECONDS
+            retryable = (
+                ping.kind in _RETRYABLE_PING_KINDS
+                and attempt < _MAX_SEND_ATTEMPTS
+                and within_grace
             )
+            if retryable and _store.release_ping(ping.id):
+                logger.warning(
+                    "Send failed for %s ping %s (attempt %d/%d) — released for retry",
+                    ping.kind,
+                    ping.id,
+                    attempt,
+                    _MAX_SEND_ATTEMPTS,
+                )
+            else:
+                logger.warning(
+                    "Send failed for claimed ping %s (%s) after %d attempt(s) — giving up",
+                    ping.id,
+                    ping.kind,
+                    attempt,
+                )
 
         # Additive HA alarm: fire AFTER the primary send attempt regardless of
         # its outcome (claim already consumed the row).  An HA outage cannot
