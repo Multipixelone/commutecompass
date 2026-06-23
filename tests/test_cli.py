@@ -816,7 +816,7 @@ class TestSnoozeCommand:
             result = runner.invoke(cli, ["snooze", "evt-abc", "--minutes", "20"])
 
         assert result.exit_code == 0, result.output
-        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        pending = store.pending_pings(now_nyc() + timedelta(hours=24))
         prep = [p for p in pending if p.event_id == "evt-abc" and p.kind == "prep"]
         assert len(prep) == 1
         # The new fire_at is ~20 minutes after the original (allowing ms drift).
@@ -848,7 +848,7 @@ class TestSnoozeCommand:
             result = runner.invoke(cli, ["snooze", "evt-abc", "--skip"])
 
         assert result.exit_code == 0, result.output
-        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        pending = store.pending_pings(now_nyc() + timedelta(hours=24))
         assert not any(p.event_id == "evt-abc" and p.kind == "prep" for p in pending)
 
     def test_snooze_requires_one_of_minutes_or_skip(
@@ -897,7 +897,7 @@ class TestMuteCommand:
         assert store.is_muted("evt-abc") is True
         from datetime import timedelta
         from commutecompass.timeutil import now_nyc
-        pending = store.pending_pings(now_nyc() + timedelta(hours=4))
+        pending = store.pending_pings(now_nyc() + timedelta(hours=24))
         assert not any(p.event_id == "evt-abc" for p in pending)
 
     def test_mute_today_mutes_all_plans(
