@@ -71,6 +71,28 @@ def test_fuzzy_match_theater() -> None:
     assert result.kind == "station"
 
 
+def test_fuzzy_match_collapsed_whitespace_variant() -> None:
+    """'Studio100' (no space) fuzzy-matches the 'Studio 100' alias."""
+    registry = VenueRegistry.load(FIXTURE_PATH)
+    result = registry.match("Studio100")
+    assert result is not None
+    assert result.value == "200 Example St, New York, NY 10001"
+
+
+def test_fuzzy_does_not_match_different_room_number() -> None:
+    """'Studio 200' must NOT match 'Studio 100' — different rooms (regression)."""
+    registry = VenueRegistry.load(FIXTURE_PATH)
+    assert registry.match("Studio 200") is None
+    assert registry.match("Studio200") is None
+
+
+def test_fuzzy_does_not_match_anagram() -> None:
+    """A character anagram must not match (the old char-set Jaccard bug)."""
+    registry = VenueRegistry.load(FIXTURE_PATH)
+    # "loohcs elpmaxe" has the same characters as "example school" reversed.
+    assert registry.match("loohcs elpmaxe") is None
+
+
 def test_no_match_returns_none() -> None:
     """Unknown venue returns None."""
     registry = VenueRegistry.load(FIXTURE_PATH)

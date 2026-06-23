@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import datetime
@@ -126,14 +127,14 @@ def _fetch_feed(url: str, system: str, client: httpx.Client) -> list[Alert]:
     alerts: list[Alert] = []
     for entity in feed.entity:
         if entity.HasField("alert"):
-            parsed = _parse_alert(entity.alert, system)
+            parsed = _parse_alert(entity.alert, system, entity_id=entity.id)
             if parsed:
                 alerts.append(parsed)
 
     return alerts
 
 
-def _parse_alert(gtfs_alert: GtfsAlert, system: str) -> Optional[Alert]:
+def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> Optional[Alert]:
     """Map a GTFS-RT Alert proto into our Alert model."""
     if not gtfs_alert.informed_entity:
         return None
@@ -186,12 +187,20 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str) -> Optional[Alert]:
         if translations:
             url = translations[0].text if translations[0].text else None
 
-    # Generate stable alert id from affected routes + start time of first period
-    first_period = active_periods[0] if active_periods else (None, None)
-    id_base = f"{system}:{','.join(sorted(affected_routes)) if affected_routes else 'unknown'}"
-    if first_period[0]:
-        id_base += f":{first_period[0].strftime('%Y%m%d%H%M')}"
-    alert_id = id_base[:128]
+    # Prefer the feed's own entity id — it is the canonical stable identifier.
+    # Fall back to a derived id (routes + first-period start) only when the feed
+    # omits it, and disambiguate that fallback with a short hash of the alert
+    # text so two distinct alerts sharing routes + start minute don't collide
+    # into one ledger entry (which would suppress the second).
+    if entity_id:
+        alert_id = f"{system}:{entity_id}"[:128]
+    else:
+        first_period = active_periods[0] if active_periods else (None, None)
+        id_base = f"{system}:{','.join(sorted(affected_routes)) if affected_routes else 'unknown'}"
+        if first_period[0]:
+            id_base += f":{first_period[0].strftime('%Y%m%d%H%M')}"
+        text_digest = hashlib.sha1(f"{header}\n{description}".encode()).hexdigest()[:8]
+        alert_id = f"{id_base}:{text_digest}"[:128]
 
     return Alert(
         id=alert_id,

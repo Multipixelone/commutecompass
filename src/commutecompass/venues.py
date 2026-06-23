@@ -23,15 +23,18 @@ def _normalize(s: str) -> str:
     return s.strip()
 
 
-def _jaccard(tokens_a: set[str], tokens_b: set[str]) -> float:
-    """Compute Jaccard similarity between two token sets."""
-    if not tokens_a and not tokens_b:
-        return 1.0
-    intersection = len(tokens_a & tokens_b)
-    union = len(tokens_a | tokens_b)
-    if union == 0:
-        return 0.0
-    return intersection / union
+# rapidfuzz ratios run 0-100; require a strong overlap before claiming a match.
+_FUZZY_THRESHOLD = 85.0
+
+
+def _digit_runs(s: str) -> set[str]:
+    """Extract digit sequences (e.g. room/studio numbers) from a string.
+
+    Numbers carry meaning that edit-distance smears over: 'studio 100' and
+    'studio 200' are 90% similar as strings but are different rooms.  Requiring
+    digit runs to match exactly before a fuzzy comparison keeps those apart.
+    """
+    return set(re.findall(r"\d+", s))
 
 
 class VenueEntry(BaseModel):
@@ -77,11 +80,16 @@ class VenueRegistry:
         Matching strategy:
         1. Normalize input
         2. Exact alias match (normalized) → return resolution
-        3. Fuzzy token-overlap match (Jaccard >= 0.85 on whitespace-collapsed alias vs input) → return resolution
+        3. Fuzzy match: edit-distance ratio >= threshold on the whitespace-
+           collapsed strings (so "Studio 100" and "Studio100" match), but only
+           when both sides have the *same* digit runs — so different room
+           numbers ("Studio 100" vs "Studio 200") never collide.
         4. Otherwise None
         """
         if not raw:
             return None
+
+        from rapidfuzz import fuzz
 
         norm = _normalize(raw)
 
@@ -90,15 +98,15 @@ class VenueRegistry:
             idx = self._exact[norm]
             return self.entries[idx].resolves_to
 
-        # Step 2: fuzzy — compare whitespace-collapsed input against stored collapsed aliases
+        # Step 2: fuzzy — edit-distance over whitespace-collapsed strings, gated
+        # on matching digit runs.  Unlike the previous character-set Jaccard this
+        # respects order (anagrams no longer match) and room numbers.
         collapsed_input = re.sub(r"\s+", "", norm)
+        input_digits = _digit_runs(collapsed_input)
         for stored_collapsed, idx in self._fuzzy:
-            # Jaccard over character bigrams (or fallback to simple overlap ratio)
-            # Simple ratio: number of shared tokens / total tokens
-            # Build token sets by splitting on whitespace after collapsing
-            input_tokens = set(collapsed_input)
-            stored_tokens = set(stored_collapsed)
-            if _jaccard(input_tokens, stored_tokens) >= 0.85:
+            if _digit_runs(stored_collapsed) != input_digits:
+                continue
+            if fuzz.ratio(collapsed_input, stored_collapsed) >= _FUZZY_THRESHOLD:
                 return self.entries[idx].resolves_to
 
         return None
