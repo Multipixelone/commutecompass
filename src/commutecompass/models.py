@@ -225,6 +225,11 @@ class Plan(BaseModel):
     leave_at: Optional[datetime] = None
     prep_at: Optional[datetime] = None
     error: Optional[str] = None
+    # Extra minutes folded into the buffer for expected precipitation, plus a
+    # short reason ("rain"/"snow") for display.  Zero when weather is disabled
+    # or the forecast is clear.
+    weather_buffer_minutes: int = 0
+    weather_reason: Optional[str] = None
 
 
 class Alert(BaseModel):

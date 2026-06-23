@@ -328,6 +328,50 @@ def test_plan_event_falls_back_to_distance_estimate(
     assert result.route.total_duration_seconds > 0
 
 
+def test_plan_event_applies_weather_buffer(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """When weather is enabled and rain is forecast, leave_at moves earlier."""
+    config.weather.enabled = True
+    config.weather.rain_buffer_minutes = 15
+    store = MagicMock()
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=mock_route), \
+         patch("commutecompass.weather._fetch_forecast") as mock_fetch, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        # Forecast hour matching event.start (14:00) shows likely rain.
+        hour = event.start.strftime("%Y-%m-%dT%H:00")
+        mock_fetch.return_value = {
+            "time": [hour],
+            "precipitation": [1.0],
+            "precipitation_probability": [90],
+            "snowfall": [0.0],
+        }
+        with_weather = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    config.weather.enabled = False
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=mock_route), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        without_weather = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert with_weather.weather_buffer_minutes == 15
+    assert with_weather.weather_reason == "rain"
+    assert without_weather.weather_buffer_minutes == 0
+    # 15 extra buffer minutes ⇒ leave 15 minutes earlier.
+    assert with_weather.leave_at is not None and without_weather.leave_at is not None
+    delta = (without_weather.leave_at - with_weather.leave_at).total_seconds() / 60
+    assert 14.5 < delta < 15.5
+
+
 def test_plan_event_caches_live_route(
     event: Event,
     config: Config,

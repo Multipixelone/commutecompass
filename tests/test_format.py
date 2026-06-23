@@ -208,6 +208,28 @@ class TestFormatDigest:
         # Should start with today header
         assert "Today" in result
 
+    def test_format_digest_shows_weather_note(self) -> None:
+        """A weather buffer is surfaced as a per-event note in the digest."""
+        event = make_event(
+            id="evt-wx",
+            title="Rehearsal",
+            calendar_name="Theatre",
+            start=datetime(2026, 5, 12, 9, 30, tzinfo=timezone.utc),
+            location="200 Example St",
+            location_value="200 Example St, New York, NY 10001",
+        )
+        leg = TransitLeg(
+            mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+            depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=timezone.utc),
+            arrive_at=datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc),
+            duration_seconds=2700, summary="C train",
+        )
+        plan = make_plan(event, make_route([leg])).model_copy(
+            update={"weather_buffer_minutes": 15, "weather_reason": "rain"}
+        )
+        result = format_digest([plan], [])
+        assert "15 min for rain" in result
+
     def test_format_digest_multiple_events(self) -> None:
         """format_digest renders multiple plans with different calendars."""
         event1 = make_event(

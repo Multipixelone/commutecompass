@@ -282,6 +282,12 @@ def _format_plan_summary(plan: Plan) -> str:
     if plan.route:
         lines.append(f"  {escape_md(_route_summary(plan.route))}")
 
+    if plan.weather_buffer_minutes > 0 and plan.weather_reason:
+        emoji = "❄️" if plan.weather_reason == "snow" else "🌧️"
+        lines.append(
+            f"  {emoji} {escape_md(f'+{plan.weather_buffer_minutes} min for {plan.weather_reason}')}"
+        )
+
     lines.append("")
     return "\n".join(lines)
 
