@@ -134,6 +134,30 @@ class NotifyConfig(BaseModel):
     mode: Literal["stdout", "telegram"] = "stdout"
 
 
+class WeatherConfig(BaseModel):
+    """Weather-aware buffer: pad departure when rain/snow is expected.
+
+    Uses the free Open-Meteo forecast API (no key).  When precipitation is
+    likely around the commute window, extra minutes are subtracted from the
+    leave time so the alarm fires earlier.
+    """
+
+    enabled: bool = False
+    forecast_url: str = "https://api.open-meteo.com/v1/forecast"
+    # Extra minutes added to the buffer when rain / snow is expected.
+    rain_buffer_minutes: int = Field(default=10, ge=0, le=120)
+    snow_buffer_minutes: int = Field(default=20, ge=0, le=240)
+    # Minimum precipitation probability (%) before the rain buffer applies.
+    precip_probability_threshold: int = Field(default=50, ge=0, le=100)
+
+    @field_validator("forecast_url")
+    @classmethod
+    def _validate_forecast_url(cls, v: str) -> str:
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(f"weather.forecast_url must start with http(s)://, got {v!r}")
+        return v.rstrip("/")
+
+
 class MonitoringConfig(BaseModel):
     """Dead-man's-switch / heartbeat configuration.
 
@@ -169,6 +193,7 @@ class Config(BaseModel):
     home_assistant: HomeAssistantConfig = HomeAssistantConfig()
     notify: NotifyConfig = NotifyConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
+    weather: WeatherConfig = WeatherConfig()
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""

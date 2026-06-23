@@ -183,9 +183,14 @@ def plan_event(
     if route is None:
         return Plan(event=event, error="no_route")
 
-    # Step 3: compute timings
+    # Step 3: compute timings.  Add a weather buffer when precipitation is
+    # expected around the event so the alarm fires earlier on a rainy/snowy day.
+    from commutecompass.weather import weather_buffer as _weather_buffer
+
+    wx = _weather_buffer(route_origin.lat, route_origin.lon, event.start, config.weather)
+
     travel = timedelta(seconds=route.total_duration_seconds)
-    buffer = timedelta(minutes=config.prep.safety_buffer_minutes)
+    buffer = timedelta(minutes=config.prep.safety_buffer_minutes + wx.minutes)
     prep = timedelta(minutes=config.prep.prep_minutes)
 
     leave_at = event.start - travel - buffer
@@ -202,6 +207,8 @@ def plan_event(
             leave_at=leave_at,
             prep_at=prep_at,
             error="too_imminent",
+            weather_buffer_minutes=wx.minutes,
+            weather_reason=wx.reason,
         )
 
     return Plan(
@@ -209,4 +216,6 @@ def plan_event(
         route=route,
         leave_at=leave_at,
         prep_at=prep_at,
+        weather_buffer_minutes=wx.minutes,
+        weather_reason=wx.reason,
     )

@@ -25,6 +25,14 @@ poll_interval_seconds = 60
 quiet_hours_start = "22:00"
 quiet_hours_end = "07:00"
 
+[weather]
+# Pad the departure buffer when rain/snow is expected around the commute, using
+# the free keyless Open-Meteo forecast.  Disabled by default.
+enabled = false
+rain_buffer_minutes = 10
+snow_buffer_minutes = 20
+precip_probability_threshold = 50
+
 [monitoring]
 # Optional dead-man's-switch.  poll_staleness_minutes controls how long the poll
 # loop may be silent before the morning digest warns the timer is dead.  Set
