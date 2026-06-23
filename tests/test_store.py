@@ -529,6 +529,48 @@ def test_get_geocode_miss(tmp_db_path: Path) -> None:
     assert store.get_geocode("never-cached-address") is None
 
 
+# ── Route cache tests ───────────────────────────────────────────────────────────
+
+def test_cache_route_round_trip(tmp_db_path: Path) -> None:
+    """A cached route is retrievable for the same (origin, dest, mode) triple."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+
+    store.cache_route("40.6950,-73.9890", "Midtown", "transit", route)
+    got = store.get_cached_route("40.6950,-73.9890", "Midtown", "transit")
+    assert got is not None
+    assert got.total_duration_seconds == route.total_duration_seconds
+    # Different mode / dest / origin are cache misses.
+    assert store.get_cached_route("40.6950,-73.9890", "Midtown", "driving") is None
+    assert store.get_cached_route("40.6950,-73.9890", "Brooklyn", "transit") is None
+
+
+def test_cache_route_keeps_latest(tmp_db_path: Path) -> None:
+    """Re-caching the same triple overwrites the previous route."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    older = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    older.total_duration_seconds = 1000
+    newer = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    newer.total_duration_seconds = 2000
+
+    store.cache_route("k", "d", "transit", older)
+    store.cache_route("k", "d", "transit", newer)
+    got = store.get_cached_route("k", "d", "transit")
+    assert got is not None
+    assert got.total_duration_seconds == 2000
+
+
+def test_get_cached_route_respects_max_age(tmp_db_path: Path) -> None:
+    """A stale cached route past max_age is treated as a miss."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    store.cache_route("k", "d", "transit", route)
+    assert store.get_cached_route("k", "d", "transit", max_age_days=0) is None
+
+
 # ── Alert ledger tests ─────────────────────────────────────────────────────────
 
 def test_mark_alert_seen_and_is_alert_seen(tmp_db_path: Path) -> None:

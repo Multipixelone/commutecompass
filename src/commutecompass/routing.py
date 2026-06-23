@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, Optional
 
 import httpx
@@ -15,6 +15,80 @@ from commutecompass.timeutil import NYC_TZ
 def _unix(dt: datetime) -> int:
     """Convert datetime to Unix timestamp."""
     return int(dt.timestamp())
+
+
+def route_cache_key(origin: Origin) -> str:
+    """Stable cache key for an origin.
+
+    Rounds coordinates to ~11 m (4 decimals) so jitter in GPS-derived origins
+    doesn't fragment the cache while still distinguishing real start points.
+    """
+    return f"{origin.lat:.4f},{origin.lon:.4f}"
+
+
+# Effective door-to-door speeds (km/h) for the coarse fallback estimate.  These
+# bake in waiting/transfers/parking, so they are deliberately well below vehicle
+# cruising speed — the goal is a leave-time that is roughly right, not a schedule.
+_FALLBACK_SPEED_KMH: dict[str, float] = {
+    "transit": 18.0,
+    "driving": 25.0,
+    "bicycling": 14.0,
+    "walking": 4.8,
+}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two WGS84 points, in kilometers."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def estimate_route(
+    origin: Origin,
+    destination: ResolvedLocation,
+    arrival_time: datetime,
+    mode: Literal["transit", "driving", "walking", "bicycling"] = "transit",
+) -> Optional[Route]:
+    """Build a coarse distance/speed route estimate when live routing is down.
+
+    Returns None when the destination has no coordinates (e.g. an unresolved
+    station name) — there is nothing to measure against, so the caller should
+    fall back to ``no_route`` rather than fabricate a number.  The returned
+    route is flagged ``approximate``.
+    """
+    if destination.lat is None or destination.lon is None:
+        return None
+
+    distance_km = _haversine_km(origin.lat, origin.lon, destination.lat, destination.lon)
+    # Crow-flies underestimates real path length; pad by 30% as a rough detour
+    # factor before dividing by the mode speed.
+    speed_kmh = _FALLBACK_SPEED_KMH.get(mode, _FALLBACK_SPEED_KMH["transit"])
+    hours = (distance_km * 1.3) / speed_kmh
+    duration_seconds = max(60, int(hours * 3600))
+
+    depart_at = arrival_time - timedelta(seconds=duration_seconds)
+    leg = TransitLeg(
+        mode=mode.upper(),  # type: ignore[arg-type]
+        system=None,
+        line=None,
+        headsign=None,
+        depart_at=depart_at,
+        arrive_at=arrival_time,
+        duration_seconds=duration_seconds,
+        summary=f"Estimated {mode} (~{distance_km:.1f} km, live routing unavailable)",
+    )
+    return Route(
+        legs=[leg],
+        depart_at=depart_at,
+        arrive_at=arrival_time,
+        total_duration_seconds=duration_seconds,
+        transfers=0,
+        approximate=True,
+    )
 
 
 def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:

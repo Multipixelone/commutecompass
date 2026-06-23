@@ -255,9 +255,12 @@ def test_plan_event_no_route(
     resolved_location: ResolvedLocation,
     nyc_now: datetime,
 ) -> None:
-    """Returns error='no_route' when plan_route returns None."""
+    """Returns error='no_route' only when live routing AND every fallback fail."""
+    store = MagicMock()
+    store.get_cached_route.return_value = None
     with patch("commutecompass.resolver.resolve") as mock_resolve, \
-         patch("commutecompass.routing.plan_route") as mock_plan_route:
+         patch("commutecompass.routing.plan_route") as mock_plan_route, \
+         patch("commutecompass.routing.estimate_route", return_value=None):
         mock_resolve.return_value = resolved_location
         mock_plan_route.return_value = None
 
@@ -265,7 +268,7 @@ def test_plan_event_no_route(
             event,
             config,
             MagicMock(spec=VenueRegistry),
-            MagicMock(),
+            store,
             MagicMock(spec=OpencodeGoClient),
         )
 
@@ -273,6 +276,80 @@ def test_plan_event_no_route(
     assert result.route is None
     assert result.leave_at is None
     assert result.prep_at is None
+
+
+def test_plan_event_reuses_cached_route_when_live_routing_down(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """When the Directions call fails, the last good cached route still plans the day."""
+    store = MagicMock()
+    store.get_cached_route.return_value = mock_route.model_copy()
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route", return_value=None), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+
+        result = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert result.error is None
+    assert result.route is not None
+    assert result.route.approximate is True
+    assert result.leave_at is not None
+    store.get_cached_route.assert_called_once()
+
+
+def test_plan_event_falls_back_to_distance_estimate(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    nyc_now: datetime,
+) -> None:
+    """No live route and no cache → a coarse distance estimate keeps alarms alive."""
+    store = MagicMock()
+    store.get_cached_route.return_value = None
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route", return_value=None), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location  # has lat/lon
+
+        result = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert result.error is None
+    assert result.route is not None
+    assert result.route.approximate is True
+    assert result.route.total_duration_seconds > 0
+
+
+def test_plan_event_caches_live_route(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """A successful live route is written to the cache for future fallback use."""
+    store = MagicMock()
+    with patch("commutecompass.resolver.resolve") as mock_resolve, \
+         patch("commutecompass.routing.plan_route", return_value=mock_route), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        mock_resolve.return_value = resolved_location
+
+        result = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert result.error is None
+    assert result.route is not None
+    assert result.route.approximate is False
+    store.cache_route.assert_called_once()
 
 
 def test_plan_event_mode_override(

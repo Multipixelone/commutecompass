@@ -130,7 +130,7 @@ def plan_event(
     Returns a Plan with route and timing, or an error Plan on failure.
     """
     from commutecompass.resolver import resolve
-    from commutecompass.routing import plan_route
+    from commutecompass.routing import estimate_route, plan_route, route_cache_key
     from commutecompass.geocode import geocode
 
     # Step 1: resolve location (override applied first)
@@ -158,8 +158,12 @@ def plan_event(
     if resolved is None:
         return Plan(event=event, error="location_unresolved")
 
-    # Step 2: plan route
+    # Step 2: plan route.  A live route is cached for reuse; if live routing is
+    # unavailable we fall back to the last good cached route, then to a coarse
+    # distance estimate — so an API outage degrades to "approximate" rather than
+    # silently producing no plan (and therefore no alarm) for the whole day.
     route_origin = effective_origin(config, store, override=origin_override)
+    cache_key = route_cache_key(route_origin)
 
     route = plan_route(
         origin=route_origin,
@@ -168,6 +172,14 @@ def plan_event(
         mode=mode,
         api_key=config.google_maps_api_key,
     )
+    if route is not None:
+        store.cache_route(cache_key, resolved.value, mode, route)
+    else:
+        route = store.get_cached_route(cache_key, resolved.value, mode)
+        if route is not None:
+            route = route.model_copy(update={"approximate": True})
+        else:
+            route = estimate_route(route_origin, resolved, event.start, mode)
     if route is None:
         return Plan(event=event, error="no_route")
 
