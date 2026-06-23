@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from commutecompass.calendar_client import CalendarClient
+from commutecompass.calendar_client import AuthError, CalendarClient
 from commutecompass.config import Config
 from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
 from commutecompass.mta import fetch_alerts
@@ -59,6 +59,7 @@ def run(config: Config) -> None:  # noqa: C901
         token_path=config.paths.oauth_token_path,
     )
     events: list[Event] = []
+    auth_failed = False
     try:
         events = calendar_client.fetch_events(
             calendars=[
@@ -68,6 +69,13 @@ def run(config: Config) -> None:  # noqa: C901
             start=today_start,
             end=today_end,
         )
+    except AuthError as exc:
+        # An expired/invalid OAuth token degrades to "no events" — but unlike a
+        # transient API blip it will NOT fix itself, so surface it loudly in the
+        # digest footer instead of letting the user think their day is empty.
+        logger.error("Calendar auth failed — re-auth needed: %s", exc)
+        auth_failed = True
+        events = []
     except Exception as exc:
         logger.error("Failed to fetch calendar events: %s", exc)
         # Continue with empty events list — digest will reflect no events
@@ -222,7 +230,7 @@ def run(config: Config) -> None:  # noqa: C901
     )
 
     # ── 6. Build and send digest ──────────────────────────────────────────────
-    ops_notes = _operations_notes(plans, all_alerts)
+    ops_notes = _operations_notes(plans, all_alerts, auth_failed=auth_failed)
     digest = format_digest(plans, affecting_alerts, operations_notes=ops_notes)
     notifier = build_notifier(config)
     sent = notifier.send(digest)
@@ -237,7 +245,7 @@ def run(config: Config) -> None:  # noqa: C901
     too_imminent = sum(1 for p in plans if p.error == "too_imminent")
     logger.info(
         "morning_run_summary: events=%d plans=%d unresolved=%d no_route=%d "
-        "too_imminent=%d alerts=%d digest_sent=%s",
+        "too_imminent=%d alerts=%d digest_sent=%s auth_failed=%s",
         len(events),
         len(plans),
         unresolved,
@@ -245,17 +253,26 @@ def run(config: Config) -> None:  # noqa: C901
         too_imminent,
         len(affecting_alerts),
         sent,
+        auth_failed,
     )
 
 
-def _operations_notes(plans: list[Plan], all_alerts: list[Alert]) -> list[str]:
+def _operations_notes(
+    plans: list[Plan], all_alerts: list[Alert], *, auth_failed: bool = False
+) -> list[str]:
     """Build the "Operations:" footer items for the morning digest.
 
     Surfaces degraded-service signals that today would only land in stderr:
-    MTA feeds that went silent after retries, plans whose location couldn't
-    be resolved, and plans that were stored with "too_imminent" / "no_route".
+    calendar auth that needs re-running, MTA feeds that went silent after
+    retries, plans whose location couldn't be resolved, and plans that were
+    stored with "too_imminent" / "no_route".
     """
     notes: list[str] = []
+
+    # Calendar auth failure first — without it the whole digest is empty and the
+    # user would otherwise have no idea their token lapsed.
+    if auth_failed:
+        notes.append("Calendar auth expired — re-run `commutecompass oauth`")
 
     # Per-feed MTA failures reported by fetch_alerts (set as an attribute).
     failed_feeds: list[str] = getattr(fetch_alerts, "last_failed_systems", [])
