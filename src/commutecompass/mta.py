@@ -370,16 +370,17 @@ def _build_route_context(route: Route) -> tuple[set[str], set[str]]:
             line_ids.add(leg.line.lower().strip())
         if leg.headsign:
             stop_names.add(leg.headsign.lower().strip())
-        # Extract origin/destination stop names from summary (e.g. "C from A to B")
-        if leg.summary:
-            parts = leg.summary.split(" from ")
-            if len(parts) >= 2:
-                # left side is the line; right side is "A to B"
-                right = parts[1]
-                for stop in right.replace(" to ", " ").replace(" and ", " ").split():
-                    stop = stop.strip(",. ")
-                    if stop and stop not in ("to", "and"):
-                        stop_names.add(stop.lower())
+        # Use the structured boarding/alighting stops rather than re-parsing the
+        # human summary (which breaks on stop names containing "to"/"and").  Add
+        # both the whole name and its word tokens for keyword matching.
+        for stop in (leg.departure_stop, leg.arrival_stop):
+            if not stop:
+                continue
+            normalized = stop.lower().strip()
+            stop_names.add(normalized)
+            for word in re.split(r"[^\w]+", normalized):
+                if word:
+                    stop_names.add(word)
 
     return stop_names, line_ids
 

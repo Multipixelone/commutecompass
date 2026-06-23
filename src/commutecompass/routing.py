@@ -129,6 +129,8 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     system: Optional[str] = None
     line: Optional[str] = None
     headsign: Optional[str] = None
+    departure_stop_name: Optional[str] = None
+    arrival_stop_name: Optional[str] = None
     summary = ""
 
     if mode == "TRANSIT":
@@ -172,6 +174,8 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
 
         dep_name = departure_stop.get("name", "Unknown")
         arr_name = arrival_stop.get("name", "Unknown")
+        departure_stop_name = dep_name if dep_name != "Unknown" else None
+        arrival_stop_name = arr_name if arr_name != "Unknown" else None
         summary = f"{line or 'Transit'} from {dep_name} to {arr_name}"
     elif mode == "WALKING":
         html_inst = step.get("html_instructions", "")
@@ -194,6 +198,8 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
         arrive_at=arrive_at,
         duration_seconds=duration_sec,
         summary=summary,
+        departure_stop=departure_stop_name,
+        arrival_stop=arrival_stop_name,
     )
 
 
