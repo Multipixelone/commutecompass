@@ -200,6 +200,34 @@ def sample_route() -> Route:
 
 # ─────────── Morning job tests ────────────────────────────────────────────────
 
+def test_morning_run_surfaces_calendar_auth_failure(
+    minimal_config: Config,
+    tmp_path: Path,
+) -> None:
+    """An expired OAuth token must be reported in the digest, not silently empty."""
+    from commutecompass.calendar_client import AuthError
+
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
+    ) as mock_fetch_alerts, patch(
+        "commutecompass.jobs.morning.build_notifier"
+    ) as mock_notifier_class:
+        mock_cal = MagicMock()
+        mock_cal.fetch_events.side_effect = AuthError("token refresh failed")
+        mock_cal_class.return_value = mock_cal
+        mock_fetch_alerts.return_value = []
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = True
+        mock_notifier_class.return_value = mock_notifier
+
+        morning_run(minimal_config)
+
+    # Digest still sent, and it tells the user to re-auth.
+    mock_notifier.send.assert_called_once()
+    sent_text = mock_notifier.send.call_args.args[0]
+    assert "oauth" in sent_text.lower()
+
+
 def test_morning_run_fetches_and_plans(
     minimal_config: Config,
     tmp_path: Path,
