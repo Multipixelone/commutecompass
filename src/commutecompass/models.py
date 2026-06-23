@@ -236,6 +236,10 @@ class PingEntry(BaseModel):
     fired: bool = False
     fired_at: Optional[datetime] = None
     message: str
+    # Number of send attempts that have already failed for this ping.  Used by
+    # the poll loop to bound cross-tick re-fire of actionable pings whose send
+    # failed transiently (see ``Store.release_ping``).
+    send_attempts: int = 0
 
 
 class CurrentLocation(BaseModel):

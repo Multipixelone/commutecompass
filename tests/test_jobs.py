@@ -1754,68 +1754,154 @@ def test_poll_dedups_same_alert_across_multiple_events(
 # ── Atomic claim semantics ────────────────────────────────────────────────────
 
 
-def test_poll_ping_marked_fired_even_when_primary_send_fails(
+class FlakyNotifier:
+    """Notifier that fails its first ``fail_times`` sends, then succeeds."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.sent: list[str] = []
+        self._fail_times = fail_times
+
+    def send(self, text: str) -> bool:
+        self.sent.append(text)
+        ok = len(self.sent) > self._fail_times
+        return ok
+
+
+def _seed_due_leave_plan(
+    config: Config,
+    event: Event,
+    route: Route,
+    now: "datetime",
+    *,
+    fire_offset_minutes: int = 5,
+    kind: str = "leave",
+) -> Store:
+    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    plan = Plan(
+        event=event,
+        route=route,
+        leave_at=leave_at,
+        prep_at=leave_at - timedelta(minutes=20),
+    )
+    store = Store(config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    store.schedule_ping(
+        PingEntry(
+            id="ping-flaky",
+            event_id=event.id,
+            kind=cast("Any", kind),
+            fire_at=now - timedelta(minutes=fire_offset_minutes),
+            fired=False,
+            message="leave now",
+        )
+    )
+    return store
+
+
+def _poll_at(config: Config, store: Store, plan: Plan, notifier: object, at: "datetime") -> None:
+    poll_run(
+        config,
+        store=store,
+        fetch_alerts_fn=lambda **kw: [],
+        alerts_affecting_route_fn=lambda *a, **kw: [],
+        notifier=cast(TelegramNotifier, notifier),
+        plan_event_fn=MockPlanner(plan),
+        now_fn=lambda: at,
+        ha_fetch_fn=lambda *a, **kw: None,
+    )
+
+
+def test_poll_releases_leave_ping_for_retry_when_send_fails(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
 ) -> None:
-    """When the primary notifier returns False, the ping is still consumed.
+    """A leave ping whose send fails is handed back so the next poll retries.
 
-    The claim-then-send contract is "one attempt per ping": a flaky network
-    must not turn a single missed send into a retry storm on every subsequent
-    poll cycle.
+    Losing the one notification that matters is worse than a second attempt: an
+    actionable ping within its grace window is re-fired on the following poll.
     """
     now = now_nyc()
-
-    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
-    plan = Plan(
-        event=today_events[0],
-        route=sample_route,
-        leave_at=leave_at,
-        prep_at=leave_at - timedelta(minutes=20),
-    )
-    due_ping = PingEntry(
-        id="ping-one-shot",
-        event_id=today_events[0].id,
-        kind="leave",
-        fire_at=now - timedelta(minutes=5),
-        fired=False,
-        message="leave now",
-    )
-
-    store = Store(minimal_config.paths.db_path)
-    store.init_schema()
-    store.upsert_plan(plan)
-    store.schedule_ping(due_ping)
+    store = _seed_due_leave_plan(minimal_config, today_events[0], sample_route, now)
+    plan = store.get_plan(today_events[0].id)
+    assert plan is not None
 
     failing = SpyNotifier(return_value=False)
-
-    poll_run(
-        minimal_config,
-        store=store,
-        fetch_alerts_fn=lambda **kw: [],
-        alerts_affecting_route_fn=lambda *a, **kw: [],
-        notifier=cast(TelegramNotifier, failing),
-        plan_event_fn=MockPlanner(plan),
-        now_fn=lambda: now,
-        ha_fetch_fn=lambda *a, **kw: None,
-    )
-
-    # The notifier was invoked exactly once with the message.
+    _poll_at(minimal_config, store, plan, failing, now)
     assert failing.sent == ["leave now"]
+    # Released back to the pending pool with the attempt recorded.
+    pending = store.pending_pings(before=now + timedelta(minutes=1))
+    assert [p.id for p in pending] == ["ping-flaky"]
+    assert pending[0].send_attempts == 1
 
-    # A second poll a minute later must NOT retry: claim already consumed.
-    poll_run(
-        minimal_config,
-        store=store,
-        fetch_alerts_fn=lambda **kw: [],
-        alerts_affecting_route_fn=lambda *a, **kw: [],
-        notifier=cast(TelegramNotifier, failing),
-        plan_event_fn=MockPlanner(plan),
-        now_fn=lambda: now + timedelta(minutes=1),
-        ha_fetch_fn=lambda *a, **kw: None,
+    # A minute later (still inside the grace window) it retries.
+    _poll_at(minimal_config, store, plan, failing, now + timedelta(minutes=1))
+    assert failing.sent == ["leave now", "leave now"]
+
+
+def test_poll_stops_retrying_once_send_succeeds(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    now = now_nyc()
+    store = _seed_due_leave_plan(minimal_config, today_events[0], sample_route, now)
+    plan = store.get_plan(today_events[0].id)
+    assert plan is not None
+
+    flaky = FlakyNotifier(fail_times=1)  # first send fails, second succeeds
+    _poll_at(minimal_config, store, plan, flaky, now)
+    _poll_at(minimal_config, store, plan, flaky, now + timedelta(minutes=1))
+    assert flaky.sent == ["leave now", "leave now"]
+
+    # Now fired for good — a third poll does not send again.
+    _poll_at(minimal_config, store, plan, flaky, now + timedelta(minutes=2))
+    assert flaky.sent == ["leave now", "leave now"]
+    assert store.pending_pings(before=now + timedelta(minutes=5)) == []
+
+
+def test_poll_gives_up_after_attempt_cap(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """A persistently-broken notifier must not retry forever (no storm)."""
+    now = now_nyc()
+    store = _seed_due_leave_plan(minimal_config, today_events[0], sample_route, now)
+    plan = store.get_plan(today_events[0].id)
+    assert plan is not None
+
+    failing = SpyNotifier(return_value=False)
+    # Poll once per minute; after _MAX_SEND_ATTEMPTS the row is abandoned.
+    for i in range(8):
+        _poll_at(minimal_config, store, plan, failing, now + timedelta(minutes=i))
+
+    from commutecompass.jobs.poll import _MAX_SEND_ATTEMPTS
+
+    assert len(failing.sent) == _MAX_SEND_ATTEMPTS
+    assert store.pending_pings(before=now + timedelta(minutes=10)) == []
+
+
+def test_poll_does_not_retry_stale_leave_ping(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """Outside the grace window a failed leave send is abandoned, not re-fired."""
+    now = now_nyc()
+    # fire_at is well past the grace window already.
+    store = _seed_due_leave_plan(
+        minimal_config, today_events[0], sample_route, now, fire_offset_minutes=30
     )
+    plan = store.get_plan(today_events[0].id)
+    assert plan is not None
+
+    failing = SpyNotifier(return_value=False)
+    _poll_at(minimal_config, store, plan, failing, now)
     assert failing.sent == ["leave now"]
+    # Stale: consumed, not released.
+    assert store.pending_pings(before=now + timedelta(minutes=1)) == []
 
 
 def test_poll_quiet_hours_leaves_unclaimed_for_later(
