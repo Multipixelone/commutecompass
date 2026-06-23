@@ -21,14 +21,18 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`tomorrow`](./src/commutecompass/jobs/) — push tomorrow's earliest prep time to the configured HA script (pull-model alarm)
 - [`plan`](./src/commutecompass/planner.py) — replan a single event (debug)
 - [`digest-preview`](./src/commutecompass/cli.py) — print today's digest from cache without sending
+- [`status`](./src/commutecompass/cli.py) — show next event, pending pings, and job heartbeats (`--json` for machine output)
 - [`adjust EVENT_ID --add-prep N`](./src/commutecompass/cli.py) — shift a plan's prep time by N minutes
-- [`config show`](./src/commutecompass/cli.py) / [`config set KEY VALUE`](./src/commutecompass/cli.py) — view or edit allowlisted config fields
+- [`snooze`](./src/commutecompass/cli.py) / [`mute`](./src/commutecompass/cli.py) / [`unmute`](./src/commutecompass/cli.py) / [`undo`](./src/commutecompass/cli.py) — adjust or suppress an event's pings
+- [`config show`](./src/commutecompass/cli.py) / [`config set KEY VALUE`](./src/commutecompass/cli.py) / [`config unset KEY`](./src/commutecompass/cli.py) / [`config reset`](./src/commutecompass/cli.py) — view or edit allowlisted config fields
+- [`geocode-cache`](./src/commutecompass/cli.py) — inspect or clear the geocode cache
+- [`mta-alerts`](./src/commutecompass/cli.py) — print current MTA alerts
 - [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
 - [`where`](./src/commutecompass/cli.py) — print the latest stored current location
 
 ## Configuration
 
-See [`examples/config.toml`](./examples/) and [`examples/env.example`](./examples/) for the full configuration schema. Architecture and implementation notes live in [`plan.md`](./plan.md).
+See [`examples/config.toml`](./examples/) and [`examples/env.example`](./examples/) for the full configuration schema. Architecture and implementation notes live in [`AGENTS.md`](./AGENTS.md).
 
 ## OpenClaw integration
 
