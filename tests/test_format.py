@@ -1027,6 +1027,21 @@ class TestSummarizeRouteMode:
         summary = _route_summary(route)
         assert summary == "Subway (C) (48 min)"
 
+    def test_route_summary_marks_approximate_routes(self) -> None:
+        """An approximate (cached/estimated) route is labelled in the digest."""
+        depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
+        arrive = datetime(2026, 5, 12, 8, 48, tzinfo=timezone.utc)
+        legs = [
+            TransitLeg(
+                mode="TRANSIT", system="MTA Subway", line="C", headsign="Fulton St",
+                depart_at=depart, arrive_at=arrive,
+                duration_seconds=2880, summary="C train",
+            ),
+        ]
+        route = Route(legs=legs, depart_at=depart, arrive_at=arrive,
+                      total_duration_seconds=2880, transfers=0, approximate=True)
+        assert _route_summary(route) == "Subway (C) (48 min, estimated)"
+
     def test_route_summary_includes_transfer_text_when_present(self) -> None:
         """_route_summary includes transfer text when transfers are present."""
         depart = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)

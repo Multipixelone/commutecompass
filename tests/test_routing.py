@@ -10,8 +10,59 @@ from typing import Any
 import pytest
 
 from commutecompass.models import Origin, ResolvedLocation, Route
-from commutecompass.routing import _parse_route, _unix, plan_route
+from commutecompass.routing import (
+    _parse_route,
+    _unix,
+    estimate_route,
+    plan_route,
+    route_cache_key,
+)
 from commutecompass.timeutil import NYC_TZ
+
+
+# ─── Fallback estimate ─────────────────────────────────────────────────────────
+
+def test_route_cache_key_rounds_coordinates() -> None:
+    a = Origin(address="a", lat=40.69501, lon=-73.98904)
+    b = Origin(address="b", lat=40.69499, lon=-73.98897)  # within ~11m
+    assert route_cache_key(a) == route_cache_key(b)
+    far = Origin(address="c", lat=40.75, lon=-73.99)
+    assert route_cache_key(far) != route_cache_key(a)
+
+
+def test_estimate_route_produces_approximate_route() -> None:
+    origin = Origin(address="home", lat=40.6950, lon=-73.9890)
+    dest = ResolvedLocation(
+        kind="address", value="Midtown", lat=40.7549, lon=-73.9840, source="geocode"
+    )
+    arrival = datetime(2026, 5, 8, 14, 30, tzinfo=NYC_TZ)
+
+    route = estimate_route(origin, dest, arrival, "transit")
+    assert route is not None
+    assert route.approximate is True
+    assert route.total_duration_seconds > 0
+    # arrive_at is the requested time; depart_at precedes it by the estimate.
+    assert route.arrive_at == arrival
+    assert route.depart_at < arrival
+
+
+def test_estimate_route_none_without_destination_coords() -> None:
+    origin = Origin(address="home", lat=40.6950, lon=-73.9890)
+    dest = ResolvedLocation(kind="station", value="Somewhere LIRR", source="llm")
+    arrival = datetime(2026, 5, 8, 14, 30, tzinfo=NYC_TZ)
+    assert estimate_route(origin, dest, arrival, "transit") is None
+
+
+def test_estimate_route_slower_modes_take_longer() -> None:
+    origin = Origin(address="home", lat=40.6950, lon=-73.9890)
+    dest = ResolvedLocation(
+        kind="address", value="Midtown", lat=40.7549, lon=-73.9840, source="geocode"
+    )
+    arrival = datetime(2026, 5, 8, 14, 30, tzinfo=NYC_TZ)
+    walking = estimate_route(origin, dest, arrival, "walking")
+    driving = estimate_route(origin, dest, arrival, "driving")
+    assert walking is not None and driving is not None
+    assert walking.total_duration_seconds > driving.total_duration_seconds
 
 
 # ─── Helper fixtures ───────────────────────────────────────────────────────────

@@ -393,7 +393,10 @@ def _route_summary(route: Route) -> str:
     else:
         transfer_suffix = ""
 
-    return f"{mode_label} ({total_min} min{transfer_suffix})"
+    # Mark routes that came from cache/estimate rather than live routing.
+    estimate_suffix = ", estimated" if route.approximate else ""
+
+    return f"{mode_label} ({total_min} min{transfer_suffix}{estimate_suffix})"
 
 
 def _route_summary_detailed(route: Route) -> str:

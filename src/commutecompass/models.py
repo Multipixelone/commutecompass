@@ -207,6 +207,11 @@ class Route(BaseModel):
     transfers: int = 0
     fare_estimate_cents: Optional[int] = None
     raw_provider_payload: Optional[dict[str, Any]] = None
+    # True when the route did not come from a live Directions response — either
+    # a previously-cached route reused during an API outage, or a coarse
+    # distance/speed estimate.  Surfaced in the digest so the user knows the
+    # timing is best-effort rather than schedule-accurate.
+    approximate: bool = False
 
 
 class Plan(BaseModel):

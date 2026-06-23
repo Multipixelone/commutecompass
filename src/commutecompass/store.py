@@ -10,7 +10,14 @@ from typing import Any, Iterator, Optional, cast
 
 import sqlite3
 
-from commutecompass.models import AdjustRow, CurrentLocation, Plan, PingEntry, ResolvedLocation
+from commutecompass.models import (
+    AdjustRow,
+    CurrentLocation,
+    Plan,
+    PingEntry,
+    ResolvedLocation,
+    Route,
+)
 
 
 def _now_iso() -> str:
@@ -99,6 +106,14 @@ class Store:
                     raw TEXT PRIMARY KEY,
                     resolved_json TEXT NOT NULL,
                     cached_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS route_cache (
+                    origin_key TEXT NOT NULL,
+                    dest_value TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    route_json TEXT NOT NULL,
+                    cached_at TEXT NOT NULL,
+                    PRIMARY KEY (origin_key, dest_value, mode)
                 );
                 CREATE TABLE IF NOT EXISTS alerts_seen (
                     alert_id TEXT NOT NULL,
@@ -386,6 +401,48 @@ class Store:
             return None
         data = _json_loads(row[0])
         return ResolvedLocation.model_validate(data)
+
+    # ── Route cache ──────────────────────────────────────────────────────────────
+
+    def cache_route(self, origin_key: str, dest_value: str, mode: str, route: Route) -> None:
+        """Store the latest successful route for an (origin, dest, mode) triple.
+
+        Used as a fallback when live routing is unavailable.  Only one row per
+        triple is kept (latest wins); the cached travel duration is what lets
+        the planner still compute a leave time during an API outage.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO route_cache (origin_key, dest_value, mode, route_json, cached_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(origin_key, dest_value, mode) DO UPDATE SET
+                    route_json = excluded.route_json,
+                    cached_at = excluded.cached_at
+                """,
+                (origin_key, dest_value, mode, _json_dumps(route.model_dump()), _now_iso()),
+            )
+
+    def get_cached_route(
+        self, origin_key: str, dest_value: str, mode: str, max_age_days: int = 30
+    ) -> Optional[Route]:
+        """Return the most recent cached route for the triple, if fresh enough."""
+        from datetime import timedelta
+
+        from commutecompass.timeutil import now_nyc
+
+        cutoff = now_nyc() - timedelta(days=max_age_days)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT route_json FROM route_cache
+                WHERE origin_key = ? AND dest_value = ? AND mode = ? AND cached_at >= ?
+                """,
+                (origin_key, dest_value, mode, cutoff.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return Route.model_validate(_json_loads(row[0]))
 
     # ── Alert ledger ────────────────────────────────────────────────────────────
 
