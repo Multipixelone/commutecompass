@@ -2,7 +2,9 @@
 
 python3Packages.buildPythonApplication rec {
   pname = "commutecompass";
-  version = "0.1.0";
+  # Single source of truth: read the version from pyproject.toml so it never
+  # drifts from the Python package metadata.
+  version = (lib.importTOML ../pyproject.toml).project.version;
   format = "pyproject";
 
   src = ./..;
