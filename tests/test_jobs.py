@@ -228,6 +228,39 @@ def test_morning_run_surfaces_calendar_auth_failure(
     assert "oauth" in sent_text.lower()
 
 
+def _run_morning_capture_digest(config: Config) -> str:
+    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
+        "commutecompass.jobs.morning.fetch_alerts"
+    ) as mock_fetch_alerts, patch(
+        "commutecompass.jobs.morning.build_notifier"
+    ) as mock_notifier_class:
+        mock_cal = MagicMock()
+        mock_cal.fetch_events.return_value = []
+        mock_cal_class.return_value = mock_cal
+        mock_fetch_alerts.return_value = []
+        mock_notifier = MagicMock()
+        mock_notifier.send.return_value = True
+        mock_notifier_class.return_value = mock_notifier
+        morning_run(config)
+        return str(mock_notifier.send.call_args.args[0])
+
+
+def test_morning_flags_dead_poll_timer(minimal_config: Config) -> None:
+    """A missing/stale poll heartbeat is surfaced in the digest."""
+    # No poll heartbeat recorded → stale.
+    text = _run_morning_capture_digest(minimal_config)
+    assert "poll loop has not run" in text.lower()
+
+
+def test_morning_silent_when_poll_heartbeat_fresh(minimal_config: Config) -> None:
+    """A fresh poll heartbeat means no dead-timer warning."""
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.record_job_success("poll", now_nyc())
+    text = _run_morning_capture_digest(minimal_config)
+    assert "poll loop has not run" not in text.lower()
+
+
 def test_morning_run_fetches_and_plans(
     minimal_config: Config,
     tmp_path: Path,
@@ -1909,6 +1942,21 @@ def test_poll_gives_up_after_attempt_cap(
 
     assert len(failing.sent) == _MAX_SEND_ATTEMPTS
     assert store.pending_pings(before=now + timedelta(minutes=10)) == []
+
+
+def test_poll_records_heartbeat(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    """Every poll run records a 'poll' heartbeat for the dead-man's-switch."""
+    now = now_nyc()
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    assert store.get_job_heartbeat("poll") is None
+
+    _poll_at(minimal_config, store, Plan(event=today_events[0]), SpyNotifier(), now)
+    assert store.get_job_heartbeat("poll") == now
 
 
 def test_poll_does_not_retry_stale_leave_ping(

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -230,7 +231,10 @@ def run(config: Config) -> None:  # noqa: C901
     )
 
     # ── 6. Build and send digest ──────────────────────────────────────────────
-    ops_notes = _operations_notes(plans, all_alerts, auth_failed=auth_failed)
+    poll_stale = _poll_heartbeat_stale(store, config, _now)
+    ops_notes = _operations_notes(
+        plans, all_alerts, auth_failed=auth_failed, poll_stale=poll_stale
+    )
     digest = format_digest(plans, affecting_alerts, operations_notes=ops_notes)
     notifier = build_notifier(config)
     sent = notifier.send(digest)
@@ -238,6 +242,13 @@ def run(config: Config) -> None:  # noqa: C901
         logger.info("morning job: digest sent successfully")
     else:
         logger.warning("morning job: digest send failed")
+
+    # Record morning's own heartbeat and ping the external dead-man's-switch.
+    store.record_job_success("morning", _now)
+    if config.monitoring.heartbeat_url:
+        from commutecompass.monitoring import ping_heartbeat
+
+        ping_heartbeat(config.monitoring.heartbeat_url)
 
     # ── 7. Log structured summary ────────────────────────────────────────────
     unresolved = sum(1 for p in plans if p.error == "location_unresolved")
@@ -257,15 +268,35 @@ def run(config: Config) -> None:  # noqa: C901
     )
 
 
+def _poll_heartbeat_stale(store: Store, config: Config, now: datetime) -> bool:
+    """True if the poll loop has not completed within the staleness threshold.
+
+    Poll runs every minute, so by morning a healthy poll heartbeat is seconds
+    old.  A stale (or missing) heartbeat means the per-minute timer is dead and
+    no leave/prep alarms will fire today — worth shouting about in the digest.
+    """
+    from datetime import timedelta
+
+    last = store.get_job_heartbeat("poll")
+    if last is None:
+        return True
+    threshold = timedelta(minutes=config.monitoring.poll_staleness_minutes)
+    return (now - last) > threshold
+
+
 def _operations_notes(
-    plans: list[Plan], all_alerts: list[Alert], *, auth_failed: bool = False
+    plans: list[Plan],
+    all_alerts: list[Alert],
+    *,
+    auth_failed: bool = False,
+    poll_stale: bool = False,
 ) -> list[str]:
     """Build the "Operations:" footer items for the morning digest.
 
     Surfaces degraded-service signals that today would only land in stderr:
-    calendar auth that needs re-running, MTA feeds that went silent after
-    retries, plans whose location couldn't be resolved, and plans that were
-    stored with "too_imminent" / "no_route".
+    calendar auth that needs re-running, a dead poll timer, MTA feeds that went
+    silent after retries, plans whose location couldn't be resolved, and plans
+    that were stored with "too_imminent" / "no_route".
     """
     notes: list[str] = []
 
@@ -273,6 +304,10 @@ def _operations_notes(
     # user would otherwise have no idea their token lapsed.
     if auth_failed:
         notes.append("Calendar auth expired — re-run `commutecompass oauth`")
+
+    # A dead poll timer means no alarms will fire today.
+    if poll_stale:
+        notes.append("Poll loop has not run recently — alarms may not fire (check the timer)")
 
     # Per-feed MTA failures reported by fetch_alerts (set as an attribute).
     failed_feeds: list[str] = getattr(fetch_alerts, "last_failed_systems", [])

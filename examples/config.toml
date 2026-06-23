@@ -25,6 +25,14 @@ poll_interval_seconds = 60
 quiet_hours_start = "22:00"
 quiet_hours_end = "07:00"
 
+[monitoring]
+# Optional dead-man's-switch.  poll_staleness_minutes controls how long the poll
+# loop may be silent before the morning digest warns the timer is dead.  Set
+# heartbeat_url to a healthchecks.io-style URL to get an off-host alert when the
+# per-minute poll stops pinging it entirely.
+poll_staleness_minutes = 15
+# heartbeat_url = "https://hc-ping.com/your-uuid-here"
+
 [paths]
 venues_file = "/etc/commutecompass/known_venues.yaml"
 db_path = "/var/lib/commutecompass/state.db"

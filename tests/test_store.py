@@ -571,6 +571,24 @@ def test_get_cached_route_respects_max_age(tmp_db_path: Path) -> None:
     assert store.get_cached_route("k", "d", "transit", max_age_days=0) is None
 
 
+# ── Job heartbeat tests ─────────────────────────────────────────────────────────
+
+def test_job_heartbeat_round_trip(tmp_db_path: Path) -> None:
+    """record_job_success / get_job_heartbeat round-trip; latest wins."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.get_job_heartbeat("poll") is None
+
+    t1 = datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 8, 6, 1, tzinfo=timezone.utc)
+    store.record_job_success("poll", t1)
+    assert store.get_job_heartbeat("poll") == t1
+    store.record_job_success("poll", t2)
+    assert store.get_job_heartbeat("poll") == t2
+    # Distinct jobs are tracked independently.
+    assert store.get_job_heartbeat("morning") is None
+
+
 # ── Alert ledger tests ─────────────────────────────────────────────────────────
 
 def test_mark_alert_seen_and_is_alert_seen(tmp_db_path: Path) -> None:
