@@ -635,6 +635,28 @@ class TestSystemsLinesOverlap:
         # "C" does not contain "ABC" and "ABC" does not contain "C" — no match
         assert _systems_lines_overlap(alert, route) is False
 
+    def test_line_no_substring_overmatch(self) -> None:
+        """Affected route '1' must NOT match bus line 'B41' (substring regression)."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "x", {"1"}, {"MTA Bus"},
+            now - timedelta(hours=1), now + timedelta(hours=1),
+        )
+        leg = subway_leg("B41", system="MTA Bus")
+        route = sample_route([leg])
+        assert _systems_lines_overlap(alert, route) is False
+
+    def test_line_matches_decorated_token(self) -> None:
+        """Affected route 'C' matches a decorated line like 'C-local'."""
+        now = make_aware(datetime.now(NYC_TZ))
+        alert = alert_with_period(
+            "x", {"C"}, {"MTA Subway"},
+            now - timedelta(hours=1), now + timedelta(hours=1),
+        )
+        leg = subway_leg("C-local")
+        route = sample_route([leg])
+        assert _systems_lines_overlap(alert, route) is True
+
     def test_wildcard_affected_routes(self) -> None:
         """Wildcard in affected_routes matches any line in system."""
         now = make_aware(datetime.now(NYC_TZ))
