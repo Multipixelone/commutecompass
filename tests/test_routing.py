@@ -20,6 +20,58 @@ from commutecompass.routing import (
 from commutecompass.timeutil import NYC_TZ
 
 
+# ─── Transfer counting ─────────────────────────────────────────────────────────
+
+def _transit_step(line: str, dur: int = 1500) -> dict[str, Any]:
+    return {
+        "travel_mode": "TRANSIT",
+        "duration": {"value": dur},
+        "transit_details": {
+            "line": {"short_name": line, "vehicle": {"type": "SUBWAY"}},
+            "departure_stop": {"name": "A"},
+            "arrival_stop": {"name": "B"},
+        },
+    }
+
+
+def _walk_step(dur: int = 300) -> dict[str, Any]:
+    return {"travel_mode": "WALKING", "duration": {"value": dur}}
+
+
+def _route_from_steps(steps: list[dict[str, Any]]) -> Route:
+    resp = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "departure_time": {"value": 1000},
+                        "arrival_time": {"value": 5000},
+                        "duration": {"value": 4000},
+                        "steps": steps,
+                    }
+                ]
+            }
+        ],
+    }
+    route = _parse_route(resp)
+    assert route is not None
+    return route
+
+
+def test_transfer_count_includes_walking_transfer() -> None:
+    """A walk between two trains is still one transfer, not zero."""
+    route = _route_from_steps(
+        [_walk_step(), _transit_step("A"), _walk_step(), _transit_step("C"), _walk_step()]
+    )
+    assert route.transfers == 1
+
+
+def test_transfer_count_single_train_is_zero() -> None:
+    route = _route_from_steps([_walk_step(), _transit_step("A"), _walk_step()])
+    assert route.transfers == 0
+
+
 # ─── Fallback estimate ─────────────────────────────────────────────────────────
 
 def test_route_cache_key_rounds_coordinates() -> None:
