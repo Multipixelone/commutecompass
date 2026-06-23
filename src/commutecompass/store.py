@@ -139,6 +139,10 @@ class Store:
                     muted_at TEXT NOT NULL,
                     expires_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS job_heartbeat (
+                    job TEXT PRIMARY KEY,
+                    last_success TEXT NOT NULL
+                );
             """)
             # Migrate adjust_log: add columns required for `undo` (single-step
             # restoration of the exact previous prep_at + undone flag).
@@ -443,6 +447,30 @@ class Store:
         if row is None:
             return None
         return Route.model_validate(_json_loads(row[0]))
+
+    # ── Job heartbeat ────────────────────────────────────────────────────────────
+
+    def record_job_success(self, job: str, at: datetime) -> None:
+        """Record the most recent successful completion of a named job."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_heartbeat (job, last_success)
+                VALUES (?, ?)
+                ON CONFLICT(job) DO UPDATE SET last_success = excluded.last_success
+                """,
+                (job, at.isoformat()),
+            )
+
+    def get_job_heartbeat(self, job: str) -> Optional[datetime]:
+        """Return the last successful run time for a job, or None if never run."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_success FROM job_heartbeat WHERE job = ?", (job,)
+            ).fetchone()
+        if row is None:
+            return None
+        return datetime.fromisoformat(row[0])
 
     # ── Alert ledger ────────────────────────────────────────────────────────────
 

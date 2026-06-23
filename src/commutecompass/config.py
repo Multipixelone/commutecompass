@@ -134,6 +134,28 @@ class NotifyConfig(BaseModel):
     mode: Literal["stdout", "telegram"] = "stdout"
 
 
+class MonitoringConfig(BaseModel):
+    """Dead-man's-switch / heartbeat configuration.
+
+    ``heartbeat_url`` is an optional healthchecks.io-style endpoint that the
+    poll job pings on every successful run; the external service alerts when the
+    pings stop (i.e. the per-minute timer died).  ``poll_staleness_minutes`` is
+    the threshold past which the morning digest flags that poll has not run.
+    """
+
+    heartbeat_url: Optional[str] = None
+    poll_staleness_minutes: int = Field(default=15, ge=1, le=24 * 60)
+
+    @field_validator("heartbeat_url")
+    @classmethod
+    def _validate_heartbeat_url(cls, v: Optional[str]) -> Optional[str]:
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(
+                f"monitoring.heartbeat_url must start with http(s)://, got {v!r}"
+            )
+        return v
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -146,6 +168,7 @@ class Config(BaseModel):
     mode_overrides: list[ModeOverride] = []
     home_assistant: HomeAssistantConfig = HomeAssistantConfig()
     notify: NotifyConfig = NotifyConfig()
+    monitoring: MonitoringConfig = MonitoringConfig()
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""

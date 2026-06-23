@@ -382,6 +382,15 @@ def run(
             _store.cancel_pings(plan.event.id)
             _schedule_pings_for_plan(new_plan, _store, now)
 
+    # ── Phase 6: heartbeat ────────────────────────────────────────────────────
+    # Record that poll completed, and ping the external dead-man's-switch (if
+    # configured) — the per-minute poll is the natural liveness signal.
+    _store.record_job_success("poll", now)
+    if config.monitoring.heartbeat_url:
+        from commutecompass.monitoring import ping_heartbeat
+
+        ping_heartbeat(config.monitoring.heartbeat_url)
+
 
 def _location_update_significant(old_plan: Plan, new_plan: Plan) -> bool:
     """Stricter check used only for Phase 5 location-driven updates.
