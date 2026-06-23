@@ -74,6 +74,23 @@ class TestResolveLocation:
         )
         assert result is None
 
+    def test_transient_failure_is_retried_then_succeeds(self) -> None:
+        """A single transient blip must not lose the resolution (retry recovers)."""
+        with patch("commutecompass.llm.httpx.Client") as mock_client_cls, patch(
+            "commutecompass.retry.time.sleep"
+        ):
+            mock_instance = mock_client_cls.return_value.__enter__.return_value
+            mock_instance.post.side_effect = [
+                httpx.TimeoutException("blip"),
+                _make_response('{"kind": "address", "value": "200 Example St, NY"}'),
+            ]
+            client = _make_client()
+            result = client.resolve_location("200 Example St", {})
+
+        assert result is not None
+        assert result.value == "200 Example St, NY"
+        assert mock_instance.post.call_count == 2
+
     def test_fenced_json_parsed_correctly(self) -> None:
         fenced = """```json
         {"kind": "address", "value": "200 W 41st St, New York, NY 10036"}

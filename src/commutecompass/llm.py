@@ -11,6 +11,7 @@ from typing import Any, Optional, TYPE_CHECKING
 import httpx
 
 from commutecompass.models import ResolvedLocation
+from commutecompass.retry import retry
 
 if TYPE_CHECKING:
     from commutecompass.models import Alert, Route
@@ -69,37 +70,12 @@ class OpencodeGoClient:
         return location
 
     def _call(self, raw: str, hints: dict[str, Any]) -> str:
-        """Make the chat completion request and return the content string."""
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": raw},
-            ],
-            "temperature": 0.0,
-        }
-        headers: dict[str, str] = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.post(self.endpoint, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        if not isinstance(data, dict):
-            return ""
-        # OpenAI-compatible chat completion shape
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return ""
-        first = choices[0]
-        if not isinstance(first, dict):
-            return ""
-        message = first.get("message")
-        if not isinstance(message, dict):
-            return ""
-        content = message.get("content")
-        return content if isinstance(content, str) else ""
+        """Make the resolution chat completion request and return the content.
+
+        ``hints`` is accepted for API stability but the location prompt is
+        self-contained, so it is not currently threaded into the request.
+        """
+        return self._chat_completion(_SYSTEM_PROMPT, raw, timeout_seconds=8.0)
 
     def _chat_completion(self, system_prompt: str, user_content: str, *, timeout_seconds: float = 8.0) -> str:
         payload: dict[str, Any] = {
@@ -114,10 +90,18 @@ class OpencodeGoClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=timeout_seconds) as client:
-            resp = client.post(self.endpoint, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+
+        def _do_request() -> object:
+            # Retry transient blips (timeouts / network / 5xx / 429); a single
+            # flaky response should not cost the whole resolution.  Non-transient
+            # errors (4xx, bad JSON) raise straight through to the caller, which
+            # logs and returns None.
+            with httpx.Client(timeout=timeout_seconds) as client:
+                resp = client.post(self.endpoint, json=payload, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+
+        data = retry(_do_request, attempts=2, label="opencode-go")
         if not isinstance(data, dict):
             return ""
         choices = data.get("choices")
