@@ -36,7 +36,7 @@ jobs:
         run: nix develop . --command ruff check .
 
       - name: Type check
-        run: nix develop . --command mypy src
+        run: nix develop . --command mypy src tests
 
   build:
     name: check, build, push

@@ -571,6 +571,21 @@ def test_get_cached_route_respects_max_age(tmp_db_path: Path) -> None:
     assert store.get_cached_route("k", "d", "transit", max_age_days=0) is None
 
 
+# ── Schema version tests ────────────────────────────────────────────────────────
+
+def test_schema_version_stamped(tmp_db_path: Path) -> None:
+    """init_schema stamps the current schema version in PRAGMA user_version."""
+    from commutecompass.store import SCHEMA_VERSION
+
+    store = Store(tmp_db_path)
+    assert store.schema_version() == 0  # fresh db, before init
+    store.init_schema()
+    assert store.schema_version() == SCHEMA_VERSION
+    # Idempotent re-init keeps the version stable.
+    store.init_schema()
+    assert store.schema_version() == SCHEMA_VERSION
+
+
 # ── Job heartbeat tests ─────────────────────────────────────────────────────────
 
 def test_job_heartbeat_round_trip(tmp_db_path: Path) -> None:

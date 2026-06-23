@@ -52,6 +52,13 @@ def _json_serializer(obj: object) -> str:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+# Bump when the on-disk schema changes.  Stored in SQLite's built-in
+# ``PRAGMA user_version`` so future migrations can branch on the version the DB
+# was last initialised at, instead of probing every table with PRAGMA
+# table_info.  The existing column adds remain idempotent and run unconditionally.
+SCHEMA_VERSION = 1
+
+
 class Store:
     """SQLite store for plans, pings, geocode cache, and alert ledger."""
 
@@ -183,6 +190,15 @@ class Store:
                 conn.execute(
                     "ALTER TABLE pings ADD COLUMN send_attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            # Stamp the schema version last, once all tables/columns exist.
+            # PRAGMA can't be parameterised, but SCHEMA_VERSION is a trusted int.
+            conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+
+    def schema_version(self) -> int:
+        """Return the schema version stamped in the database header."""
+        with self._connect() as conn:
+            row = conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 
