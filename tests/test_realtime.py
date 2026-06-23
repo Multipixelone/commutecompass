@@ -261,7 +261,9 @@ def test_accumulate_falls_back_to_arrival_time() -> None:
 
 def test_fetch_predictions_parses_via_shared_helper() -> None:
     feed = _feed_with("R20N", "Q", departure=SCHED + timedelta(minutes=6), arrival=None)
-    with patch("commutecompass.realtime.fetch_feed_message", return_value=feed):
+    with patch("commutecompass.realtime.httpx.Client"), patch(
+        "commutecompass.realtime.fetch_feed_message", return_value=feed
+    ):
         preds = _fetch_predictions(["https://feed.example/subway"], "MTA Subway")
     assert "R20N" in preds
 
@@ -273,7 +275,9 @@ def test_default_path_uses_cached_fetch(monkeypatch: pytest.MonkeyPatch) -> None
     rt._feed_cache.clear()
     feed = _feed_with("R20N", "Q", departure=SCHED + timedelta(minutes=6), arrival=None)
     cfg = RealtimeConfig(enabled=True)
-    with patch("commutecompass.realtime.fetch_feed_message", return_value=feed):
+    with patch("commutecompass.realtime.httpx.Client"), patch(
+        "commutecompass.realtime.fetch_feed_message", return_value=feed
+    ):
         d = realtime_delay(make_route(), SCHED, cfg)
     assert d == RealtimeDelay(6, "Q running ~6 min late")
     rt._feed_cache.clear()
