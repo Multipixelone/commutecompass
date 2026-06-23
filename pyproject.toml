@@ -38,3 +38,11 @@ mypy_path = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["commutecompass"]
+branch = true
+
+[tool.coverage.report]
+# CI enforces a floor via --cov-fail-under; current coverage is ~87%.
+show_missing = true

@@ -23,6 +23,7 @@
           ps: with ps; [
             pip
             pytest
+            pytest-cov
             pydantic
             click
             pyyaml
