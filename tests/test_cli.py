@@ -106,6 +106,7 @@ class TestMainHelp:
             "digest-preview",
             "adjust",
             "config",
+            "realtime",
         ]:
             assert cmd in result.output
 
@@ -162,6 +163,19 @@ class TestCommandHelp:
         result = runner.invoke(cli, ["bot", "--help"])
         assert result.exit_code == 0
         assert "bot" in result.output.lower()
+
+    def test_realtime_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["realtime", "--help"])
+        assert result.exit_code == 0
+        assert "real-time" in result.output.lower() or "delay" in result.output.lower()
+
+    def test_realtime_disabled_reports_disabled(
+        self, runner: CliRunner, minimal_toml: Path, env_block: None
+    ) -> None:
+        """With realtime disabled (default), the command says so and doesn't fetch."""
+        result = runner.invoke(cli, ["--config", str(minimal_toml), "realtime"])
+        assert result.exit_code == 0
+        assert "disabled" in result.output.lower()
 
 
 # ─────────── bot stub ──────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ to stdout; relay that stdout back to the user.
 | "mute pings for event X" / "mute everything today"                       | `scripts/mute.sh <selector>` *or* `scripts/mute.sh --today` |
 | "unmute event X"                                                         | `scripts/unmute.sh <selector>`                    |
 | "what alerts are hitting my commute today?"                              | `scripts/mta-alerts.sh`                           |
+| "is my train running late?" / "any real-time delays on my commute?"      | `scripts/realtime.sh`                             |
 | "send me today's digest again" / "force-run morning"                     | `scripts/morning.sh`                              |
 | "run a poll cycle now" / "check alerts now"                              | `scripts/poll.sh`                                 |
 | "what time will my alarm be tomorrow?" / "preview tomorrow's wake time"  | `scripts/tomorrow.sh` (dry-run; no HA push)       |
@@ -82,7 +83,7 @@ purpose.
   the user before running them on demand if the cause for the user's request is
   unclear.
 - `digest-preview`, `where`, `plan-event` (without `--from`), `config-show`,
-  and `mta-alerts` are pure reads — invoke freely. `plan-event --from <addr>`
+  `mta-alerts`, and `realtime` are pure reads — invoke freely. `plan-event --from <addr>`
   is also a read (preview only; never saves).
 - `adjust` only shifts `prep_at`. The `leave_at` is governed by route+event
   start and can't be moved without a replan. If the user wants to leave

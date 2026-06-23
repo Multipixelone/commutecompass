@@ -1100,6 +1100,51 @@ def mta_alerts(ctx: click.Context) -> None:
     click.echo(format_alerts_block(matched))
 
 
+@cli.command(name="realtime")
+@click.pass_context
+def realtime_cmd(ctx: click.Context) -> None:
+    """Show real-time departure delays for today's planned boarding legs.
+
+    Reads the MTA GTFS-RT trip-update feeds and reports how late (if at all) the
+    line each plan boards is running.  Honors ``realtime.enabled`` — when
+    disabled it says so rather than fetching.
+    """
+    from commutecompass.realtime import realtime_delay
+    from commutecompass.store import Store
+
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+
+    if not cfg.realtime.enabled:
+        click.echo("Real-time departures are disabled (set realtime.enabled = true).")
+        return
+
+    store = Store(Path(cfg.paths.db_path))
+    plans = store.today_plans()
+    plans_with_routes = [p for p in plans if p.route is not None and p.leave_at is not None]
+    if not plans_with_routes:
+        click.echo("No planned routes today — nothing to check.")
+        return
+
+    any_delay = False
+    for plan in plans_with_routes:
+        assert plan.route is not None
+        delay = realtime_delay(plan.route, plan.event.start, cfg.realtime)
+        boarding = next((leg for leg in plan.route.legs if leg.mode == "TRANSIT"), None)
+        if boarding and boarding.line and boarding.departure_stop:
+            board_desc = f"{boarding.line} from {boarding.departure_stop}"
+        else:
+            board_desc = "(no transit leg)"
+        if delay.reason:
+            any_delay = True
+            click.echo(f"{plan.event.title}: {board_desc} → {delay.reason}")
+        else:
+            click.echo(f"{plan.event.title}: {board_desc} → on time")
+
+    if not any_delay:
+        click.echo("All boarding legs on time.")
+
+
 # ─────────── bot (stub) ──────────────────────────────────────────────────────
 
 
