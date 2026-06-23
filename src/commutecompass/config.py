@@ -361,6 +361,15 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
 }
 
 
+# Keys that the app itself never reads at runtime — an external scheduler
+# (systemd timer, cron) drives when `morning`/`poll` run, so editing these in
+# TOML records intent but does NOT change the schedule.  The CLI warns when one
+# is set so a chat user isn't misled into thinking it took effect.
+EXTERNALLY_SCHEDULED_KEYS: frozenset[str] = frozenset(
+    {"scheduling.morning_run_time", "scheduling.poll_interval_seconds"}
+)
+
+
 class ConfigSetError(Exception):
     """Raised by ``update_config_field`` for an invalid key or value."""
 

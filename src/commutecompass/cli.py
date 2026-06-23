@@ -135,7 +135,7 @@ def oauth(ctx: click.Context) -> None:
         token_path=token_path,
     )
     client.authorize_interactive()
-    click.echo("OAuth授权完成。Token已保存。")
+    click.echo("OAuth authorization complete. Token saved.")
 
 
 # ─────────── init-db ──────────────────────────────────────────────────────────
@@ -740,7 +740,11 @@ def config_show(ctx: click.Context, as_json: bool) -> None:
 @click.pass_context
 def config_set(ctx: click.Context, key: str, value: str) -> None:
     """Set an allowlisted config field. KEY uses dotted form (e.g. prep.prep_minutes)."""
-    from commutecompass.config import ConfigSetError, update_config_field
+    from commutecompass.config import (
+        EXTERNALLY_SCHEDULED_KEYS,
+        ConfigSetError,
+        update_config_field,
+    )
 
     config_path: Path = ctx.obj["config_path"]
     try:
@@ -752,6 +756,12 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
         click.echo(f"Error writing {config_path}: {exc}", err=True)
         sys.exit(EXIT_CONFIG)
     click.echo(f"{key} = {coerced!r}")
+    if key in EXTERNALLY_SCHEDULED_KEYS:
+        click.echo(
+            f"Note: {key} is not read at runtime — the schedule is set by your "
+            "systemd timer or cron entry. Update that to change when the job runs.",
+            err=True,
+        )
 
 
 @config.command(name="unset")

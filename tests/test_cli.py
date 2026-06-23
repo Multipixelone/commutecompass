@@ -487,6 +487,18 @@ safety_buffer_minutes = 5
         # Error message should name the allowlist
         assert "prep.prep_minutes" in result.output
 
+    def test_set_externally_scheduled_key_warns(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Setting an inert scheduling key still writes it but warns it does nothing."""
+        p = self._toml_with_prep(tmp_path)
+        result = runner.invoke(
+            cli, ["--config", str(p), "config", "set", "scheduling.poll_interval_seconds", "30"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "poll_interval_seconds = 30" in p.read_text()
+        assert "not read at runtime" in result.output
+
 
 # ─────────── adjust idempotency ────────────────────────────────────────────────
 

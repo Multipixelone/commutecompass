@@ -201,15 +201,9 @@ def run(config: Config) -> None:  # noqa: C901
     except Exception as exc:
         logger.warning("Failed to fetch MTA alerts: %s", exc)
 
-    # Filter to those affecting today's planned routes
-    from commutecompass.llm import OpencodeGoClient
+    # Filter to those affecting today's planned routes.  Reuse the llm_client
+    # built above for planning rather than constructing a second identical one.
     from commutecompass.mta import select_actionable_alerts
-
-    llm_client = OpencodeGoClient(
-        endpoint=config.opencode_go.endpoint,
-        token=config.opencode_go_token,
-        model=config.opencode_go.model,
-    )
 
     affecting_alerts: list[Alert] = []
     for plan in plans:
