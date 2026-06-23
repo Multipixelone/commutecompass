@@ -521,24 +521,26 @@ def _systems_lines_overlap(alert: Alert, route: Route) -> bool:
 
 
 def _line_matches(alert: Alert, leg: TransitLeg) -> bool:
-    """Check if a transit leg's line/route matches alert's affected_routes."""
+    """Check if a transit leg's line/route matches alert's affected_routes.
+
+    Matches on whole line designators (case-insensitive), not substrings: bare
+    substring matching made affected route "1" match leg lines "B41", "M15", or
+    a hypothetical "10".  A decorated line like "C-local" still matches affected
+    route "C" because we also compare against the line's alphanumeric tokens.
+    """
     if not alert.affected_routes:
         # No specific routes means whole system is affected
         return True
 
-    if leg.line:
-        # Direct line match
-        if leg.line in alert.affected_routes:
-            return True
+    if not leg.line:
+        return False
 
-    # Also check if any affected route is a substring of the line (route IDs
-    # sometimes have prefixes like "ABC" for the C line)
-    if leg.line:
-        for affected in alert.affected_routes:
-            if affected in leg.line:
-                return True
+    line = leg.line.upper().strip()
+    line_tokens = {tok for tok in re.split(r"[^A-Z0-9]+", line) if tok}
+    line_tokens.add(line)  # also match multi-word lines as a whole
 
-    return False
+    affected = {route.upper().strip() for route in alert.affected_routes}
+    return bool(affected & line_tokens)
 
 
 def _time_overlaps(alert: Alert, route: Route, at_time: datetime) -> bool:
