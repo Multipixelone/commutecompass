@@ -792,12 +792,32 @@ class TestBuildRouteContext:
                 mode="TRANSIT", system="MTA Subway", line="C",
                 headsign="Fulton St", depart_at=now, arrive_at=now + timedelta(minutes=30),
                 duration_seconds=1800, summary="C from Jay St-MetroTech to Fulton St",
+                departure_stop="Jay St-MetroTech", arrival_stop="Fulton St",
             ),
         ]
         route = sample_route(legs)
         stop_names, line_ids = _build_route_context(route)
         assert "fulton st" in stop_names
+        assert "jay st-metrotech" in stop_names  # whole structured stop name
+        assert "metrotech" in stop_names  # word token
         assert "c" in line_ids
+
+    def test_stops_with_to_and_and_in_name_are_intact(self) -> None:
+        """Structured stops avoid the summary round-trip that split on to/and."""
+        now = make_aware(datetime.now(NYC_TZ))
+        legs = [
+            TransitLeg(
+                mode="TRANSIT", system="LIRR", line="Babylon",
+                depart_at=now, arrive_at=now + timedelta(minutes=40),
+                duration_seconds=2400, summary="Babylon from Atlantic Terminal to Wantagh",
+                departure_stop="Atlantic Terminal",
+                arrival_stop="Forest Hills and Kew Gardens",
+            ),
+        ]
+        stop_names, _ = _build_route_context(sample_route(legs))
+        # The whole name survives intact rather than being shredded on " and ".
+        assert "forest hills and kew gardens" in stop_names
+        assert "atlantic terminal" in stop_names
 
     def test_empty_route(self) -> None:
         route = Route(legs=[], depart_at=make_aware(datetime.now(NYC_TZ)),

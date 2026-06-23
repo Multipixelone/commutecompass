@@ -197,6 +197,11 @@ class TransitLeg(BaseModel):
     arrive_at: datetime
     duration_seconds: int
     summary: str
+    # Structured boarding/alighting stop names.  Kept separately from ``summary``
+    # so consumers (e.g. MTA alert relevance) don't have to re-parse the
+    # human-readable string, which breaks on stop names containing "to"/"and".
+    departure_stop: Optional[str] = None
+    arrival_stop: Optional[str] = None
 
 
 class Route(BaseModel):
