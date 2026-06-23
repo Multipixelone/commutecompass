@@ -129,9 +129,11 @@ class TestFetchAlerts:
         # Subway feed alerts are first (system = "MTA Subway")
         subway_alerts = [a for a in alerts if a.id.startswith("MTA Subway")]
         assert len(subway_alerts) == 2, f"Expected 2 subway alerts, got {len(subway_alerts)}: {subway_alerts}"
-        ids = {a.id for a in subway_alerts}
-        assert any("C" in id_ for id_ in ids)
-        assert any("A" in id_ for id_ in ids)
+        # The two subway alerts cover the C and A lines (check the structured
+        # field, not the id string, which now derives from the feed entity id).
+        all_routes = set().union(*(a.affected_routes for a in subway_alerts))
+        assert "C" in all_routes
+        assert "A" in all_routes
 
     def test_filters_entities_without_alerts(self) -> None:
         """Feed entities without alert payload are ignored."""
@@ -169,6 +171,48 @@ class TestFetchAlerts:
             )
 
         assert alerts == []
+
+    def test_distinct_alerts_same_route_and_time_get_distinct_ids(self) -> None:
+        """Two different alerts on the same route/time must not collapse to one id.
+
+        Exercises the derived-id fallback (feed omits entity ids): the alert text
+        is hashed into the id so the ledger doesn't suppress the second alert.
+        """
+        from google.transit.gtfs_realtime_pb2 import FeedEntity, FeedMessage
+
+        start = int(time.time())
+
+        def _make_entity(header: str) -> FeedEntity:
+            ent = FeedEntity()
+            ent.id = ""  # force the derived-id fallback
+            informed = ent.alert.informed_entity.add()
+            informed.route_id = "C"
+            period = ent.alert.active_period.add()
+            period.start = start
+            tr = ent.alert.header_text.translation.add()
+            tr.text = header
+            return ent
+
+        feed = FeedMessage()
+        feed.header.gtfs_realtime_version = "2.0"
+        feed.header.timestamp = start
+        feed.entity.append(_make_entity("Signal problems at Jay St"))
+        feed.entity.append(_make_entity("Sick passenger at Hoyt St"))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = feed.SerializeToString()
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=None)
+
+        with patch("commutecompass.mta.httpx.Client", MagicMock(return_value=mock_client)):
+            alerts = fetch_alerts("u", "", "", client=mock_client)
+
+        subway = [a for a in alerts if a.id.startswith("MTA Subway")]
+        assert len(subway) == 2
+        assert subway[0].id != subway[1].id
 
     def test_url_construction_with_empty_strings(self) -> None:
         """Empty strings fall back to canonical MTA URLs."""
