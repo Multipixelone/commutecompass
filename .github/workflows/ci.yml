@@ -30,7 +30,7 @@ jobs:
             accept-flake-config = true
 
       - name: Run tests
-        run: nix develop . --command pytest -q
+        run: nix develop . --command pytest -q --cov=commutecompass --cov-report=term-missing --cov-fail-under=80
 
       - name: Lint
         run: nix develop . --command ruff check .
