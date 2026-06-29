@@ -372,6 +372,45 @@ def test_plan_event_applies_weather_buffer(
     assert 14.5 < delta < 15.5
 
 
+def test_plan_event_applies_realtime_buffer(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    """A real-time delay on the boarding line moves leave_at earlier and is surfaced."""
+    from commutecompass.realtime import RealtimeDelay
+
+    store = MagicMock()
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=mock_route), \
+         patch(
+             "commutecompass.realtime.realtime_delay",
+             return_value=RealtimeDelay(8, "C running ~8 min late"),
+         ), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        with_rt = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=mock_route), \
+         patch("commutecompass.realtime.realtime_delay", return_value=RealtimeDelay(0, None)), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        without_rt = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert with_rt.realtime_buffer_minutes == 8
+    assert with_rt.realtime_reason == "C running ~8 min late"
+    assert without_rt.realtime_buffer_minutes == 0
+    assert with_rt.realtime_reason is None or without_rt.realtime_reason is None
+    assert with_rt.leave_at is not None and without_rt.leave_at is not None
+    delta = (without_rt.leave_at - with_rt.leave_at).total_seconds() / 60
+    assert 7.5 < delta < 8.5
+
+
 def test_plan_event_caches_live_route(
     event: Event,
     config: Config,

@@ -186,11 +186,15 @@ def plan_event(
     # Step 3: compute timings.  Add a weather buffer when precipitation is
     # expected around the event so the alarm fires earlier on a rainy/snowy day.
     from commutecompass.weather import weather_buffer as _weather_buffer
+    from commutecompass.realtime import realtime_delay as _realtime_delay
 
     wx = _weather_buffer(route_origin.lat, route_origin.lon, event.start, config.weather)
+    # Real-time delay on the boarding line — only ever adds buffer (leave earlier),
+    # never moves the leave time later.  Fail-open: zero on any error.
+    rt = _realtime_delay(route, event.start, config.realtime)
 
     travel = timedelta(seconds=route.total_duration_seconds)
-    buffer = timedelta(minutes=config.prep.safety_buffer_minutes + wx.minutes)
+    buffer = timedelta(minutes=config.prep.safety_buffer_minutes + wx.minutes + rt.minutes)
     prep = timedelta(minutes=config.prep.prep_minutes)
 
     leave_at = event.start - travel - buffer
@@ -209,6 +213,8 @@ def plan_event(
             error="too_imminent",
             weather_buffer_minutes=wx.minutes,
             weather_reason=wx.reason,
+            realtime_buffer_minutes=rt.minutes,
+            realtime_reason=rt.reason,
         )
 
     return Plan(
@@ -218,4 +224,6 @@ def plan_event(
         prep_at=prep_at,
         weather_buffer_minutes=wx.minutes,
         weather_reason=wx.reason,
+        realtime_buffer_minutes=rt.minutes,
+        realtime_reason=rt.reason,
     )
