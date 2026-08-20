@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
 from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
-    FeedMessage,
     Alert as GtfsAlert,
 )
 
+from commutecompass.gtfs_rt import fetch_feed_message
 from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.timeutil import NYC_TZ
 
@@ -96,33 +96,8 @@ def fetch_alerts(
 
 
 def _fetch_feed(url: str, system: str, client: httpx.Client) -> list[Alert]:
-    """Fetch and parse a single GTFS-RT feed."""
-    response = client.get(url)
-    response.raise_for_status()
-
-    # Diagnostic: detect non-protobuf payloads before attempting parse
-    content = response.content
-    if not content:
-        raise ValueError(
-            f"Empty response body from {system} feed ({url}): "
-            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}"
-        )
-
-    preview = content[:200]
-    if content.startswith(b"<?xml") or content.startswith(b"<Error") or content.startswith(b"<error"):
-        raise ValueError(
-            f"MTA feed {system} ({url}) returned XML/HTML instead of protobuf: "
-            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}, "
-            f"preview={preview[:80]!r}"
-        )
-    if content.startswith((b"{", b"[")):
-        raise ValueError(
-            f"MTA feed {system} ({url}) returned JSON instead of protobuf: "
-            f"status={response.status_code}, content_type={response.headers.get('content-type', 'unknown')}, "
-            f"preview={preview[:80]!r}"
-        )
-
-    feed = FeedMessage.FromString(content)
+    """Fetch and parse a single GTFS-RT alert feed."""
+    feed = fetch_feed_message(url, system, client)
 
     alerts: list[Alert] = []
     for entity in feed.entity:

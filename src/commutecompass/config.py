@@ -158,6 +158,67 @@ class WeatherConfig(BaseModel):
         return v.rstrip("/")
 
 
+# Canonical MTA GTFS-RT *trip-update* feeds (distinct from the alert feeds in
+# mta.py).  Subway is split into line-group feeds; verify against
+# https://api.mta.info.  Bus trip-updates come from OneBusAway.
+_MTA_BASE = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds"
+_DEFAULT_SUBWAY_TRIPUPDATE_URLS = [
+    f"{_MTA_BASE}/nyct%2Fgtfs",  # 1 2 3 4 5 6 7 S
+    f"{_MTA_BASE}/nyct%2Fgtfs-ace",
+    f"{_MTA_BASE}/nyct%2Fgtfs-bdfm",
+    f"{_MTA_BASE}/nyct%2Fgtfs-g",
+    f"{_MTA_BASE}/nyct%2Fgtfs-jz",
+    f"{_MTA_BASE}/nyct%2Fgtfs-nqrw",
+    f"{_MTA_BASE}/nyct%2Fgtfs-l",
+    f"{_MTA_BASE}/nyct%2Fgtfs-si",
+]
+_DEFAULT_LIRR_TRIPUPDATE_URL = f"{_MTA_BASE}/lirr%2Fgtfs-lirr"
+_DEFAULT_BUS_TRIPUPDATE_URL = "https://gtfsrt.prod.obanyc.com/tripUpdates"
+
+
+class RealtimeConfig(BaseModel):
+    """Real-time departure buffer: pad leave time when the boarding line runs late.
+
+    Reads the MTA GTFS-RT *trip-update* feeds, fuzzy-matches the boarding stop to
+    a GTFS ``stop_id`` (via the bundled ``data/stops_*.csv``), and folds an
+    observed delay into the buffer so the alarm fires earlier.  Conservative by
+    design: a delay can only move the leave time *earlier*, never later, and is
+    capped — see :mod:`commutecompass.realtime`.  Disabled by default.
+    """
+
+    enabled: bool = False
+    subway_tripupdate_urls: list[str] = Field(
+        default_factory=lambda: list(_DEFAULT_SUBWAY_TRIPUPDATE_URLS)
+    )
+    lirr_tripupdate_url: str = _DEFAULT_LIRR_TRIPUPDATE_URL
+    bus_tripupdate_url: str = _DEFAULT_BUS_TRIPUPDATE_URL
+    # Most an observed delay can add to the buffer (guards against bad feed data).
+    max_buffer_minutes: int = Field(default=15, ge=0, le=120)
+    # Ignore delays smaller than this (feed jitter / rounding noise).
+    min_delay_minutes: int = Field(default=2, ge=0, le=60)
+    # How far from the scheduled departure to look for the matching trip.
+    match_window_minutes: int = Field(default=30, ge=1, le=180)
+    # rapidfuzz score cutoff (0-100) for boarding-stop name matching.
+    fuzzy_threshold: int = Field(default=80, ge=0, le=100)
+
+    @field_validator("subway_tripupdate_urls")
+    @classmethod
+    def _validate_subway_urls(cls, v: list[str]) -> list[str]:
+        for url in v:
+            if url and not (url.startswith("http://") or url.startswith("https://")):
+                raise ValueError(
+                    f"realtime.subway_tripupdate_urls entries must start with http(s)://, got {url!r}"
+                )
+        return v
+
+    @field_validator("lirr_tripupdate_url", "bus_tripupdate_url")
+    @classmethod
+    def _validate_tripupdate_url(cls, v: str) -> str:
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError(f"realtime trip-update URL must start with http(s)://, got {v!r}")
+        return v
+
+
 class MonitoringConfig(BaseModel):
     """Dead-man's-switch / heartbeat configuration.
 
@@ -194,6 +255,7 @@ class Config(BaseModel):
     notify: NotifyConfig = NotifyConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
     weather: WeatherConfig = WeatherConfig()
+    realtime: RealtimeConfig = RealtimeConfig()
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
@@ -383,6 +445,9 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     "home_assistant.tomorrow.enabled": _coerce_bool,
     "home_assistant.replan_window_minutes": _coerce_int,
     "home_assistant.max_age_minutes": _coerce_int,
+    # Real-time departure buffer — safe to toggle / tune from chat.
+    "realtime.enabled": _coerce_bool,
+    "realtime.max_buffer_minutes": _coerce_int,
 }
 
 

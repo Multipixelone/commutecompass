@@ -18,6 +18,8 @@ intentionally read-only via the skill and must be changed by editing
 | `home_assistant.tomorrow.enabled`         | bool        | Toggle the pull-model "tomorrow alarm" push     |
 | `home_assistant.replan_window_minutes`    | int (min)   | Window before leave_at in which to replan       |
 | `home_assistant.max_age_minutes`          | int (min)   | Max acceptable age of an HA location reading    |
+| `realtime.enabled`                        | bool        | Toggle real-time GTFS-RT departure delay buffer |
+| `realtime.max_buffer_minutes`             | int (min)   | Cap on minutes a live delay can add to leave time |
 
 ## How to revert
 

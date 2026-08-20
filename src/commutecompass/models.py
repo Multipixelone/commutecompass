@@ -230,6 +230,11 @@ class Plan(BaseModel):
     # or the forecast is clear.
     weather_buffer_minutes: int = 0
     weather_reason: Optional[str] = None
+    # Extra minutes folded into the buffer because the boarding line is running
+    # late (GTFS-RT), plus a short reason ("Q running ~6 min late").  Zero when
+    # real-time is disabled, unmatched, or service is on time.
+    realtime_buffer_minutes: int = 0
+    realtime_reason: Optional[str] = None
 
 
 class Alert(BaseModel):

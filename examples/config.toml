@@ -33,6 +33,20 @@ rain_buffer_minutes = 10
 snow_buffer_minutes = 20
 precip_probability_threshold = 50
 
+[realtime]
+# Pad the departure buffer when the line you board is running late, using the
+# MTA GTFS-RT trip-update feeds.  Conservative: a live delay can only move your
+# leave time *earlier* (never later) and is capped at max_buffer_minutes.
+# Disabled by default.  Feed URLs default to the current MTA endpoints — verify
+# against https://api.mta.info if matching stops working.
+enabled = false
+max_buffer_minutes = 15
+min_delay_minutes = 2
+match_window_minutes = 30
+fuzzy_threshold = 80
+# subway_tripupdate_urls / lirr_tripupdate_url / bus_tripupdate_url default to
+# the canonical MTA + OneBusAway trip-update feeds; override only if they move.
+
 [monitoring]
 # Optional dead-man's-switch.  poll_staleness_minutes controls how long the poll
 # loop may be silent before the morning digest warns the timer is dead.  Set

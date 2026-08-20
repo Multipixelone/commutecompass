@@ -288,6 +288,11 @@ def _format_plan_summary(plan: Plan) -> str:
             f"  {emoji} {escape_md(f'+{plan.weather_buffer_minutes} min for {plan.weather_reason}')}"
         )
 
+    if plan.realtime_buffer_minutes > 0 and plan.realtime_reason:
+        lines.append(
+            f"  🚇 {escape_md(f'+{plan.realtime_buffer_minutes} min — {plan.realtime_reason}')}"
+        )
+
     lines.append("")
     return "\n".join(lines)
 
