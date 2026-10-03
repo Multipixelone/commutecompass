@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from commutecompass.routing import (
     estimate_route,
     plan_route,
     route_cache_key,
+    route_timing,
 )
 from commutecompass.timeutil import NYC_TZ
 
@@ -109,6 +111,18 @@ def test_estimate_route_none_without_destination_coords() -> None:
     assert estimate_route(origin, dest, arrival, "transit") is None
 
 
+def test_estimate_route_preserves_duration_across_dst() -> None:
+    origin = Origin(address="Home", lat=40.6950, lon=-73.9890)
+    dest = ResolvedLocation(
+        kind="address", value="Work", lat=40.7549, lon=-73.9840, source="geocode",
+    )
+    arrival = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=1)
+    route = estimate_route(origin, dest, arrival)
+    assert route is not None
+    assert route.arrive_at.timestamp() - route.depart_at.timestamp() == route.total_duration_seconds
+    assert route_timing(route).duration_seconds == route.total_duration_seconds
+
+
 def test_estimate_route_slower_modes_take_longer() -> None:
     origin = Origin(address="home", lat=40.6950, lon=-73.9890)
     dest = ResolvedLocation(
@@ -119,6 +133,76 @@ def test_estimate_route_slower_modes_take_longer() -> None:
     driving = estimate_route(origin, dest, arrival, "driving")
     assert walking is not None and driving is not None
     assert walking.total_duration_seconds > driving.total_duration_seconds
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_selected_route_timing(scheduled_directions: dict[str, Any], legacy: bool) -> None:
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    assert route.provider_route_index == 2
+    if legacy:
+        # Old JSON has no selected index and parses dates with fixed offsets.
+        data = route.model_dump(mode="json", exclude={"provider_route_index"})
+        route = Route.model_validate(data)
+    timing = route_timing(route)
+    assert timing.duration_seconds == 3095
+    assert timing.depart_at == datetime(2026, 10, 3, 13, 49, 8, tzinfo=NYC_TZ)
+    assert timing.arrive_at == datetime(2026, 10, 3, 14, 40, 43, tzinfo=NYC_TZ)
+
+
+def test_route_duration_uses_actual_elapsed_time(scheduled_directions: dict[str, Any]) -> None:
+    # Leg duration totals can omit inter-leg waits or disagree with endpoints.
+    scheduled_directions["routes"][2]["legs"][0]["duration"]["value"] = 9999
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    assert route.provider_route_index == 2
+    assert route.total_duration_seconds == 3095
+    assert route_timing(route).duration_seconds == 3095
+
+
+def test_route_times_not_borrowed_from_other_alternatives(
+    scheduled_directions: dict[str, Any],
+) -> None:
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    selected = scheduled_directions["routes"][2]["legs"][0]
+    del selected["arrival_time"]
+    del selected["departure_time"]
+    # Other alternatives still have the arrival stored on this route. They
+    # cannot supply timestamps for the now-untimed selected alternative.
+    timing = route_timing(route)
+    assert timing.duration_seconds == 3095
+    assert timing.depart_at is None and timing.arrive_at is None
+
+
+def test_ambiguous_legacy_route_has_no_schedule(scheduled_directions: dict[str, Any]) -> None:
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    route.provider_route_index = None
+    duplicate = deepcopy(scheduled_directions["routes"][2])
+    del duplicate["legs"][0]["arrival_time"]
+    scheduled_directions["routes"].append(duplicate)
+    timing = route_timing(route)
+    assert timing.duration_seconds == 3095
+    assert timing.depart_at is None and timing.arrive_at is None
+
+
+def test_legacy_route_timing_across_dst_fallback(scheduled_directions: dict[str, Any]) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    depart = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=0)
+    arrive = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=1)
+    leg["departure_time"]["value"] = int(depart.timestamp())
+    leg["arrival_time"]["value"] = int(arrive.timestamp())
+    leg["duration"]["value"] = 3600
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    route = Route.model_validate(route.model_dump(mode="json", exclude={"provider_route_index"}))
+    timing = route_timing(route)
+    assert timing.duration_seconds == 3600
+    assert timing.depart_at is not None and timing.arrive_at is not None
+    assert timing.depart_at.isoformat().endswith("-04:00")
+    assert timing.arrive_at.isoformat().endswith("-05:00")
 
 
 # ─── Helper fixtures ───────────────────────────────────────────────────────────

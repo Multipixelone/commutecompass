@@ -454,6 +454,8 @@ def _same_journey(old: Plan, new: Plan) -> bool:
         from commutecompass.routing import _scheduled_time
 
         assert plan.route is not None
+        if plan.route.approximate or plan.route.from_cache:
+            return False
         payload = plan.route.raw_provider_payload
         if payload is None or payload.get("status") != "OK":
             return not plan.route.approximate
@@ -522,6 +524,8 @@ def _retain_replan_safety(old: Plan, new: Plan) -> Plan:
                 setattr(updated, field, (value.astimezone(UTC) - delta).astimezone(value.tzinfo))
         updated.realtime_buffer_minutes = old.realtime_buffer_minutes
         updated.realtime_reason = old.realtime_reason
+        if updated.leave_buffer_minutes is not None:
+            updated.leave_buffer_minutes += old.realtime_buffer_minutes - new.realtime_buffer_minutes
     if old.prep_at is not None and old.leave_at is not None and updated.leave_at is not None:
         interval = old.leave_at.astimezone(UTC) - old.prep_at.astimezone(UTC)
         updated.prep_at = (updated.leave_at.astimezone(UTC) - interval).astimezone(

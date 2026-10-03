@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Optional
 
 from commutecompass.config import Config
@@ -124,13 +124,14 @@ def plan_event(
     Algorithm (§6.11):
     1. Resolve location via resolver.resolve pipeline.
     2. Plan route via routing.plan_route.
-    3. Compute leave_at = event.start - travel - safety_buffer.
+    3. Subtract scheduling buffers from the route departure, or use
+       event.start - travel when there is no current route schedule.
     4. Compute prep_at  = leave_at - prep_minutes.
 
     Returns a Plan with route and timing, or an error Plan on failure.
     """
     from commutecompass.resolver import resolve
-    from commutecompass.routing import estimate_route, plan_route, route_cache_key
+    from commutecompass.routing import estimate_route, plan_route, route_cache_key, route_timing
     from commutecompass.geocode import geocode
 
     # Step 1: resolve location (override applied first)
@@ -177,7 +178,7 @@ def plan_event(
     else:
         route = store.get_cached_route(cache_key, resolved.value, mode)
         if route is not None:
-            route = route.model_copy(update={"approximate": True})
+            route = route.model_copy(update={"approximate": True, "from_cache": True})
         else:
             route = estimate_route(route_origin, resolved, event.start, mode)
     if route is None:
@@ -193,24 +194,47 @@ def plan_event(
     # never moves the leave time later.  Fail-open: zero on any error.
     rt = _realtime_delay(route, event.start, config.realtime)
 
-    travel = timedelta(seconds=route.total_duration_seconds)
-    buffer = timedelta(minutes=config.prep.safety_buffer_minutes + wx.minutes + rt.minutes)
+    timing = route_timing(route)
+    if timing.duration_seconds is None:
+        return Plan(
+            event=event.model_copy(update={"location_resolved": resolved}),
+            route=route,
+            error="no_route",
+        )
+    buffer_minutes = config.prep.safety_buffer_minutes + wx.minutes + rt.minutes
+    buffer = timedelta(minutes=buffer_minutes)
     prep = timedelta(minutes=config.prep.prep_minutes)
 
-    leave_at = event.start - travel - buffer
-    prep_at = leave_at - prep
+    # Transit schedules may arrive well before event.start. Working backwards
+    # from the event would then miss the selected train. Cached timestamps must
+    # not anchor a new alarm; their duration still supports an approximate plan.
+    departure = (
+        timing.depart_at
+        if timing.depart_at is not None and not route.approximate
+        else datetime.fromtimestamp(
+            event.start.timestamp() - timing.duration_seconds, tz=event.start.tzinfo,
+        )
+    )
+    # Timestamp arithmetic preserves elapsed minutes across DST transitions.
+    leave_at = datetime.fromtimestamp(
+        departure.timestamp() - buffer.total_seconds(), tz=departure.tzinfo,
+    )
+    prep_at = datetime.fromtimestamp(
+        leave_at.timestamp() - prep.total_seconds(), tz=leave_at.tzinfo,
+    )
 
     # Too-imminent guard: if leave_at is already in the past, the event was
     # added to the calendar after the user would have needed to depart.
     # Emit a structured error so the digest / chat surface can tell the user
     # rather than silently storing a Plan with past times that will never fire.
-    if leave_at < now_nyc():
+    if leave_at.timestamp() < now_nyc().timestamp():
         return Plan(
             event=event.model_copy(update={"location_resolved": resolved}),
             route=route,
             leave_at=leave_at,
             prep_at=prep_at,
             error="too_imminent",
+            leave_buffer_minutes=buffer_minutes,
             weather_buffer_minutes=wx.minutes,
             weather_reason=wx.reason,
             realtime_buffer_minutes=rt.minutes,
@@ -222,6 +246,7 @@ def plan_event(
         route=route,
         leave_at=leave_at,
         prep_at=prep_at,
+        leave_buffer_minutes=buffer_minutes,
         weather_buffer_minutes=wx.minutes,
         weather_reason=wx.reason,
         realtime_buffer_minutes=rt.minutes,

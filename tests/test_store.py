@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+from typing import Any
+
 
 from commutecompass.store import Store
 from commutecompass.models import (
@@ -706,6 +708,41 @@ def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path: Path) -> None
     stored_data = json.loads(row[0])
     # Stored datetime strings should be ISO-8601 with offset (either + or -)
     assert ("+" in stored_data["event"]["start"] or "-" in stored_data["event"]["start"]) and ("T" in stored_data["event"]["start"])
+
+
+def test_route_selection_and_leave_buffer_persistence(
+    tmp_db_path: Path, scheduled_directions: dict[str, Any],
+) -> None:
+    import sqlite3
+    from commutecompass.routing import _parse_route, route_timing
+
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    store = Store(tmp_db_path)
+    store.init_schema()
+    plan = Plan(
+        event=make_event("timing-roundtrip"), route=route,
+        leave_at=route.depart_at - timedelta(minutes=13), leave_buffer_minutes=13,
+    )
+    store.upsert_plan(plan)
+    retrieved = store.get_plan(plan.event.id)
+    assert retrieved is not None and retrieved.route is not None
+    assert retrieved.route.provider_route_index == 2
+    assert retrieved.leave_buffer_minutes == 13
+    assert route_timing(retrieved.route).duration_seconds == 3095
+
+    # Simulate a pre-change row by omitting the new additive metadata.
+    old_data = plan.model_dump(mode="json", exclude={"leave_buffer_minutes"})
+    del old_data["route"]["provider_route_index"]
+    with sqlite3.connect(tmp_db_path) as conn:
+        conn.execute("UPDATE plans SET plan_json = ? WHERE event_id = ?",
+                     (json.dumps(old_data), plan.event.id))
+    legacy = store.get_plan(plan.event.id)
+    assert legacy is not None and legacy.route is not None
+    assert legacy.leave_buffer_minutes is None
+    assert legacy.route.provider_route_index is None
+    assert legacy.leave_at == plan.leave_at
+    assert route_timing(legacy.route).duration_seconds == 3095
 
 
 def test_ping_entry_round_trip_with_datetime(tmp_db_path: Path) -> None:

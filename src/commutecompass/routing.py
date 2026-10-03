@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
-from typing import Any, Literal, Optional
+from datetime import datetime
+from typing import Any, Literal, NamedTuple, Optional
 
 import httpx
 
@@ -24,6 +24,120 @@ def route_cache_key(origin: Origin) -> str:
     doesn't fragment the cache while still distinguishing real start points.
     """
     return f"{origin.lat:.4f},{origin.lon:.4f}"
+
+
+class RouteTiming(NamedTuple):
+    """Door-to-door timing, with unknown/provider placeholder values excluded."""
+
+    duration_seconds: Optional[float] = None
+    depart_at: Optional[datetime] = None
+    arrive_at: Optional[datetime] = None
+
+
+def _provider_time(value: object) -> Optional[datetime]:
+    if not isinstance(value, dict):
+        return None
+    timestamp = value.get("value")
+    if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, tz=NYC_TZ)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _provider_timing(candidate: object) -> RouteTiming:
+    if not isinstance(candidate, dict):
+        return RouteTiming()
+    legs = candidate.get("legs")
+    if not isinstance(legs, list) or not legs or not all(isinstance(leg, dict) for leg in legs):
+        return RouteTiming()
+    depart = _provider_time(legs[0].get("departure_time"))
+    arrive = _provider_time(legs[-1].get("arrival_time"))
+    if depart is not None and arrive is not None:
+        elapsed = arrive.timestamp() - depart.timestamp()
+        if elapsed >= 0:
+            # Includes waits between legs as well as movement; never sum steps.
+            return RouteTiming(elapsed, depart, arrive)
+        depart = arrive = None
+
+    durations: list[int] = []
+    for leg in legs:
+        duration = leg.get("duration")
+        seconds = duration.get("value") if isinstance(duration, dict) else None
+        if type(seconds) is not int or seconds < 0:
+            return RouteTiming(None, depart, arrive)
+        durations.append(seconds)
+    return RouteTiming(float(sum(durations)), depart, arrive)
+
+
+def route_timing(route: Optional[Route]) -> RouteTiming:
+    """Read timing from one selected alternative, including legacy saved routes.
+
+    Cached schedules describe a historical journey: only their duration remains
+    useful for a new plan. Explicit estimates have no provider payload and keep
+    their estimate timestamps. No routing requests or state writes occur here.
+    """
+    if route is None:
+        return RouteTiming()
+    if route.raw_provider_payload is None:
+        depart = route.depart_at if route.depart_at.utcoffset() is not None else None
+        arrive = route.arrive_at if route.arrive_at.utcoffset() is not None else None
+        duration = float(route.total_duration_seconds) if route.total_duration_seconds >= 0 else None
+        if depart is not None and arrive is not None:
+            elapsed = arrive.timestamp() - depart.timestamp()
+            if elapsed >= 0:
+                duration = elapsed
+            else:
+                depart = arrive = None
+        return RouteTiming(duration) if route.from_cache else RouteTiming(duration, depart, arrive)
+
+    candidates = route.raw_provider_payload.get("routes")
+    if not isinstance(candidates, list):
+        return RouteTiming()
+    if route.provider_route_index is not None:
+        if route.provider_route_index >= len(candidates):
+            return RouteTiming()
+        timing = _provider_timing(candidates[route.provider_route_index])
+    else:
+        # Older parsers persisted processing-time placeholders for missing
+        # timestamps. Compare only timestamps actually supplied by the provider.
+        matches: list[RouteTiming] = []
+        for candidate in candidates:
+            candidate_timing = _provider_timing(candidate)
+            depart, arrive = candidate_timing.depart_at, candidate_timing.arrive_at
+            if depart is not None and (
+                route.depart_at.utcoffset() is None
+                or depart.timestamp() != route.depart_at.timestamp()
+            ):
+                continue
+            if arrive is not None and (
+                route.arrive_at.utcoffset() is None
+                or arrive.timestamp() != route.arrive_at.timestamp()
+            ):
+                continue
+            if depart is None and arrive is None:
+                if candidate_timing.duration_seconds != route.total_duration_seconds:
+                    continue
+            elif depart is None or arrive is None:
+                if (
+                    candidate_timing.duration_seconds is not None
+                    and candidate_timing.duration_seconds != route.total_duration_seconds
+                ):
+                    continue
+            matches.append(candidate_timing)
+        if not matches:
+            return RouteTiming()
+        timing = matches[0]
+        if any(match != timing for match in matches[1:]):
+            # Do not borrow an arrival/departure from another alternative.
+            duration = timing.duration_seconds
+            if any(match.duration_seconds != duration for match in matches[1:]):
+                duration = None
+            timing = RouteTiming(duration)
+    if route.approximate or route.from_cache:
+        return RouteTiming(timing.duration_seconds)
+    return timing
 
 
 # Effective door-to-door speeds (km/h) for the coarse fallback estimate.  These
@@ -70,7 +184,9 @@ def estimate_route(
     hours = (distance_km * 1.3) / speed_kmh
     duration_seconds = max(60, int(hours * 3600))
 
-    depart_at = arrival_time - timedelta(seconds=duration_seconds)
+    depart_at = datetime.fromtimestamp(
+        arrival_time.timestamp() - duration_seconds, tz=arrival_time.tzinfo,
+    )
     leg = TransitLeg(
         mode=mode.upper(),  # type: ignore[arg-type]
         system=None,
@@ -247,7 +363,7 @@ def _parse_route(response: dict[str, Any]) -> Optional[Route]:
     best_route = None
     best_score = math.inf
 
-    for route in routes:
+    for route_index, route in enumerate(routes):
         legs = route.get("legs", [])
         if not legs:
             continue
@@ -297,8 +413,13 @@ def _parse_route(response: dict[str, Any]) -> Optional[Route]:
         else:
             arrive_at = datetime.now(NYC_TZ)
 
-        # Sum leg durations for total (primary approach for legacy Directions schema)
+        # Prefer elapsed door-to-door time; without endpoints, use complete leg
+        # durations. Retain the old zero placeholder internally when unknown;
+        # route_timing excludes it from exports and scheduling.
         total_duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
+        timing = _provider_timing(route)
+        if timing.duration_seconds is not None:
+            total_duration = int(timing.duration_seconds)
         fare = route.get("fare", {})
         fare_cents = None
         if fare:
@@ -315,6 +436,7 @@ def _parse_route(response: dict[str, Any]) -> Optional[Route]:
             transfers=transfers,
             fare_estimate_cents=fare_cents,
             raw_provider_payload=response,
+            provider_route_index=route_index,
         )
 
         # Score route: minimize total_walk + 0.5 * transfers + 0.1 * duration

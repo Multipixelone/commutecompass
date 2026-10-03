@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -10,8 +13,9 @@ from click.testing import CliRunner
 
 from commutecompass.cli import cli
 from commutecompass.config import Config
-from commutecompass.models import Plan
+from commutecompass.models import Event, Plan
 from commutecompass.store import Store
+from commutecompass.timeutil import NYC_TZ
 
 
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
@@ -744,6 +748,217 @@ class TestStatusCommand:
         }
         assert payload["plans"] == []
         assert payload["pings"] == []
+
+    @pytest.fixture
+    def routed_plan(self, directions_sample_path: Path) -> Plan:
+        from commutecompass.routing import _parse_route
+
+        start = datetime(2026, 10, 3, 10, tzinfo=NYC_TZ)
+        provider = json.loads(directions_sample_path.read_text())
+        leg = provider["routes"][0]["legs"][0]
+        # The overall leg duration includes 150 seconds of waiting beyond the
+        # walking/transit steps. Export this total, rather than summing steps.
+        leg["duration"]["value"] = 1830
+        leg["arrival_time"]["value"] = int((start - timedelta(minutes=10)).timestamp())
+        leg["departure_time"]["value"] = leg["arrival_time"]["value"] - 1830
+        route = _parse_route(provider)
+        assert route is not None
+        event = Event(
+            id="travel-event", calendar_id="cal", calendar_name="Work",
+            title="Meeting", start=start, end=start + timedelta(hours=1),
+        )
+        leave = start - timedelta(seconds=1830, minutes=15)
+        return Plan(
+            event=event, route=route, leave_at=leave,
+            prep_at=leave - timedelta(minutes=20), weather_buffer_minutes=10,
+        )
+
+    def _status_payload(
+        self, runner: CliRunner, tmp_path: Path, plan: Plan,
+    ) -> dict[str, Any]:
+        cfg = self._config(tmp_path)
+        store = Store(cfg.paths.db_path)
+        store.init_schema()
+        store.upsert_plan(plan)
+        # Open the DB afresh in the CLI to exercise persisted route data. Any
+        # routing request would violate status's offline/read-only contract.
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.timeutil.now_nyc", return_value=plan.event.start),
+            mock.patch("httpx.Client", side_effect=AssertionError("status must not call APIs")),
+        ):
+            result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        payload: dict[str, Any] = json.loads(result.output)
+        return payload
+
+    @pytest.mark.parametrize("error", [None, "too_imminent"])
+    def test_status_json_persisted_trip(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan, error: str | None,
+    ) -> None:
+        routed_plan.error = error
+        payload = self._status_payload(runner, tmp_path, routed_plan)
+        assert routed_plan.route is not None
+        assert routed_plan.leave_at is not None
+        assert routed_plan.prep_at is not None
+        assert routed_plan.route.total_duration_seconds > sum(
+            leg.duration_seconds for leg in routed_plan.route.legs
+        )
+        assert payload["plans"] == [{
+            "event_id": "travel-event", "title": "Meeting",
+            "start": routed_plan.event.start.isoformat(),
+            "leave_at": routed_plan.leave_at.isoformat(),
+            "prep_at": routed_plan.prep_at.isoformat(),
+            "error": error, "resolved_source": None,
+            "travel_minutes": 30.5,
+            "depart_at": routed_plan.route.depart_at.isoformat(),
+            "arrive_at": routed_plan.route.arrive_at.isoformat(),
+            "leave_buffer_minutes": None,
+        }]
+        assert payload["plans"][0]["arrive_at"].endswith("-04:00")
+        assert payload["pings"] == []
+        assert payload["current_location"] is None
+        assert set(payload) == {"now", "plans", "pings", "current_location", "geocode_cache"}
+
+    @pytest.mark.parametrize("error", ["no_route", "location_unresolved"])
+    def test_status_json_no_route(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan, error: str,
+    ) -> None:
+        routed_plan.route = None
+        routed_plan.error = error
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        assert entry["travel_minutes"] is None
+        assert entry["arrive_at"] is None
+        assert entry["depart_at"] is None
+        assert entry["error"] == error
+        # Even populated timing fields cannot supply a missing route duration.
+        assert routed_plan.leave_at is not None
+        assert entry["leave_at"] == routed_plan.leave_at.isoformat()
+
+    @pytest.mark.parametrize("missing", ["arrival_time", "duration", "both"])
+    def test_status_json_unknown_provider_timing(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan, missing: str,
+    ) -> None:
+        from commutecompass.routing import _parse_route
+
+        assert routed_plan.route is not None
+        expected_arrival = routed_plan.route.arrive_at.isoformat()
+        provider = routed_plan.route.raw_provider_payload
+        assert provider is not None
+        leg = provider["routes"][0]["legs"][0]
+        if missing in ("arrival_time", "both"):
+            del leg["arrival_time"]
+        if missing in ("duration", "both"):
+            del leg["duration"]
+        routed_plan.route = _parse_route(provider)
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        # True endpoint timestamps provide duration even if duration.value is
+        # absent; neither schedule buffers nor placeholder timestamps do.
+        assert entry["travel_minutes"] == (None if missing == "both" else 30.5)
+        assert entry["arrive_at"] == (
+            None if missing in ("arrival_time", "both") else expected_arrival
+        )
+
+    def test_status_json_cached_route(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan,
+    ) -> None:
+        assert routed_plan.route is not None
+        routed_plan.route.approximate = True
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        assert entry["travel_minutes"] == 30.5
+        assert entry["arrive_at"] is None
+        assert entry["depart_at"] is None
+
+    def test_status_json_estimated_route(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan,
+    ) -> None:
+        from commutecompass.models import Origin, ResolvedLocation
+        from commutecompass.routing import estimate_route
+
+        route = estimate_route(
+            Origin(address="Home", lat=40.7, lon=-74.0),
+            ResolvedLocation(kind="address", value="Work", lat=40.75, lon=-73.98,
+                             source="geocode"),
+            routed_plan.event.start,
+        )
+        assert route is not None
+        routed_plan.route = route
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        assert entry["travel_minutes"] == route.total_duration_seconds / 60.0
+        assert entry["depart_at"] == route.depart_at.isoformat()
+        assert entry["arrive_at"] == route.arrive_at.isoformat()
+
+    @pytest.mark.parametrize("buffers", [(0, 0), (13, 4)])
+    def test_status_json_buffered_planner_relationships(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan,
+        scheduled_directions: dict[str, Any], buffers: tuple[int, int],
+    ) -> None:
+        from commutecompass.models import ResolvedLocation
+        from commutecompass.planner import plan_event
+        from commutecompass.routing import _parse_route
+        from commutecompass.weather import WeatherBuffer
+
+        route = _parse_route(scheduled_directions)
+        assert route is not None
+        cfg = self._config(tmp_path)
+        cfg.prep.safety_buffer_minutes = buffers[0]
+        event = routed_plan.event.model_copy(update={
+            "start": datetime(2026, 10, 3, 15, tzinfo=NYC_TZ),
+            "end": datetime(2026, 10, 3, 16, tzinfo=NYC_TZ),
+        })
+        with (
+            mock.patch("commutecompass.resolver.resolve", return_value=ResolvedLocation(
+                kind="address", value="Work", source="geocode",
+            )),
+            mock.patch("commutecompass.routing.plan_route", return_value=route),
+            mock.patch("commutecompass.planner.now_nyc", return_value=event.start.replace(hour=9)),
+            mock.patch("commutecompass.weather.weather_buffer",
+                       return_value=WeatherBuffer(buffers[1], None)),
+        ):
+            plan = plan_event(event, cfg, mock.MagicMock(), mock.MagicMock(), mock.MagicMock())
+        entry = self._status_payload(runner, tmp_path, plan)["plans"][0]
+        depart = datetime.fromisoformat(entry["depart_at"])
+        arrive = datetime.fromisoformat(entry["arrive_at"])
+        leave = datetime.fromisoformat(entry["leave_at"])
+        assert entry["travel_minutes"] == 3095 / 60.0
+        assert arrive.timestamp() - depart.timestamp() == entry["travel_minutes"] * 60
+        assert depart.timestamp() - leave.timestamp() == sum(buffers) * 60
+        assert entry["leave_buffer_minutes"] == sum(buffers)
+
+    def test_status_preserves_legacy_leave_time(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan,
+        scheduled_directions: dict[str, Any],
+    ) -> None:
+        from commutecompass.routing import _parse_route
+
+        routed_plan.route = _parse_route(scheduled_directions)
+        assert routed_plan.route is not None
+        routed_plan.route.provider_route_index = None
+        routed_plan.leave_at = datetime(2026, 10, 3, 13, 55, 25, tzinfo=NYC_TZ)
+        routed_plan.event.start = datetime(2026, 10, 3, 15, tzinfo=NYC_TZ)
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        assert entry["leave_at"] == "2026-10-03T13:55:25-04:00"
+        assert entry["depart_at"] == "2026-10-03T13:49:08-04:00"
+        assert entry["arrive_at"] == "2026-10-03T14:40:43-04:00"
+        assert entry["travel_minutes"] == 3095 / 60.0
+        assert entry["leave_buffer_minutes"] is None
+
+    def test_status_untimed_bicycling_duration(
+        self, runner: CliRunner, tmp_path: Path, routed_plan: Plan,
+        scheduled_directions: dict[str, Any],
+    ) -> None:
+        from commutecompass.routing import _parse_route
+
+        candidate = scheduled_directions["routes"][0]
+        leg = candidate["legs"][0]
+        del leg["departure_time"]
+        del leg["arrival_time"]
+        leg["duration"]["value"] = 2620
+        leg["steps"] = [{"travel_mode": "BICYCLING", "duration": {"value": 2620}}]
+        routed_plan.route = _parse_route({"status": "OK", "routes": [candidate]})
+        entry = self._status_payload(runner, tmp_path, routed_plan)["plans"][0]
+        assert entry["travel_minutes"] == 2620 / 60.0
+        assert entry["depart_at"] is None and entry["arrive_at"] is None
 
 
 # ─────────── geocode-cache command ─────────────────────────────────────────────

@@ -226,11 +226,17 @@ class Route(BaseModel):
     transfers: int = 0
     fare_estimate_cents: Optional[int] = None
     raw_provider_payload: Optional[dict[str, Any]] = None
+    # Index of the selected alternative in raw_provider_payload. Older saved
+    # routes omit this and must be matched by their duration and timestamps.
+    provider_route_index: Optional[int] = Field(default=None, ge=0)
     # True when the route did not come from a live Directions response — either
     # a previously-cached route reused during an API outage, or a coarse
     # distance/speed estimate.  Surfaced in the digest so the user knows the
     # timing is best-effort rather than schedule-accurate.
     approximate: bool = False
+    # Distinguishes cache reuse from a freshly computed coarse estimate, even
+    # when a custom routing backend supplies no raw provider payload.
+    from_cache: bool = False
 
 
 class Plan(BaseModel):
@@ -239,6 +245,9 @@ class Plan(BaseModel):
     leave_at: Optional[datetime] = None
     prep_at: Optional[datetime] = None
     error: Optional[str] = None
+    # Safety + weather + realtime buffer used when this plan was computed.
+    # None for older plans; current config cannot recover their original buffer.
+    leave_buffer_minutes: Optional[int] = Field(default=None, ge=0)
     # Extra minutes folded into the buffer for expected precipitation, plus a
     # short reason ("rain"/"snow") for display.  Zero when weather is disabled
     # or the forecast is clear.

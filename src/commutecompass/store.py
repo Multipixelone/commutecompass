@@ -323,6 +323,10 @@ class Store:
                 "leave_at": advance(current.leave_at),
                 "prep_at": advance(current.prep_at) if current.prep_at is not None else None,
                 "realtime_buffer_minutes": minutes, "realtime_reason": reason,
+                "leave_buffer_minutes": (
+                    current.leave_buffer_minutes + minutes - current.realtime_buffer_minutes
+                    if current.leave_buffer_minutes is not None else None
+                ),
             })
             conn.execute(
                 "UPDATE plans SET plan_json = ?, planned_at = ? WHERE event_id = ?",

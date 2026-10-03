@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -36,6 +37,8 @@ from commutecompass.planner import (
 from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.timeutil import NYC_TZ
+from commutecompass.routing import _parse_route, route_timing
+from commutecompass.weather import WeatherBuffer
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────────
@@ -114,7 +117,7 @@ def resolved_location() -> ResolvedLocation:
 
 @pytest.fixture
 def mock_route(nyc_now: datetime) -> Route:
-    depart = nyc_now.replace(hour=13, minute=45)
+    depart = nyc_now.replace(hour=13, minute=35)
     arrive = nyc_now.replace(hour=14, minute=30)
     return Route(
         legs=[
@@ -157,6 +160,132 @@ def mock_route(nyc_now: datetime) -> Route:
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("buffers", [(0, 0), (13, 0), (5, 7)])
+@pytest.mark.parametrize("realtime_minutes", [0, 6])
+def test_plan_respects_selected_transit_departure(
+    config: Config, event: Event, resolved_location: ResolvedLocation,
+    scheduled_directions: dict[str, Any], buffers: tuple[int, int], realtime_minutes: int,
+) -> None:
+    from commutecompass.realtime import RealtimeDelay
+
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    safety, weather = buffers
+    config.prep.safety_buffer_minutes = safety
+    event.start = datetime(2026, 10, 3, 15, tzinfo=NYC_TZ)
+    event.end = event.start + timedelta(hours=1)
+    with (
+        patch("commutecompass.resolver.resolve", return_value=resolved_location),
+        patch("commutecompass.routing.plan_route", return_value=route),
+        patch("commutecompass.weather.weather_buffer", return_value=WeatherBuffer(weather, None)),
+        patch("commutecompass.realtime.realtime_delay", return_value=RealtimeDelay(
+            realtime_minutes, "measured delay" if realtime_minutes else None,
+            "observed",
+        )),
+        patch("commutecompass.planner.now_nyc", return_value=event.start.replace(hour=9)),
+    ):
+        result = plan_event(event, config, MagicMock(), MagicMock(), MagicMock())
+    assert result.error is None
+    assert result.leave_at is not None
+    total_buffer = sum(buffers) + realtime_minutes
+    assert result.leave_at == route.depart_at - timedelta(minutes=total_buffer)
+    assert result.prep_at == result.leave_at - timedelta(minutes=config.prep.prep_minutes)
+    assert result.leave_buffer_minutes == total_buffer
+    assert result.realtime_buffer_minutes == realtime_minutes
+    timing = route_timing(result.route)
+    assert timing.duration_seconds == 3095
+    assert timing.depart_at is not None and timing.arrive_at is not None
+    assert timing.arrive_at.timestamp() - timing.depart_at.timestamp() == 3095
+    assert result.leave_at is not None
+    assert (timing.depart_at - result.leave_at).total_seconds() == total_buffer * 60
+    if buffers == (13, 0) and realtime_minutes == 0:
+        assert result.leave_at.isoformat() == "2026-10-03T13:36:08-04:00"
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_duration_based_planning_without_current_schedule(
+    config: Config, event: Event, resolved_location: ResolvedLocation,
+    scheduled_directions: dict[str, Any], cached: bool,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    if not cached:
+        leg = candidate["legs"][0]
+        del leg["departure_time"]
+        del leg["arrival_time"]
+        leg["duration"]["value"] = 2620
+        leg["steps"] = [{"travel_mode": "BICYCLING", "duration": {"value": 2620}}]
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    # Cached timestamps from October 3 must not anchor October 4's alarm.
+    event.start = datetime(2026, 10, 4, 18, tzinfo=NYC_TZ)
+    event.end = event.start + timedelta(hours=1)
+    store = MagicMock()
+    store.get_cached_route.return_value = route
+    with (
+        patch("commutecompass.resolver.resolve", return_value=resolved_location),
+        patch("commutecompass.routing.plan_route", return_value=None if cached else route),
+        patch("commutecompass.planner.now_nyc", return_value=event.start.replace(hour=9)),
+    ):
+        result = plan_event(event, config, MagicMock(), store, MagicMock())
+    assert result.error is None
+    seconds = 3095 if cached else 2620
+    assert result.leave_at == event.start - timedelta(
+        seconds=seconds, minutes=config.prep.safety_buffer_minutes,
+    )
+    assert result.leave_buffer_minutes == config.prep.safety_buffer_minutes
+    timing = route_timing(result.route)
+    assert timing.duration_seconds == seconds
+    assert timing.depart_at is None and timing.arrive_at is None
+
+
+def test_corrected_schedule_triggers_too_imminent(
+    config: Config, event: Event, resolved_location: ResolvedLocation,
+    scheduled_directions: dict[str, Any],
+) -> None:
+    route = _parse_route(scheduled_directions)
+    assert route is not None
+    config.prep.safety_buffer_minutes = 13
+    event.start = datetime(2026, 10, 3, 15, tzinfo=NYC_TZ)
+    event.end = event.start + timedelta(hours=1)
+    # The old event-start calculation would leave at 13:55:25 and accept this.
+    with (
+        patch("commutecompass.resolver.resolve", return_value=resolved_location),
+        patch("commutecompass.routing.plan_route", return_value=route),
+        patch("commutecompass.planner.now_nyc", return_value=event.start.replace(hour=13, minute=45)),
+    ):
+        result = plan_event(event, config, MagicMock(), MagicMock(), MagicMock())
+    assert result.error == "too_imminent"
+    assert result.leave_buffer_minutes == 13
+
+
+@pytest.mark.parametrize("buffer_minutes", [0, 30])
+def test_scheduled_buffers_use_elapsed_minutes_across_dst(
+    config: Config, event: Event, resolved_location: ResolvedLocation,
+    scheduled_directions: dict[str, Any], buffer_minutes: int,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    departure = datetime(2026, 11, 1, 1, 10, tzinfo=NYC_TZ, fold=1)
+    arrival = datetime(2026, 11, 1, 1, 50, tzinfo=NYC_TZ, fold=1)
+    leg = candidate["legs"][0]
+    leg["departure_time"]["value"] = int(departure.timestamp())
+    leg["arrival_time"]["value"] = int(arrival.timestamp())
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    config.prep.safety_buffer_minutes = buffer_minutes
+    event.start = datetime(2026, 11, 1, 2, tzinfo=NYC_TZ)
+    event.end = event.start + timedelta(hours=1)
+    with (
+        patch("commutecompass.resolver.resolve", return_value=resolved_location),
+        patch("commutecompass.routing.plan_route", return_value=route),
+        patch("commutecompass.planner.now_nyc",
+              return_value=datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=0)),
+    ):
+        result = plan_event(event, config, MagicMock(), MagicMock(), MagicMock())
+    assert result.error is None
+    assert result.leave_at is not None and result.prep_at is not None
+    assert departure.timestamp() - result.leave_at.timestamp() == buffer_minutes * 60
+    assert result.leave_at.timestamp() - result.prep_at.timestamp() == config.prep.prep_minutes * 60
 
 def test_plan_event_resolves_location_and_computes_timings(
     event: Event,
@@ -300,6 +429,9 @@ def test_plan_event_reuses_cached_route_when_live_routing_down(
     assert result.error is None
     assert result.route is not None
     assert result.route.approximate is True
+    assert result.route.from_cache is True
+    assert route_timing(result.route).depart_at is None
+    assert route_timing(result.route).arrive_at is None
     assert result.leave_at is not None
     store.get_cached_route.assert_called_once()
 

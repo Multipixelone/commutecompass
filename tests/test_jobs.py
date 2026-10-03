@@ -54,6 +54,7 @@ def refresh_fixture(store: Store, now: datetime, *, leave_minutes: int = 30) -> 
                                        arrive_at=leg.arrive_at, total_duration_seconds=1200),
                 leave_at=now + timedelta(minutes=leave_minutes),
                 prep_at=now + timedelta(minutes=leave_minutes - 10),
+                leave_buffer_minutes=12,
                 weather_buffer_minutes=7, weather_reason="rain")
     store.upsert_plan(plan)
     for kind, fire_at in [("prep", plan.prep_at), ("leave", plan.leave_at)]:
@@ -207,6 +208,7 @@ def test_poll_refresh_advances_in_place_before_dispatch(
     assert updated.leave_at.timestamp() == plan.leave_at.timestamp() - minutes * 60
     assert updated.weather_buffer_minutes == 7 and updated.weather_reason == "rain"
     assert updated.realtime_buffer_minutes == minutes
+    assert updated.leave_buffer_minutes == 12 + minutes
     with store._connect() as conn:
         rows = conn.execute("SELECT id, kind, fire_at, fired, send_attempts FROM pings ORDER BY id").fetchall()
     assert len(rows) == 2 and {r[0] for r in rows} == {"prep", "leave"}
@@ -486,6 +488,7 @@ def test_replan_safety_keeps_only_same_journey_padding_and_manual_interval(store
     old.prep_at = old.leave_at - timedelta(minutes=35)  # Manual extra prep.
     new = old.model_copy(deep=True)
     new.realtime_buffer_minutes = 2
+    new.leave_buffer_minutes = 19  # Safety 5 + weather 12 + realtime 2.
     new.realtime_reason = "Q less late"
     new.weather_buffer_minutes = 12  # Five additional weather minutes.
     new.leave_at = old.leave_at + timedelta(minutes=8 - 5)
@@ -500,6 +503,7 @@ def test_replan_safety_keeps_only_same_journey_padding_and_manual_interval(store
     assert retained.prep_at == retained.leave_at - timedelta(minutes=35)
     assert retained.realtime_buffer_minutes == 10 and retained.realtime_reason == "Q late"
     assert retained.weather_buffer_minutes == 12
+    assert retained.leave_buffer_minutes == 27
     assert retained.route is not None and retained.route.legs[0].gtfs_trip_id is None
     new.route.legs[0].line = "N"
     different = _retain_replan_safety(old, new)

@@ -15,6 +15,7 @@ from commutecompass.models import CalendarSpec
 
 if TYPE_CHECKING:
     from commutecompass.config import Config
+    from commutecompass.models import Route
     from commutecompass.store import Store
 
 # Default config path
@@ -414,6 +415,20 @@ def where(ctx: click.Context) -> None:
 # ─────────── status ──────────────────────────────────────────────────────────
 
 
+def _route_travel_fields(route: Optional[Route]) -> dict[str, float | str | None]:
+    """Export the same persisted route timing used by the planner."""
+    from commutecompass.routing import route_timing
+
+    timing = route_timing(route)
+    return {
+        "travel_minutes": (
+            timing.duration_seconds / 60.0 if timing.duration_seconds is not None else None
+        ),
+        "depart_at": timing.depart_at.isoformat() if timing.depart_at is not None else None,
+        "arrive_at": timing.arrive_at.isoformat() if timing.arrive_at is not None else None,
+    }
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human-readable text.")
 @click.pass_context
@@ -448,6 +463,8 @@ def status(ctx: click.Context, as_json: bool) -> None:
                 "start": p.event.start.isoformat(),
                 "leave_at": p.leave_at.isoformat() if p.leave_at else None,
                 "prep_at": p.prep_at.isoformat() if p.prep_at else None,
+                **_route_travel_fields(p.route),
+                "leave_buffer_minutes": p.leave_buffer_minutes,
                 "error": p.error,
                 "resolved_source": (
                     p.event.location_resolved.source
