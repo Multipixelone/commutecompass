@@ -1126,7 +1126,7 @@ def realtime_cmd(ctx: click.Context) -> None:
         click.echo("No planned routes today — nothing to check.")
         return
 
-    any_delay = False
+    any_failure = False
     for plan in plans_with_routes:
         assert plan.route is not None
         delay = realtime_delay(plan.route, plan.event.start, cfg.realtime)
@@ -1135,14 +1135,16 @@ def realtime_cmd(ctx: click.Context) -> None:
             board_desc = f"{boarding.line} from {boarding.departure_stop}"
         else:
             board_desc = "(no transit leg)"
-        if delay.reason:
-            any_delay = True
-            click.echo(f"{plan.event.title}: {board_desc} → {delay.reason}")
-        else:
-            click.echo(f"{plan.event.title}: {board_desc} → on time")
-
-    if not any_delay:
-        click.echo("All boarding legs on time.")
+        description = delay.reason or delay.detail or delay.status.replace("_", " ")
+        click.echo(f"{plan.event.title}: {board_desc} → {delay.status}: {description}")
+        if delay.departures:
+            times = ", ".join(d.strftime("%I:%M %p").lstrip("0") for d in delay.departures)
+            click.echo(f"  Feed departures (not a measured delay): {times}")
+        if delay.feed_failed:
+            any_failure = True
+            click.echo("  One or more realtime feeds failed; results may be partial.")
+    if any_failure:
+        sys.exit(EXIT_TRANSIENT)
 
 
 # ─────────── bot (stub) ──────────────────────────────────────────────────────

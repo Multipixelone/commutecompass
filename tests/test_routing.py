@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from commutecompass.models import Origin, ResolvedLocation, Route
+from commutecompass.config import RealtimeConfig
+from commutecompass.realtime import FetchResult, Predictions, _accumulate, realtime_delay
+from commutecompass.store import Store
 from commutecompass.routing import (
     _parse_route,
     _unix,
@@ -473,6 +477,138 @@ class TestParseRoute:
 
 
 # ─── Test plan_route ──────────────────────────────────────────────────────────
+
+def _boarding_predictions(boarding: datetime, observed: datetime) -> FetchResult:
+    from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+
+    feed = gtfs.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = int(observed.timestamp())
+    entity = feed.entity.add()
+    entity.id = "boarding"
+    tu = entity.trip_update
+    tu.timestamp = int(observed.timestamp())
+    tu.trip.trip_id = "boarding"
+    tu.trip.route_id = "C"
+    tu.trip.start_date = boarding.strftime("%Y%m%d")
+    tu.trip.direction_id = 0
+    stu = tu.stop_time_update.add()
+    stu.stop_id = "A41N"
+    stu.stop_sequence = 10
+    stu.departure.time = int((boarding + timedelta(minutes=6)).timestamp())
+    stu.departure.delay = 360
+    parsed = gtfs.FeedMessage.FromString(feed.SerializeToString())
+    predictions: Predictions = {}
+    usable = _accumulate(parsed, predictions, "MTA Subway", now=observed)
+    return FetchResult(predictions, usable_feeds=int(usable))
+
+
+def _add_boarding_identity(route: Route, boarding: datetime) -> None:
+    # Independently validated context, NOT metadata invented by the parser.
+    transit = route.legs[1]
+    assert transit.gtfs_trip_id is None
+    transit.gtfs_trip_id = "boarding"
+    transit.gtfs_route_id = "C"
+    transit.gtfs_start_date = boarding.strftime("%Y%m%d")
+    transit.gtfs_boarding_stop_id = "A41N"
+    transit.gtfs_boarding_stop_sequence = 10
+    transit.gtfs_direction_id = 0
+
+
+def test_nested_boarding_time_drives_realtime(directions_sample_data: dict[str, Any]) -> None:
+    boarding = datetime.fromtimestamp(1746864300, tz=NYC_TZ)
+    planning_time = boarding - timedelta(hours=2)
+    with patch("commutecompass.routing.datetime") as clock:
+        clock.now.return_value = planning_time
+        clock.fromtimestamp.side_effect = datetime.fromtimestamp
+        route = _parse_route(directions_sample_data)
+    assert route is not None
+    transit = route.legs[1]
+    assert transit.depart_at == boarding
+    assert transit.depart_at.tzinfo == NYC_TZ
+    assert transit.arrive_at == datetime.fromtimestamp(1746865500, tz=NYC_TZ)
+    assert transit.scheduled_departure_valid
+    assert route.depart_at == datetime.fromtimestamp(1746864000, tz=NYC_TZ)
+    assert route.arrive_at == datetime.fromtimestamp(1746865680, tz=NYC_TZ)
+
+    _add_boarding_identity(route, boarding)
+
+    def predictions(urls: list[str], system: str) -> FetchResult:
+        return _boarding_predictions(boarding, planning_time)
+
+    delay = realtime_delay(
+        route, planning_time, RealtimeConfig(enabled=True), fetcher=predictions,
+        clock=lambda: planning_time,
+    )
+    assert (delay.minutes, delay.reason, delay.status) == (6, "C running ~6 min late", "observed")
+
+
+@pytest.mark.parametrize(
+    "timing",
+    ["missing", None, {}, {"text": "8:05 AM"}, {"value": None}, {"value": 0}, {"value": -1},
+     {"value": True}, {"value": "unknown"}, {"value": float("nan")},
+     {"value": float("inf")}, {"value": 1e30}, "placeholder"],
+)
+def test_invalid_boarding_time_fails_open(
+    directions_sample_data: dict[str, Any], timing: Any
+) -> None:
+    step = directions_sample_data["routes"][0]["legs"][0]["steps"][1]
+    step["transit_details"]["departure_time"] = timing
+    step["transit_details"]["arrival_time"] = timing
+    if timing == "missing":
+        del step["transit_details"]["departure_time"]
+        del step["transit_details"]["arrival_time"]
+    # Incorrect step-level times must not rescue a missing boarding schedule.
+    step["departure_time"] = {"value": 1746864300}
+    planning_time = datetime.fromtimestamp(1746864300, tz=NYC_TZ) - timedelta(hours=2)
+    with patch("commutecompass.routing.datetime") as clock:
+        clock.now.return_value = planning_time
+        clock.fromtimestamp.side_effect = datetime.fromtimestamp
+        route = _parse_route(directions_sample_data)
+    assert route is not None
+    assert route.total_duration_seconds == 1680
+    assert not route.legs[1].scheduled_departure_valid
+    assert route.legs[1].depart_at == planning_time
+
+    def no_fetch(urls: list[str], system: str) -> FetchResult:
+        pytest.fail("Untrusted boarding time must not fetch realtime predictions")
+
+    delay = realtime_delay(
+        route, planning_time, RealtimeConfig(enabled=True), fetcher=no_fetch
+    )
+    assert delay.minutes == 0 and delay.status == "unmatched"
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_cached_boarding_timing_validity(
+    directions_sample_data: dict[str, Any], tmp_path: Path, legacy: bool
+) -> None:
+    route = _parse_route(directions_sample_data)
+    assert route is not None
+    store = Store(tmp_path / "routes.sqlite")
+    store.init_schema()
+    boarding = route.legs[1].depart_at
+    _add_boarding_identity(route, boarding)
+    store.cache_route("origin", "destination", "transit", route)
+    if legacy:
+        payload = route.model_dump(mode="json")
+        for leg in payload["legs"]:
+            del leg["scheduled_departure_valid"]
+        # Simulate the pre-fix parser's fabricated "now" timestamp.
+        payload["legs"][1]["depart_at"] = (boarding - timedelta(hours=2)).isoformat()
+        with store._connect() as conn:
+            conn.execute("UPDATE route_cache SET route_json = ?", (json.dumps(payload),))
+    cached = store.get_cached_route("origin", "destination", "transit")
+    assert cached is not None
+    assert cached.total_duration_seconds == route.total_duration_seconds
+    assert cached.legs[1].scheduled_departure_valid is (not legacy)
+
+    def predictions(urls: list[str], system: str) -> FetchResult:
+        return _boarding_predictions(boarding, boarding)
+
+    delay = realtime_delay(cached, boarding, RealtimeConfig(enabled=True), fetcher=predictions,
+                           clock=lambda: boarding)
+    assert delay.minutes == (0 if legacy else 6)
 
 class TestPlanRoute:
     """Tests for plan_route function."""

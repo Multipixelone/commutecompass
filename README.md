@@ -27,12 +27,48 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`config show`](./src/commutecompass/cli.py) / [`config set KEY VALUE`](./src/commutecompass/cli.py) / [`config unset KEY`](./src/commutecompass/cli.py) / [`config reset`](./src/commutecompass/cli.py) — view or edit allowlisted config fields
 - [`geocode-cache`](./src/commutecompass/cli.py) — inspect or clear the geocode cache
 - [`mta-alerts`](./src/commutecompass/cli.py) — print current MTA alerts
+- [`realtime`](./src/commutecompass/cli.py) — read-only boarding-delay diagnostics for saved plans
 - [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
 - [`where`](./src/commutecompass/cli.py) — print the latest stored current location
 
 ## Configuration
 
 See [`examples/config.toml`](./examples/) and [`examples/env.example`](./examples/) for the full configuration schema. Architecture and implementation notes live in [`AGENTS.md`](./AGENTS.md).
+
+## Real-time delays: capability and limitations
+
+Enable `[realtime].enabled` to query GTFS-RT trip updates. Automatic padding
+requires a **fresh, matched, measured departure delay**: independently validated
+GTFS trip/service date, route, direction, boarding platform and stop sequence,
+plus explicit departure delay/time agreeing with the saved scheduled departure.
+Producer observations must be no older than five minutes or more than 60 seconds
+ahead of the observation clock. Nearest trains and fuzzy station names cannot
+establish this correspondence.
+
+**Normal Directions plans currently lack validated GTFS trip mapping, so
+automatic padding is unsupported for those plans** and safely remains zero.
+This is not a fully complete automatic-delay feature; no static GTFS ingestion
+or LIRR branch mapping is provided. Feed departures can be informational only.
+
+`commutecompass realtime` reports `observed`, `unmatched`, `unavailable`,
+`not_applicable`, `cancelled`, or `skipped`. Unknown is not on-time: only an
+`observed` measurement can establish zero delay. Fetch/parse failures, including
+partial failures, return `EXIT_TRANSIENT` (75), while retaining usable results.
+The diagnostic command never changes alarms.
+
+Normal `poll` refreshes enabled realtime before due-ping dispatch for active
+saved plans with pending prep/leave pings and `leave_at` from 15 minutes overdue
+to 60 minutes ahead. Only increased fresh observed buffers advance alarms;
+unknown, failed or smaller observations never postpone them. Updates preserve
+pending IDs, retry counts and manual offsets, leave fired pings untouched, and
+clamp newly urgent pings to now. Ordinary Directions plans remain unmatched.
+
+Fetching uses a five-second monotonic admission budget per system/feed set,
+with at most two attempts per feed and no retry backoff. Each request divides
+the smaller of two seconds or the remaining budget across HTTPX timeout phases.
+Later feeds are skipped on exhaustion; partial observations and failure status
+are retained. This bounds new I/O admission, not slow streaming/parsing wall
+time (HTTPX timeouts are phase/inactivity limits). Results cache for 60 seconds.
 
 ## OpenClaw integration
 

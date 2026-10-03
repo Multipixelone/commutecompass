@@ -49,6 +49,60 @@ to stdout; relay that stdout back to the user.
 | "reset all my config tweaks"                                             | `scripts/config-reset.sh --yes`                   |
 | "why didn't I get my morning ping?" / "show me the current state"        | `scripts/status.sh` (text) or `scripts/status.sh --json` |
 
+### Real-time diagnostic interpretation
+
+`realtime` reports each boarding leg as `observed`, `unavailable`, `unmatched`,
+`not_applicable`, `cancelled`, or `skipped`. Zero padding is **not** evidence of
+on-time service. Feed fetch/parse failures exit **75**, including partial failures;
+successful observations from other feeds/plans are still printed. Disabled mode
+continues to report disabled and exit 0. Stale/unsupported feeds report unavailable
+without treating them as a successful on-time observation.
+
+Alarm padding requires independently validated GTFS trip/service date, route,
+direction, boarding platform and stop sequence, plus an explicit departure delay
+and predicted time whose derived scheduled time equals the plan. Ordinary
+Directions routes do not supply this identity and therefore safely report
+unmatched (zero padding). Absolute feed departures may be shown as information,
+never as a measured delay or as confirmation of the planned train/direction.
+No LIRR branch mapping is assumed; ambiguous same-name stations are rejected.
+
+Producer headers and supplied trip-update timestamps must be at most 5 minutes
+old and at most 60 seconds ahead of the actual observation clock, independent of
+the planned event time. A missing header is ineligible; a missing trip-update
+timestamp uses the header. Differential/deleted updates are not applied; cancelled,
+skipped and NO_DATA service cannot add padding. This command does not refresh
+scheduled pings or establish a new arrival time.
+
+Normal `poll` independently refreshes enabled realtime **before due-alarm
+dispatch**, without HA or a new service alert. It considers persisted active
+plans with a pending prep/leave alarm, a future event start, and a leave time
+between 15 minutes overdue and 60 minutes ahead. It reuses the stored route
+(no Directions replan), with the existing 60-second per-system feed cache;
+freshness is measured against actual poll time. Only an `observed` padding
+increase is applied, including increases below the unrelated 5-minute service
+replan threshold. Unknown/unmatched/unavailable or smaller delays retain prior
+safety padding: alarms are never postponed by this refresh.
+
+Only the realtime-buffer delta advances saved prep/leave times, using UTC
+elapsed arithmetic; weather, travel and manual offsets remain intact. Plan
+and pending alarm updates share one SQLite write transaction with a stale-plan
+compare guard. Pending rows retain IDs and retry counts; fired rows are untouched.
+Newly urgent alarms clamp to now and can dispatch in the same poll; already-due
+alarms stay due. Repeated observations do not accumulate padding or recreate
+alarms. Existing quiet-hours, mute and bounded-send-retry rules still apply.
+
+**Capability limitation:** ordinary Directions plans still lack independently
+validated static-GTFS trip correspondence, so this refresh safely leaves them
+unmatched. Automatic measured-delay alarm adjustment is not fully functional for
+those routes until that separate correspondence capability exists. Diagnostic
+queries remain read-only and cannot supply or fabricate that identity.
+
+Feed fetching has a five-second monotonic admission budget per system/feed set.
+Each feed gets at most two attempts with no retry backoff; each attempt divides
+min(2 seconds, remaining budget) across HTTPX timeout phases. Exhaustion skips
+later feeds and preserves partial observations with failure status (exit 75).
+HTTPX phase/inactivity timeouts are not a hard streaming/parsing wall-time limit.
+
 ## Selectors
 
 Every event-scoped command (`plan-event`, `adjust`, `snooze`, `mute`,

@@ -91,6 +91,21 @@ def estimate_route(
     )
 
 
+def _scheduled_time(value: Any, nyc_tz: Any) -> Optional[datetime]:
+    """Read an explicit Directions timestamp, rejecting missing/placeholders."""
+    if not isinstance(value, dict):
+        return None
+    ts = value.get("value")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    if not math.isfinite(ts) or ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz=nyc_tz)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     """Parse a single step from a Directions leg into a TransitLeg.
 
@@ -110,8 +125,8 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
         return None
 
     duration_sec = step.get("duration", {}).get("value", 0)
-    departure_time = step.get("departure_time", {})
-    arrival_time = step.get("arrival_time", {})
+    departure_time = step.get("departure_time", {}) if mode != "TRANSIT" else {}
+    arrival_time = step.get("arrival_time", {}) if mode != "TRANSIT" else {}
 
     # Parse departure time - can be a datetime dict with "value" (unix timestamp)
     if isinstance(departure_time, dict):
@@ -126,6 +141,19 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     else:
         arrive_at = datetime.now(nyc_tz)
 
+    scheduled_departure_valid = False
+    transit_details = step.get("transit_details", {})
+    if not isinstance(transit_details, dict):
+        transit_details = {}
+    if mode == "TRANSIT":
+        # Transit step times live under transit_details, not on the step.
+        # Keep a display/planning fallback, but never treat it as a schedule.
+        scheduled_departure = _scheduled_time(transit_details.get("departure_time"), nyc_tz)
+        scheduled_arrival = _scheduled_time(transit_details.get("arrival_time"), nyc_tz)
+        scheduled_departure_valid = scheduled_departure is not None
+        depart_at = scheduled_departure or datetime.now(nyc_tz)
+        arrive_at = scheduled_arrival or datetime.now(nyc_tz)
+
     system: Optional[str] = None
     line: Optional[str] = None
     headsign: Optional[str] = None
@@ -134,7 +162,6 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     summary = ""
 
     if mode == "TRANSIT":
-        transit_details = step.get("transit_details", {})
         line_info = transit_details.get("line", {})
 
         # Detect system from vehicle type or agencies
@@ -200,6 +227,7 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
         summary=summary,
         departure_stop=departure_stop_name,
         arrival_stop=arrival_stop_name,
+        scheduled_departure_valid=scheduled_departure_valid,
     )
 
 

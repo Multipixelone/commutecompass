@@ -34,16 +34,22 @@ snow_buffer_minutes = 20
 precip_probability_threshold = 50
 
 [realtime]
-# Pad the departure buffer when the line you board is running late, using the
-# MTA GTFS-RT trip-update feeds.  Conservative: a live delay can only move your
-# leave time *earlier* (never later) and is capped at max_buffer_minutes.
+# Fresh measured delays require independently validated GTFS trip/boarding
+# identity. Normal Directions plans lack that mapping: automatic padding is
+# currently unsupported for those plans (zero is unknown, not on-time).
+# `realtime` is read-only; fetch/parse failures, even partial, exit 75.
+# Normal poll refreshes pending alarms before dispatch within -15..+60 minutes
+# of leave_at. Only increased observed buffers move alarms earlier, never later.
+# Five-second per-system fetch admission budget; usable partial results survive.
 # Disabled by default.  Feed URLs default to the current MTA endpoints — verify
 # against https://api.mta.info if matching stops working.
 enabled = false
 max_buffer_minutes = 15
 min_delay_minutes = 2
 match_window_minutes = 30
+# No nearest-departure inference: match_window_minutes cannot prove identity.
 fuzzy_threshold = 80
+# Fuzzy station names support information only, never measured alarm padding.
 # subway_tripupdate_urls / lirr_tripupdate_url / bus_tripupdate_url default to
 # the canonical MTA + OneBusAway trip-update feeds; override only if they move.
 

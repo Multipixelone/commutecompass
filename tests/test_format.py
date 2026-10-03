@@ -1212,6 +1212,22 @@ def test_format_digest_sanitises_malicious_title() -> None:
     assert len(title_lines) == 1
 
 
+def test_realtime_reason_sanitized_before_markdown_escaping() -> None:
+    from commutecompass.format import _sanitize_text
+
+    plan = make_plan(make_event(), make_route([]))
+    plan.realtime_buffer_minutes = 6
+    plan.realtime_reason = "Q\x00\x1b\u202e[*late*]\nnext\rline " + "x" * 300
+    out = format_digest([plan], [])
+    reason_line = next(line for line in out.splitlines() if "🚇" in line)
+    sanitized = _sanitize_text(plan.realtime_reason)
+    assert reason_line == "  🚇 " + escape_md(f"+6 min — {sanitized}")
+    assert len(sanitized) <= 200
+    assert all(ch not in out for ch in ("\x00", "\x1b", "\u202e"))
+    assert r"\[\*late\*\]" in reason_line
+    assert "x" * 201 not in out
+
+
 def test_format_digest_appends_operations_footer_when_notes_present() -> None:
     """The Operations footer surfaces degraded-service notes to the user."""
     event = make_event(id="ok", title="OK Event", start=datetime(2026, 5, 26, 9, 30, tzinfo=timezone.utc))

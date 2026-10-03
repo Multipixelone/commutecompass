@@ -290,7 +290,7 @@ def _format_plan_summary(plan: Plan) -> str:
 
     if plan.realtime_buffer_minutes > 0 and plan.realtime_reason:
         lines.append(
-            f"  🚇 {escape_md(f'+{plan.realtime_buffer_minutes} min — {plan.realtime_reason}')}"
+            f"  🚇 {escape_md(f'+{plan.realtime_buffer_minutes} min — {_sanitize_text(plan.realtime_reason)}')}"
         )
 
     lines.append("")

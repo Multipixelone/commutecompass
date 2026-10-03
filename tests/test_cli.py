@@ -181,6 +181,59 @@ class TestCommandHelp:
 # ─────────── bot stub ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("scenario,status,exit_code", [
+    ("failure", "unavailable", 75), ("unmatched", "unmatched", 0),
+    ("walk", "not_applicable", 0), ("future", "unmatched", 0),
+    ("no_coverage", "not_applicable", 0), ("observed", "observed", 0),
+    ("mixed", "unavailable", 75),
+])
+def test_enabled_realtime_diagnostic_status(
+    runner: CliRunner, minimal_toml: Path, env_block: None,
+    scenario: str, status: str, exit_code: int,
+) -> None:
+    from test_realtime import NOW, SCHED, feed_with, make_route, result_for
+    from commutecompass.realtime import FetchResult
+
+    minimal_toml.write_text(minimal_toml.read_text() + "\n[realtime]\nenabled = true\n")
+    route = make_route()
+    if scenario == "walk":
+        route = make_route(mode="WALKING")
+    elif scenario == "unmatched":
+        route = make_route(gtfs_trip_id=None)
+    elif scenario == "future":
+        route = make_route(depart_at=SCHED + timedelta(days=1))
+    event = Event(id="e", calendar_id="c", calendar_name="Calendar", title="First",
+                  start=SCHED + timedelta(minutes=30), end=SCHED + timedelta(hours=1))
+    plans = [Plan(event=event, route=route, leave_at=SCHED)]
+    if scenario == "mixed":
+        plans.append(Plan(event=event.model_copy(update={"title": "Second"}),
+                          route=make_route(system="LIRR"), leave_at=SCHED))
+    good_result = result_for(feed_with())
+
+    def fetch(urls: list[str], system: str) -> FetchResult:
+        if scenario == "failure" or (scenario == "mixed" and system == "LIRR"):
+            return FetchResult(failures=1)
+        return good_result
+
+    with mock.patch("commutecompass.store.Store.today_plans", return_value=plans), \
+         mock.patch("commutecompass.realtime._cached_fetch", side_effect=lambda urls, system, f: fetch(urls, system)), \
+         mock.patch("commutecompass.realtime.datetime") as clock:
+        clock.now.return_value = NOW
+        if scenario == "no_coverage":
+            with mock.patch("commutecompass.realtime._feed_urls", return_value=[]):
+                result = runner.invoke(cli, ["--config", str(minimal_toml), "realtime"])
+        else:
+            result = runner.invoke(cli, ["--config", str(minimal_toml), "realtime"])
+    assert result.exit_code == exit_code, result.output
+    assert status in result.output
+    assert "All boarding legs on time" not in result.output
+    if scenario == "mixed":
+        assert "First" in result.output and "observed" in result.output
+        assert "Second" in result.output and "unavailable" in result.output
+
+
+
+
 class TestBotStub:
     def test_bot_prints_not_yet_implemented(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["bot"])

@@ -202,6 +202,20 @@ class TransitLeg(BaseModel):
     # human-readable string, which breaks on stop names containing "to"/"and".
     departure_stop: Optional[str] = None
     arrival_stop: Optional[str] = None
+    # Only explicit provider boarding timestamps may drive realtime padding.
+    # Legacy persisted legs lack this field and must remain untrusted, while
+    # their durations can still be used for fail-open planning.
+    scheduled_departure_valid: bool = False
+    # Independently validated GTFS boarding identity, not inferred from names or
+    # headsigns. Directions does not currently provide this context. Defaults
+    # keep both legacy cached routes and ordinary Directions routes ineligible.
+    gtfs_trip_id: Optional[str] = None
+    gtfs_route_id: Optional[str] = None
+    gtfs_start_date: Optional[str] = None
+    gtfs_start_time: Optional[str] = None
+    gtfs_boarding_stop_id: Optional[str] = None
+    gtfs_boarding_stop_sequence: Optional[int] = None
+    gtfs_direction_id: Optional[int] = None
 
 
 class Route(BaseModel):

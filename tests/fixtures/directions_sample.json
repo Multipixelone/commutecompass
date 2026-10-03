@@ -30,12 +30,6 @@
               "duration": {
                 "value": 1200
               },
-              "departure_time": {
-                "value": 1746864300
-              },
-              "arrival_time": {
-                "value": 1746865500
-              },
               "start_location": {
                 "lat": 40.6970,
                 "lng": -73.9870
@@ -46,6 +40,14 @@
               },
               "html_instructions": "Take the C train toward Euclid Av",
               "transit_details": {
+                "departure_time": {
+                  "value": 1746864300,
+                  "time_zone": "America/New_York"
+                },
+                "arrival_time": {
+                  "value": 1746865500,
+                  "time_zone": "America/New_York"
+                },
                 "line": {
                   "name": "C",
                   "short_name": "C",

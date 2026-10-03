@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Callable, Optional
 
 from commutecompass.config import Config
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Minimum time difference to trigger a service update (in seconds)
 _REPLAN_THRESHOLD_SECONDS = 5 * 60
+
+# Independent of HA: refresh only active plans departing within an hour (or
+# overdue by at most the actionable send grace). No Directions replan here.
+_REALTIME_REFRESH_HORIZON_MINUTES = 60
 
 # How long to reuse a fetched MTA alert set inside the poll loop (in seconds).
 # Only applied when the caller did not inject a fetch_alerts_fn (tests bypass).
@@ -55,12 +60,12 @@ def run(
 
     Sequence (§6.15):
     1. Honor quiet hours — suppress prep/service_update pings (leave always fires)
-    2. Fire any due pings; mark fired on success
+    2. Refresh near-departure realtime padding, then atomically claim due pings
     3. Fetch fresh MTA alerts
     4. For each new alert affecting a today-plan:
        a. Re-plan the event
-       b. If route changed significantly: send service_update, upsert plan,
-          cancel old pings, schedule new ones
+        b. If route changed significantly: atomically reconcile the plan and
+           actionable pings, then send service_update (discard stale results)
        c. Mark alert seen for that event
 
     All external dependencies are injectable for testability.
@@ -162,23 +167,52 @@ def run(
     now = _now_fn()
     quiet_start = config.scheduling.quiet_hours_start
     quiet_end = config.scheduling.quiet_hours_end
-    in_quiet_hours = (
-        quiet_start is not None
-        and quiet_end is not None
-        and is_within_quiet_hours(now, quiet_start, quiet_end)
-    )
+    def quiet_at(at: "datetime") -> bool:
+        return (
+            quiet_start is not None
+            and quiet_end is not None
+            and is_within_quiet_hours(at, quiet_start, quiet_end)
+        )
+
+    # Refresh persisted routes BEFORE dispatch: newly urgent alarms fire this
+    # cycle. Unknown/unmatched/smaller observations retain existing padding.
+    if config.realtime.enabled:
+        from commutecompass.realtime import realtime_delay
+
+        for plan in _store.realtime_refresh_plans(
+            now, horizon_minutes=_REALTIME_REFRESH_HORIZON_MINUTES,
+            grace_seconds=_SEND_RETRY_GRACE_SECONDS,
+        ):
+            if plan.route is None or plan.error is not None:
+                continue
+            # The selection window is a prefetch snapshot; producer freshness
+            # uses a live clock, independently of scheduled route departures.
+            observation = realtime_delay(
+                plan.route, now, config.realtime, clock=_now_fn,
+            )
+            now = _now_fn()
+            if observation.status != "observed" or observation.minutes <= plan.realtime_buffer_minutes:
+                continue
+            try:
+                _store.increase_realtime_buffer(plan, observation.minutes, observation.reason, now)
+            except Exception as exc:
+                logger.warning("Realtime refresh persistence failed for %s: %s", plan.event.id, exc)
 
     # ── Phase 2: fire due pings ───────────────────────────────────────────────
     # Atomic claim-then-send: every ping we try to send is first claimed in a
-    # single UPDATE so two concurrent poll runs cannot both pick up the same
-    # row.  Failure modes are surfaced as warnings and counted in the summary;
-    # we deliberately do NOT retry on send failure (no retry storm).
+    # transaction returning its current payload, so concurrent refreshes cannot
+    # leave us sending a stale pending snapshot. Failures use bounded retries.
+    now = _now_fn()
     due_pings = _store.pending_pings(before=now)
-    for ping in due_pings:
-        # During quiet hours, only fire 'leave' pings — leave the row unfired
-        # so a future poll (after quiet hours end) can still claim it.
-        if in_quiet_hours and ping.kind != "leave":
-            logger.debug("Suppressing %s ping during quiet hours", ping.kind)
+    for candidate in due_pings:
+        now = _now_fn()
+        # Recheck the current deadline and quiet-hours kind atomically: a replan
+        # may have postponed this same ID after the pending snapshot was read.
+        ping = _store.claim_ping_entry(
+            candidate.id, now, leave_only=quiet_at(now), due_only=True,
+        )
+        if ping is None:
+            logger.debug("Ping %s already claimed or suppressed", candidate.id)
             continue
 
         # Honor `commutecompass mute <event>` / `mute --today`. The mute
@@ -186,20 +220,16 @@ def run(
         # We claim the ping anyway so the user's intent is recorded (it
         # doesn't re-fire on the next poll); the send is just skipped.
         if _store.is_muted(ping.event_id):
-            if _store.claim_ping(ping.id, now):
-                logger.info(
-                    "Muted event %s — skipping %s ping %s",
-                    ping.event_id,
-                    ping.kind,
-                    ping.id,
-                )
-            continue
-
-        if not _store.claim_ping(ping.id, now):
-            logger.debug("Ping %s already claimed by another runner", ping.id)
+            logger.info(
+                "Muted event %s — skipping %s ping %s",
+                ping.event_id,
+                ping.kind,
+                ping.id,
+            )
             continue
 
         sent_ok = _notifier.send(ping.message)
+        now = _now_fn()
         if sent_ok:
             logger.info("Fired ping %s (%s)", ping.id, ping.kind)
         else:
@@ -208,7 +238,9 @@ def run(
             # the next poll retries; otherwise leave it fired (give up) so a
             # broken notifier can't storm or deliver a stale alarm.
             attempt = ping.send_attempts + 1
-            within_grace = (now - ping.fire_at).total_seconds() <= _SEND_RETRY_GRACE_SECONDS
+            within_grace = (
+                now.astimezone(UTC) - ping.fire_at.astimezone(UTC)
+            ).total_seconds() <= _SEND_RETRY_GRACE_SECONDS
             retryable = (
                 ping.kind in _RETRYABLE_PING_KINDS
                 and attempt < _MAX_SEND_ATTEMPTS
@@ -247,14 +279,16 @@ def run(
         config.mta.bus_alerts_url,
     )
     alerts: list[Alert] | None = None
+    now = _now_fn()
     if _use_alerts_cache and _alerts_cache is not None:
         cached_at, cached_urls, cached_alerts = _alerts_cache
-        if cached_urls == url_key and (now - cached_at).total_seconds() < _MTA_CACHE_TTL_SECONDS:
+        cache_age = (now.astimezone(UTC) - cached_at.astimezone(UTC)).total_seconds()
+        if cached_urls == url_key and cache_age < _MTA_CACHE_TTL_SECONDS:
             alerts = cached_alerts
             logger.debug(
                 "Reusing cached MTA alerts (%d, age %.0fs)",
                 len(alerts),
-                (now - cached_at).total_seconds(),
+                cache_age,
             )
     if alerts is None:
         alerts = _fetch_alerts(
@@ -262,6 +296,7 @@ def run(
             lirr_url=url_key[1],
             bus_url=url_key[2],
         )
+        now = _now_fn()
         logger.debug("Fetched %d MTA alerts", len(alerts))
         if _use_alerts_cache:
             _alerts_cache = (now, url_key, alerts)
@@ -270,6 +305,9 @@ def run(
     today_plans = _store.today_plans()
 
     for plan in today_plans:
+        now = _now_fn()
+        if plan.event.start.astimezone(UTC) <= now.astimezone(UTC):
+            continue
         if plan.route is None:
             continue
         if plan.leave_at is None:
@@ -288,6 +326,9 @@ def run(
                 continue
 
             # New affecting alert — replan
+            now = _now_fn()
+            if plan.event.start.astimezone(UTC) <= now.astimezone(UTC):
+                break
             try:
                 new_plan = _plan_event_fn(
                     plan.event,
@@ -302,10 +343,15 @@ def run(
                 _store.mark_alert_seen(alert.id, plan.event.id)
                 continue
 
+            new_plan = _retain_replan_safety(plan, new_plan)
+            now = _now_fn()
             # Determine if the change warrants a service update
             route_changed = _route_significantly_different(plan, new_plan)
 
             if route_changed:
+                if not _store.reconcile_poll_replan(plan, new_plan, now):
+                    logger.debug("Discarding stale alert replan for %s", plan.event.id)
+                    break  # Leave alert unseen for a fresh snapshot next cycle.
                 # Daily dedup: if the same alert already triggered a
                 # service_update for any of today's events, the user has been
                 # told.  We still replan + reschedule pings (silent fix-up)
@@ -330,12 +376,7 @@ def run(
                         plan.event.id,
                     )
 
-                # Upsert new plan
-                _store.upsert_plan(new_plan)
-
-                # Cancel old pings and schedule new ones
-                _store.cancel_pings(plan.event.id)
-                _schedule_pings_for_plan(new_plan, _store, now)
+                plan = new_plan
             else:
                 # No significant change but still mark seen
                 logger.debug(
@@ -347,14 +388,18 @@ def run(
             _store.mark_alert_seen(alert.id, plan.event.id)
 
     # ── Phase 5: location-driven replan close to leave time ──────────────────
-    if config.home_assistant.enabled and not in_quiet_hours:
+    now = _now_fn()
+    if config.home_assistant.enabled and not quiet_at(now):
         from commutecompass.format import format_location_update
 
         window_seconds = config.home_assistant.replan_window_minutes * 60
         for plan in _store.today_plans():
+            now = _now_fn()
+            if plan.event.start.astimezone(UTC) <= now.astimezone(UTC):
+                continue
             if plan.leave_at is None or plan.leave_at <= now:
                 continue
-            if (plan.leave_at - now).total_seconds() > window_seconds:
+            if (plan.leave_at.astimezone(UTC) - now.astimezone(UTC)).total_seconds() > window_seconds:
                 continue
             try:
                 new_plan = _plan_event_fn(
@@ -369,27 +414,120 @@ def run(
                 logger.warning("Location replan failed for %s: %s", plan.event.id, exc)
                 continue
 
+            new_plan = _retain_replan_safety(plan, new_plan)
+            now = _now_fn()
             if not _location_update_significant(plan, new_plan):
                 continue
 
+            if not _store.reconcile_poll_replan(plan, new_plan, now):
+                logger.debug("Discarding stale location replan for %s", plan.event.id)
+                continue
             msg = format_location_update(plan, new_plan)
             if _notifier.send(msg):
                 logger.info("Sent location update for event %s", plan.event.id)
             else:
                 logger.warning("Location update send failed for event %s", plan.event.id)
 
-            _store.upsert_plan(new_plan)
-            _store.cancel_pings(plan.event.id)
-            _schedule_pings_for_plan(new_plan, _store, now)
-
     # ── Phase 6: heartbeat ────────────────────────────────────────────────────
     # Record that poll completed, and ping the external dead-man's-switch (if
     # configured) — the per-minute poll is the natural liveness signal.
-    _store.record_job_success("poll", now)
+    _store.record_job_success("poll", _now_fn())
     if config.monitoring.heartbeat_url:
         from commutecompass.monitoring import ping_heartbeat
 
         ping_heartbeat(config.monitoring.heartbeat_url)
+
+
+def _same_journey(old: Plan, new: Plan) -> bool:
+    """Compare structure and genuine schedules, not observation-time placeholders.
+
+    Walking/driving/bicycling step times are not schedules. Directions payloads
+    establish which transit and route-level times were explicit; the model only
+    has a departure-valid flag, not an arrival/route-time validity flag. Legacy
+    payload-free routes retain their stored schedule comparisons. Trust and GTFS
+    identity themselves are deliberately not journey fields.
+    """
+    if old.route is None or new.route is None:
+        return False
+
+    def explicit_time(plan: Plan, value: datetime, field: str, *, transit: bool) -> bool:
+        from commutecompass.routing import _scheduled_time
+
+        assert plan.route is not None
+        payload = plan.route.raw_provider_payload
+        if payload is None or payload.get("status") != "OK":
+            return not plan.route.approximate
+        for route in payload.get("routes", []):
+            legs = route.get("legs", [])
+            if transit:
+                candidates = [step.get("transit_details", {})
+                              for leg in legs for step in leg.get("steps", [])
+                              if step.get("travel_mode") == "TRANSIT"]
+            else:
+                candidates = [legs[0] if field == "departure_time" else legs[-1]] if legs else []
+            for candidate in candidates:
+                timestamp = _scheduled_time(candidate.get(field), UTC)
+                if timestamp is not None and timestamp == value.astimezone(UTC):
+                    return True
+        return False
+
+    def journey(plan: Plan) -> object:
+        assert plan.route is not None
+        location = plan.event.location_resolved
+        return (
+            (location.kind, location.value, location.lat, location.lon) if location else None,
+            plan.route.total_duration_seconds,
+            [(leg.mode, leg.system, leg.line, leg.headsign,
+              leg.duration_seconds, leg.departure_stop, leg.arrival_stop)
+             for leg in plan.route.legs],
+        )
+
+    if journey(old) != journey(new):
+        return False
+    for field, attribute in (("departure_time", "depart_at"), ("arrival_time", "arrive_at")):
+        old_time = getattr(old.route, attribute)
+        new_time = getattr(new.route, attribute)
+        if (explicit_time(old, old_time, field, transit=False)
+                and explicit_time(new, new_time, field, transit=False)
+                and old_time.astimezone(UTC) != new_time.astimezone(UTC)):
+            return False
+        for old_leg, new_leg in zip(old.route.legs, new.route.legs, strict=True):
+            if old_leg.mode != "TRANSIT":
+                continue
+            if (not (old_leg.scheduled_departure_valid or new_leg.scheduled_departure_valid)
+                    and old.route.raw_provider_payload is None
+                    and new.route.raw_provider_payload is None):
+                continue
+            old_time = getattr(old_leg, attribute)
+            new_time = getattr(new_leg, attribute)
+            if (explicit_time(old, old_time, field, transit=True)
+                    and explicit_time(new, new_time, field, transit=True)
+                    and old_time.astimezone(UTC) != new_time.astimezone(UTC)):
+                return False
+    return True
+
+
+def _retain_replan_safety(old: Plan, new: Plan) -> Plan:
+    """Keep same-journey padding and the user's prep interval, with UTC deltas.
+
+    New travel/weather timing remains authoritative. No GTFS identity is copied
+    onto a Directions result. A genuinely different journey uses its own padding.
+    """
+    updated = new.model_copy(deep=True)
+    if _same_journey(old, new) and old.realtime_buffer_minutes > new.realtime_buffer_minutes:
+        delta = timedelta(minutes=old.realtime_buffer_minutes - new.realtime_buffer_minutes)
+        for field in ("leave_at", "prep_at"):
+            value = getattr(updated, field)
+            if value is not None:
+                setattr(updated, field, (value.astimezone(UTC) - delta).astimezone(value.tzinfo))
+        updated.realtime_buffer_minutes = old.realtime_buffer_minutes
+        updated.realtime_reason = old.realtime_reason
+    if old.prep_at is not None and old.leave_at is not None and updated.leave_at is not None:
+        interval = old.leave_at.astimezone(UTC) - old.prep_at.astimezone(UTC)
+        updated.prep_at = (updated.leave_at.astimezone(UTC) - interval).astimezone(
+            old.prep_at.tzinfo
+        )
+    return updated
 
 
 def _location_update_significant(old_plan: Plan, new_plan: Plan) -> bool:

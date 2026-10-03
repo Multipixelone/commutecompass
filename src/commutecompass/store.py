@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator, Optional, cast
 
@@ -266,6 +266,146 @@ class Store:
             )
             return cursor.rowcount
 
+    def realtime_refresh_plans(
+        self, now: datetime, *, horizon_minutes: int, grace_seconds: int,
+    ) -> list[Plan]:
+        """Bounded upcoming plans with an actionable pending alarm.
+
+        Compare instants in SQLite, not ISO strings with differing offsets.
+        Missing/deleted (cancelled) plans and completed alarms are not refreshed.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT plan_json FROM plans
+                WHERE julianday(event_start) > julianday(?)
+                  AND julianday(json_extract(plan_json, '$.leave_at'))
+                      BETWEEN julianday(?) AND julianday(?)
+                  AND EXISTS (SELECT 1 FROM pings WHERE pings.event_id = plans.event_id
+                              AND fired = 0 AND kind IN ('prep', 'leave'))
+                """,
+                (now.isoformat(),
+                 (now.astimezone(UTC) - timedelta(seconds=grace_seconds)).isoformat(),
+                 (now.astimezone(UTC) + timedelta(minutes=horizon_minutes)).isoformat()),
+            ).fetchall()
+        return [Plan.model_validate_json(row[0]) for row in rows]
+
+    def increase_realtime_buffer(
+        self, expected: Plan, minutes: int, reason: Optional[str], now: datetime,
+    ) -> bool:
+        """CAS the observed plan and shift pending alarms in one write transaction.
+
+        No row recreation: IDs, fired state and retry counts survive. A concurrent
+        refresh/manual edit/replan invalidates the observation rather than applying
+        a stale delta. Pending ping offsets (including snoozes) are preserved;
+        newly urgent alarms clamp to now, already-due alarms are never postponed.
+        """
+        from commutecompass.format import format_leave_ping, format_prep_ping
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_json FROM plans WHERE event_id = ?", (expected.event.id,),
+            ).fetchone()
+            if row is None:
+                return False
+            current = Plan.model_validate_json(row[0])
+            if (current != expected or current.error is not None or current.leave_at is None
+                    or current.event.start.astimezone(UTC) <= now.astimezone(UTC)
+                    or minutes <= current.realtime_buffer_minutes):
+                return False
+            delta = timedelta(minutes=minutes - current.realtime_buffer_minutes)
+
+            def advance(value: datetime) -> datetime:
+                return (value.astimezone(UTC) - delta).astimezone(value.tzinfo)
+
+            updated = current.model_copy(update={
+                "leave_at": advance(current.leave_at),
+                "prep_at": advance(current.prep_at) if current.prep_at is not None else None,
+                "realtime_buffer_minutes": minutes, "realtime_reason": reason,
+            })
+            conn.execute(
+                "UPDATE plans SET plan_json = ?, planned_at = ? WHERE event_id = ?",
+                (_json_dumps(updated.model_dump()), now.isoformat(), current.event.id),
+            )
+            pings = conn.execute(
+                "SELECT id, kind, fire_at FROM pings WHERE event_id = ? AND fired = 0 "
+                "AND kind IN ('prep', 'leave')", (current.event.id,),
+            ).fetchall()
+            for ping_id, kind, raw_time in pings:
+                old_time = datetime.fromisoformat(raw_time).astimezone(UTC)
+                fire_at = min(old_time, max(now.astimezone(UTC), old_time - delta))
+                message = format_leave_ping(updated) if kind == "leave" else format_prep_ping(updated)
+                conn.execute(
+                    "UPDATE pings SET fire_at = ?, message = ? WHERE id = ? AND fired = 0",
+                    (fire_at.astimezone(now.tzinfo).isoformat(), message, ping_id),
+                )
+            return True
+
+    def reconcile_poll_replan(self, expected: Plan, updated: Plan, now: datetime) -> bool:
+        """Commit a poll replan plus actionable alarms under full-plan CAS.
+
+        Preserve fired rows, IDs, retry counts and pending offsets from the old
+        plan. Already-due alarms never move later; newly due alarms clamp to now.
+        Both current and replanned events must still start strictly after now.
+        No network work occurs while holding the write lock.
+        """
+        from uuid import uuid4
+        from commutecompass.format import format_leave_ping, format_prep_ping
+
+        if updated.event.id != expected.event.id:
+            return False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_json FROM plans WHERE event_id = ?", (expected.event.id,),
+            ).fetchone()
+            if row is None:
+                return False
+            current = Plan.model_validate_json(row[0])
+            if (current != expected
+                    or current.event.start.astimezone(UTC) <= now.astimezone(UTC)
+                    or updated.event.start.astimezone(UTC) <= now.astimezone(UTC)):
+                return False
+            conn.execute(
+                "UPDATE plans SET plan_json = ?, planned_at = ?, event_start = ? WHERE event_id = ?",
+                (_json_dumps(updated.model_dump()), now.isoformat(),
+                 updated.event.start.isoformat(), expected.event.id),
+            )
+            for kind, old_time, new_time, formatter in (
+                ("prep", expected.prep_at, updated.prep_at, format_prep_ping),
+                ("leave", expected.leave_at, updated.leave_at, format_leave_ping),
+            ):
+                rows = conn.execute(
+                    "SELECT id, fire_at, fired FROM pings WHERE event_id = ? AND kind = ?",
+                    (expected.event.id, kind),
+                ).fetchall()
+                if new_time is None:
+                    continue  # Never discard a pending actionable alarm on failure.
+                message = formatter(updated)
+                for ping_id, raw_time, fired in rows:
+                    if fired:
+                        continue
+                    fire_at = datetime.fromisoformat(raw_time).astimezone(UTC)
+                    if old_time is not None:
+                        shifted = fire_at + (new_time.astimezone(UTC) - old_time.astimezone(UTC))
+                    else:
+                        shifted = new_time.astimezone(UTC)
+                    safe_time = (min(fire_at, shifted) if fire_at <= now.astimezone(UTC)
+                                 else max(now.astimezone(UTC), shifted))
+                    conn.execute(
+                        "UPDATE pings SET fire_at = ?, message = ? WHERE id = ? AND fired = 0",
+                        (safe_time.astimezone(now.tzinfo).isoformat(), message, ping_id),
+                    )
+                if not rows:
+                    fire_at = max(now.astimezone(UTC), new_time.astimezone(UTC))
+                    conn.execute(
+                        "INSERT INTO pings (id, event_id, kind, fire_at, message) VALUES (?, ?, ?, ?, ?)",
+                        (str(uuid4()), expected.event.id, kind,
+                         fire_at.astimezone(now.tzinfo).isoformat(), message),
+                    )
+            return True
+
     # ── Ping CRUD ──────────────────────────────────────────────────────────────
 
     def schedule_ping(self, ping: PingEntry) -> None:
@@ -356,12 +496,45 @@ class Store:
         attempt cap + grace window).  Observability is provided by the caller
         (log + summary line).
         """
+        return self.claim_ping_entry(ping_id, fired_at) is not None
+
+    def claim_ping_entry(
+        self, ping_id: str, fired_at: datetime, *, leave_only: bool = False,
+        due_only: bool = False,
+    ) -> Optional[PingEntry]:
+        """Atomically claim and return the authoritative current ping payload.
+
+        Returns None if absent, already claimed, or suppressed by ``leave_only``.
+        The write lock covers both the 0→1 transition and payload read: a
+        concurrent refresh/replan cannot leave the caller sending an old snapshot.
+        Dispatch must use this returned row, not a prior ``pending_pings`` row.
+        ``leave_only`` applies quiet-hours filtering to the current kind without
+        consuming suppressed rows. ``due_only`` requires the current fire_at
+        instant to be <= fired_at, atomically; future rows remain untouched.
+        Both filters default to False for compatibility with unconditional
+        unfired-row claims (including ``claim_ping``). Retry semantics are unchanged.
+        """
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
-                "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0",
-                (fired_at.isoformat(), ping_id),
+                "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0 "
+                "AND (? = 0 OR kind = 'leave') "
+                "AND (? = 0 OR julianday(fire_at) <= julianday(?))",
+                (fired_at.isoformat(), ping_id, int(leave_only), int(due_only),
+                 fired_at.isoformat()),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT id, event_id, kind, fire_at, fired, fired_at, message, send_attempts "
+                "FROM pings WHERE id = ?", (ping_id,),
+            ).fetchone()
+            return PingEntry(
+                id=row[0], event_id=row[1], kind=row[2],
+                fire_at=datetime.fromisoformat(row[3]), fired=bool(row[4]),
+                fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
+                message=row[6], send_attempts=row[7],
+            )
 
     def release_ping(self, ping_id: str) -> bool:
         """Hand a claimed ping back to the unfired pool after a failed send.

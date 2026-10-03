@@ -104,9 +104,15 @@ commutecompass --config examples/config.toml tomorrow --dry-run
      failure modes without parsing logs.
 
 6. **Ping firing contract**
-   - Use `store.claim_ping(id, now)` (atomic 0→1 transition) before
-     sending a notification, not `mark_fired` after.  This is the race
-     protection against overlapping poll cycles.
+    - Poll must use `store.claim_ping_entry(id, live_now, due_only=True)` (atomic 0→1 transition) before
+      sending a notification, and dispatch only its returned current payload,
+      not a prior `pending_pings` snapshot. `None` means do not send;
+      `leave_only=True` filters quiet hours atomically without consuming other
+      kinds. `due_only=True` checks the current `fire_at` instant atomically
+      (not lexical ISO order); future rows retain fired/retry state. Both filters
+      default to False; `claim_ping(id, now)` remains a boolean compatibility
+      wrapper that can claim an unfired row regardless of its deadline.
+      Never use `mark_fired` after sending: claiming protects overlapping polls.
    - On send **failure** of an actionable ping (`prep`/`leave`), the poll
      loop hands the row back with `store.release_ping(id)` (atomic 1→0,
      bumps `send_attempts`) so a later poll re-fires it.  Re-fire is bounded:

@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
 
 from commutecompass.store import Store
 from commutecompass.models import (
@@ -102,6 +103,60 @@ def make_ping(event_id: str = "evt-001", fire_offset_minutes: int = -10) -> Ping
 
 
 # ── Schema init tests ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("expired", ["current", "updated", "both"])
+@pytest.mark.parametrize("offset_seconds", [-10800, 0])
+def test_poll_reconciliation_rejects_non_upcoming_events_atomically(
+    tmp_db_path: Path, expired: str, offset_seconds: int,
+) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 10, 3, 16, tzinfo=timezone.utc)
+    plan = make_plan(make_event())
+    plan.event.start = now + timedelta(hours=1)
+    if expired in {"current", "both"}:
+        plan.event.start = (now + timedelta(seconds=offset_seconds)).astimezone(
+            timezone(timedelta(hours=-4))
+        )
+    plan.event.end = plan.event.start + timedelta(hours=1)
+    store.upsert_plan(plan)
+    updated = plan.model_copy(deep=True)
+    updated.event.start = now + timedelta(hours=2)
+    if expired in {"updated", "both"}:
+        updated.event.start = (now + timedelta(seconds=offset_seconds)).astimezone(
+            timezone(timedelta(hours=2))
+        )
+    updated.event.end = updated.event.start + timedelta(hours=1)
+    updated.leave_at = now - timedelta(minutes=1)
+    updated.prep_at = now - timedelta(minutes=21)
+    updated.error = "too_imminent"
+    with store._connect() as conn:
+        before = conn.execute("SELECT * FROM plans").fetchall()
+    assert not store.reconcile_poll_replan(plan, updated, now)
+    assert store.get_plan(plan.event.id) == plan
+    with store._connect() as conn:
+        assert conn.execute("SELECT * FROM plans").fetchall() == before
+        assert conn.execute("SELECT * FROM pings").fetchall() == []
+
+
+def test_poll_reconciliation_creates_urgent_alarms_for_upcoming_event(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 10, 3, 16, tzinfo=timezone.utc)
+    plan = make_plan(make_event())
+    plan.event.start = now + timedelta(minutes=10)
+    plan.event.end = now + timedelta(hours=1)
+    store.upsert_plan(plan)
+    updated = plan.model_copy(update={
+        "prep_at": now - timedelta(minutes=21),
+        "leave_at": now - timedelta(minutes=1),
+        "error": "too_imminent",
+    })
+    assert store.reconcile_poll_replan(plan, updated, now)
+    assert store.get_plan(plan.event.id) == updated
+    pings = store.pending_pings(now)
+    assert {ping.kind for ping in pings} == {"prep", "leave"}
+    assert all(ping.fire_at == now for ping in pings)
 
 def test_store_init(tmp_db_path: Path) -> None:
     """Store can be instantiated."""
@@ -896,6 +951,106 @@ class TestCurrentLocation:
 
 
 # ── claim_ping (atomic) tests ──────────────────────────────────────────────────
+
+
+def test_claim_ping_entry_returns_current_payload_and_preserves_retry(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    ping = make_ping("evt-current", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+    now = datetime.now(timezone.utc)
+    snapshot = store.pending_pings(now)[0]
+    assert other.claim_ping(ping.id, now)
+    assert other.release_ping(ping.id)
+    with other._connect() as conn:
+        conn.execute("UPDATE pings SET message = ? WHERE id = ?", ("updated leave", ping.id))
+
+    claimed = store.claim_ping_entry(snapshot.id, now)
+    assert claimed is not None
+    assert claimed.message == "updated leave" and claimed.message != snapshot.message
+    assert claimed.fire_at == snapshot.fire_at
+    assert claimed.fired and claimed.fired_at == now and claimed.send_attempts == 1
+    assert other.claim_ping_entry(ping.id, now) is None
+    assert other.claim_ping(ping.id, now) is False
+    assert store.release_ping(claimed.id)
+    pending = other.pending_pings(now)[0]
+    assert not pending.fired and pending.fired_at is None and pending.send_attempts == 2
+    assert store.claim_ping_entry("missing", now) is None
+
+
+def test_claim_ping_entry_due_filter_rechecks_postponed_row(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    future = now + timedelta(minutes=10)
+    ping = make_ping("evt-postponed").model_copy(update={"fire_at": now})
+    store.schedule_ping(ping)
+    snapshot = store.pending_pings(now)[0]
+    assert other.claim_ping(ping.id, now)
+    assert other.release_ping(ping.id)
+    with other._connect() as conn:
+        conn.execute("UPDATE pings SET fire_at = ? WHERE id = ?", (future.isoformat(), ping.id))
+    assert store.claim_ping_entry(snapshot.id, now, due_only=True) is None
+    pending = other.pending_pings(future)[0]
+    assert pending is not None and pending.fire_at == future
+    assert not pending.fired and pending.fired_at is None and pending.send_attempts == 1
+    claimed = store.claim_ping_entry(snapshot.id, future, due_only=True)
+    assert claimed is not None and claimed.send_attempts == 1
+    assert other.claim_ping_entry(snapshot.id, future, due_only=True) is None
+
+
+@pytest.mark.parametrize("boolean_wrapper", [False, True])
+def test_claim_ping_future_default_compatibility(tmp_db_path: Path, boolean_wrapper: bool) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime.now(timezone.utc)
+    ping = make_ping("evt-future").model_copy(update={"fire_at": now + timedelta(hours=1)})
+    store.schedule_ping(ping)
+    if boolean_wrapper:
+        assert store.claim_ping(ping.id, now)
+    else:
+        assert store.claim_ping_entry(ping.id, now) is not None
+
+
+@pytest.mark.parametrize(("fire_at", "claim_at", "due"), [
+    ("2026-10-03T08:10:00-04:00", "2026-10-03T12:00:00+00:00", False),
+    ("2026-10-03T12:00:00+00:00", "2026-10-03T08:00:00-04:00", True),
+    ("2026-11-01T01:10:00-05:00", "2026-11-01T01:50:00-04:00", False),
+    ("2026-11-01T01:50:00-04:00", "2026-11-01T01:10:00-05:00", True),
+])
+def test_claim_ping_due_filter_compares_offset_and_dst_instants(
+    tmp_db_path: Path, fire_at: str, claim_at: str, due: bool,
+) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    ping = make_ping("evt-offset").model_copy(update={"fire_at": datetime.fromisoformat(fire_at)})
+    store.schedule_ping(ping)
+    claimed = store.claim_ping_entry(ping.id, datetime.fromisoformat(claim_at), due_only=True)
+    assert (claimed is not None) is due
+    pending = store.get_pending_ping(ping.event_id, ping.kind)
+    if not due:
+        assert pending is not None and not pending.fired
+        assert pending.fired_at is None and pending.send_attempts == 0
+    else:
+        assert pending is None
+
+
+def test_claim_ping_entry_quiet_filter_uses_current_kind(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    ping = make_ping("evt-quiet-current", fire_offset_minutes=-5)
+    store.schedule_ping(ping)
+    now = datetime.now(timezone.utc)
+    with other._connect() as conn:
+        conn.execute("UPDATE pings SET kind = 'prep' WHERE id = ?", (ping.id,))
+    assert store.claim_ping_entry(ping.id, now, leave_only=True) is None
+    pending = store.pending_pings(now)[0]
+    assert pending.kind == "prep" and pending.send_attempts == 0 and pending.fired_at is None
+    claimed = store.claim_ping_entry(ping.id, now)
+    assert claimed is not None and claimed.kind == "prep"
 
 
 def test_claim_ping_returns_true_first_time(tmp_db_path: Path) -> None:
