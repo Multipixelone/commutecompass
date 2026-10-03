@@ -34,6 +34,32 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 
 See [`examples/config.toml`](./examples/) and [`examples/env.example`](./examples/) for the full configuration schema. Architecture and implementation notes live in [`AGENTS.md`](./AGENTS.md).
 
+## Machine-readable trip timing
+
+Run `commutecompass status --json`, or the NixOS-installed
+`commutecompass-skill status --json`, to read persisted plans without re-routing.
+Each entry in `plans` includes these additive fields alongside `event_id`,
+`title`, `start`, `leave_at`, `prep_at`, `error`, and `resolved_source`:
+
+```json
+{"travel_minutes": 30.5, "arrive_at": "2026-10-03T09:50:00-04:00"}
+```
+
+`travel_minutes` is the selected route's total door-to-door duration in minutes
+(walking, waiting, transit, and final walking for a transit trip), with fractional
+minutes preserved. It excludes prep, safety, weather, and other scheduling
+buffers. Consumers such as an album picker should use this value directly;
+`start - leave_at` includes buffers and must not be used to infer trip duration.
+
+`arrive_at` is the stored route arrival as an ISO 8601 timestamp with a timezone
+offset. Either field is `null` when its route data is unknown; both are `null`
+when there is no route. Missing provider times are not replaced with the current
+time or event start. Cached routes and coarse fallback estimates are included,
+so timing can be approximate: a cached arrival retains the original route's
+timestamp, and an estimated arrival is the estimate's target arrival. Existing
+stored routes work without a database migration. `plan` and the `plan-event.sh`
+skill script currently provide text output only.
+
 ## OpenClaw integration
 
 commutecompass ships an [OpenClaw](https://openclaw.ai) skill at [`skills/commutecompass/`](./skills/commutecompass/) so you can interact with it from chat — "what's on for today?", "shift my next event prep 45 min earlier", "set quiet hours to 23:00".

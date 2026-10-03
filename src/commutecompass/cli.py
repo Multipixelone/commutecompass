@@ -15,6 +15,7 @@ from commutecompass.models import CalendarSpec
 
 if TYPE_CHECKING:
     from commutecompass.config import Config
+    from commutecompass.models import Route
     from commutecompass.store import Store
 
 # Default config path
@@ -414,6 +415,58 @@ def where(ctx: click.Context) -> None:
 # ─────────── status ──────────────────────────────────────────────────────────
 
 
+def _route_travel_fields(route: Optional[Route]) -> dict[str, float | str | None]:
+    """Export persisted trip timing, excluding buffers and provider placeholders."""
+    if route is None:
+        return {"travel_minutes": None, "arrive_at": None}
+
+    # Directions parsing defaults absent durations to zero and absent arrival
+    # timestamps to now. Check the saved response before exposing those values,
+    # including for old plans. Explicit routes (e.g. estimates) need no response.
+    duration_known = route.raw_provider_payload is None
+    arrival_known = route.raw_provider_payload is None
+    if route.raw_provider_payload is not None:
+        provider_routes = route.raw_provider_payload.get("routes", [])
+        if isinstance(provider_routes, list):
+            for candidate in provider_routes:
+                if not isinstance(candidate, dict):
+                    continue
+                legs = candidate.get("legs", [])
+                if not isinstance(legs, list) or not legs:
+                    continue
+                durations: list[int] = []
+                for leg in legs:
+                    duration = leg.get("duration") if isinstance(leg, dict) else None
+                    seconds = duration.get("value") if isinstance(duration, dict) else None
+                    if type(seconds) is not int or seconds < 0:
+                        break
+                    durations.append(seconds)
+                if len(durations) == len(legs) and sum(durations) == route.total_duration_seconds:
+                    duration_known = True
+
+                last_leg = legs[-1]
+                arrival = last_leg.get("arrival_time") if isinstance(last_leg, dict) else None
+                timestamp = arrival.get("value") if isinstance(arrival, dict) else None
+                if (
+                    type(timestamp) in (int, float)
+                    and timestamp == route.arrive_at.timestamp()
+                ):
+                    arrival_known = True
+
+    return {
+        "travel_minutes": (
+            route.total_duration_seconds / 60.0
+            if duration_known and route.total_duration_seconds >= 0
+            else None
+        ),
+        "arrive_at": (
+            route.arrive_at.isoformat()
+            if arrival_known and route.arrive_at.utcoffset() is not None
+            else None
+        ),
+    }
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of human-readable text.")
 @click.pass_context
@@ -448,6 +501,7 @@ def status(ctx: click.Context, as_json: bool) -> None:
                 "start": p.event.start.isoformat(),
                 "leave_at": p.leave_at.isoformat() if p.leave_at else None,
                 "prep_at": p.prep_at.isoformat() if p.prep_at else None,
+                **_route_travel_fields(p.route),
                 "error": p.error,
                 "resolved_source": (
                     p.event.location_resolved.source

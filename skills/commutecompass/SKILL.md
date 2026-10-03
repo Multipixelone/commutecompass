@@ -48,6 +48,27 @@ to stdout; relay that stdout back to the user.
 | "reset all my config tweaks"                                             | `scripts/config-reset.sh --yes`                   |
 | "why didn't I get my morning ping?" / "show me the current state"        | `scripts/status.sh` (text) or `scripts/status.sh --json` |
 
+## Status JSON contract
+
+`scripts/status.sh --json` (equivalently `commutecompass-skill status --json`)
+reads saved plans without calling the routing provider. Each `plans[]` object
+retains `event_id`, `title`, `start`, `leave_at`, `prep_at`, `error`, and
+`resolved_source`, and also includes:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `travel_minutes` | number or `null` | Selected route's total door-to-door seconds divided by 60, preserving fractional minutes; includes walking, waiting, and transit. |
+| `arrive_at` | string or `null` | Stored route arrival in ISO 8601 with timezone offset. |
+
+Both fields are `null` without a route; either can independently be `null` when
+the provider omitted that data. Duration excludes prep, safety, weather, and
+other scheduling buffers. Never infer it from `start - leave_at`. Use
+`travel_minutes` directly when capping album length or another trip activity.
+Values include cached routes and coarse fallback estimates and may be
+approximate. Cached arrival timestamps are not refreshed; estimated arrivals
+are the estimate's target arrival. A plan with an error can still contain route
+timing. `plan-event.sh` delegates to the text-only `plan` command.
+
 ## Selectors
 
 Every event-scoped command (`plan-event`, `adjust`, `snooze`, `mute`,
