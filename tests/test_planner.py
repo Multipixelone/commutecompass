@@ -239,6 +239,42 @@ def test_duration_based_planning_without_current_schedule(
     assert timing.depart_at is None and timing.arrive_at is None
 
 
+@pytest.mark.parametrize("invalid", [0, -1])
+@pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
+def test_invalid_overall_endpoint_does_not_make_upcoming_plan_imminent(
+    config: Config, event: Event, resolved_location: ResolvedLocation,
+    scheduled_directions: dict[str, Any], invalid: int, endpoint: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    boarding = leg["steps"][1]["transit_details"]
+    boarding["departure_time"] = {"value": leg["departure_time"]["value"] + 187}
+    boarding["arrival_time"] = {"value": leg["arrival_time"]["value"] - 168}
+    leg[endpoint]["value"] = invalid
+    leg["duration"]["value"] = 2620
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    assert any(step.scheduled_departure_valid for step in route.legs)
+    event.start = datetime(2026, 10, 3, 15, tzinfo=NYC_TZ)
+    event.end = event.start + timedelta(hours=1)
+    with (
+        patch("commutecompass.resolver.resolve", return_value=resolved_location),
+        patch("commutecompass.routing.plan_route", return_value=route),
+        patch("commutecompass.planner.now_nyc", return_value=event.start.replace(hour=9)),
+    ):
+        result = plan_event(event, config, MagicMock(), MagicMock(), MagicMock())
+    assert result.error is None
+    departure = (
+        event.start - timedelta(seconds=2620)
+        if endpoint == "departure_time"
+        else datetime.fromtimestamp(leg["departure_time"]["value"], tz=NYC_TZ)
+    )
+    assert result.leave_at == departure - timedelta(minutes=config.prep.safety_buffer_minutes)
+    assert result.leave_at is not None
+    assert result.prep_at == result.leave_at - timedelta(minutes=config.prep.prep_minutes)
+    assert route_timing(result.route).duration_seconds == 2620
+
+
 def test_corrected_schedule_triggers_too_imminent(
     config: Config, event: Event, resolved_location: ResolvedLocation,
     scheduled_directions: dict[str, Any],

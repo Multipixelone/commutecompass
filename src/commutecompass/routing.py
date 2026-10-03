@@ -35,15 +35,8 @@ class RouteTiming(NamedTuple):
 
 
 def _provider_time(value: object) -> Optional[datetime]:
-    if not isinstance(value, dict):
-        return None
-    timestamp = value.get("value")
-    if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
-        return None
-    try:
-        return datetime.fromtimestamp(timestamp, tz=NYC_TZ)
-    except (ValueError, OverflowError, OSError):
-        return None
+    # Overall endpoints and nested boarding times share placeholder validation.
+    return _scheduled_time(value, NYC_TZ)
 
 
 def _provider_timing(candidate: object) -> RouteTiming:

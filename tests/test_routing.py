@@ -17,6 +17,7 @@ from commutecompass.realtime import FetchResult, Predictions, _accumulate, realt
 from commutecompass.store import Store
 from commutecompass.routing import (
     _parse_route,
+    _provider_time,
     _unix,
     estimate_route,
     plan_route,
@@ -148,6 +149,45 @@ def test_selected_route_timing(scheduled_directions: dict[str, Any], legacy: boo
     assert timing.duration_seconds == 3095
     assert timing.depart_at == datetime(2026, 10, 3, 13, 49, 8, tzinfo=NYC_TZ)
     assert timing.arrive_at == datetime(2026, 10, 3, 14, 40, 43, tzinfo=NYC_TZ)
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, False, float("nan"), float("inf"),
+                                     float("-inf"), 1e100, "0", None])
+def test_invalid_overall_provider_time(invalid: object) -> None:
+    assert _provider_time({"value": invalid}) is None
+
+
+@pytest.mark.parametrize("invalid", [0, -1])
+@pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
+@pytest.mark.parametrize("saved", ["live", "legacy", "cached-legacy"])
+def test_invalid_overall_endpoint_retains_declared_duration(
+    scheduled_directions: dict[str, Any], invalid: int, endpoint: str, saved: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    boarding = leg["steps"][1]["transit_details"]
+    boarding["departure_time"] = {"value": leg["departure_time"]["value"] + 187}
+    boarding["arrival_time"] = {"value": leg["arrival_time"]["value"] - 168}
+    leg[endpoint]["value"] = invalid
+    leg["duration"]["value"] = 2620
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    assert any(step.scheduled_departure_valid for step in route.legs)
+    assert route.total_duration_seconds == 2620
+    if saved != "live":
+        route.from_cache = saved == "cached-legacy"
+        route = Route.model_validate_json(route.model_dump_json(exclude={"provider_route_index"}))
+    timing = route_timing(route)
+    assert timing.duration_seconds == 2620
+    invalid_time = timing.depart_at if endpoint == "departure_time" else timing.arrive_at
+    assert invalid_time is None
+    if saved == "cached-legacy":
+        assert timing.depart_at is None and timing.arrive_at is None
+    else:
+        valid_time = timing.arrive_at if endpoint == "departure_time" else timing.depart_at
+        assert valid_time is not None
+        valid_endpoint = "arrival_time" if endpoint == "departure_time" else "departure_time"
+        assert valid_time.timestamp() == leg[valid_endpoint]["value"]
 
 
 def test_route_duration_uses_actual_elapsed_time(scheduled_directions: dict[str, Any]) -> None:
