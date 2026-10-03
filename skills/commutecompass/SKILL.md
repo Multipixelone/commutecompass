@@ -57,17 +57,33 @@ retains `event_id`, `title`, `start`, `leave_at`, `prep_at`, `error`, and
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `travel_minutes` | number or `null` | Selected route's total door-to-door seconds divided by 60, preserving fractional minutes; includes walking, waiting, and transit. |
-| `arrive_at` | string or `null` | Stored route arrival in ISO 8601 with timezone offset. |
+| `travel_minutes` | number or `null` | Selected route's door-to-door elapsed seconds divided by 60; when timestamps are unavailable, uses complete provider leg durations. Preserves fractional minutes and includes walking, waiting, and transit. |
+| `depart_at` | string or `null` | Route departure from the door, in ISO 8601 with timezone offset; distinct from the earlier leave alarm. |
+| `arrive_at` | string or `null` | Arrival of that same route, in ISO 8601 with timezone offset. |
+| `leave_buffer_minutes` | number or `null` | Safety + weather buffer persisted when planning; excludes prep. Unknown for older plans. |
 
-Both fields are `null` without a route; either can independently be `null` when
-the provider omitted that data. Duration excludes prep, safety, weather, and
-other scheduling buffers. Never infer it from `start - leave_at`. Use
-`travel_minutes` directly when capping album length or another trip activity.
-Values include cached routes and coarse fallback estimates and may be
-approximate. Cached arrival timestamps are not refreshed; estimated arrivals
-are the estimate's target arrival. A plan with an error can still contain route
-timing. `plan-event.sh` delegates to the text-only `plan` command.
+For fresh timed routes, `arrive_at - depart_at = travel_minutes` and
+`depart_at - leave_at = leave_buffer_minutes`, in elapsed minutes.
+`prep_at = leave_at - prep_minutes`. Transit may arrive before event start;
+leave alarms use the selected route's departure minus buffers, so they cannot
+be calculated safely from event start alone. `leave_at + travel_minutes` need
+not equal `arrive_at`: the earlier alarm includes buffer time. Use
+`travel_minutes` directly when capping album length.
+
+All three route timing fields are `null` without a route. A cycling, driving,
+or walking route can legitimately have a duration but no provider timestamps;
+then both route timestamps remain `null`, even if `error` is `null`. The alarm
+uses `event start - travel duration - scheduling buffer` when there is no
+current departure schedule. Never substitute event start or processing time
+for an unknown provider arrival.
+
+Cached routes retain approximate duration but suppress historical departure
+and arrival timestamps as `null`; new alarms never use those historical times.
+Coarse fallback estimates retain their estimated timestamps. A plan with an
+error can still contain route timing. Older saved leave times are reported
+unchanged until normal replanning; status never repairs state or infers an old
+buffer from current config. `plan-event.sh` delegates to the text-only `plan`
+command.
 
 ## Selectors
 
@@ -105,8 +121,8 @@ purpose.
 - `digest-preview`, `where`, `plan-event` (without `--from`), `config-show`,
   and `mta-alerts` are pure reads — invoke freely. `plan-event --from <addr>`
   is also a read (preview only; never saves).
-- `adjust` only shifts `prep_at`. The `leave_at` is governed by route+event
-  start and can't be moved without a replan. If the user wants to leave
+- `adjust` only shifts `prep_at`. The `leave_at` is governed by the route schedule (or duration-based
+  fallback) and scheduling buffers and can't be moved without a replan. If the user wants to leave
   earlier/later, that requires a different change (calendar edit or route
   override).
 - `adjust` accepts `--idempotency-key <opaque>`. If you (the agent) might

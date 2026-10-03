@@ -44,6 +44,8 @@
             ruff.enable = true;
             mypy = {
               enable = true;
+              # Concurrent mypy processes contend on the shared SQLite cache.
+              require_serial = true;
               settings.binPath = "${pythonEnv}/bin/mypy";
             };
             pytest = {

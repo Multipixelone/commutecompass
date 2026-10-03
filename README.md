@@ -42,23 +42,51 @@ Each entry in `plans` includes these additive fields alongside `event_id`,
 `title`, `start`, `leave_at`, `prep_at`, `error`, and `resolved_source`:
 
 ```json
-{"travel_minutes": 30.5, "arrive_at": "2026-10-03T09:50:00-04:00"}
+{
+  "leave_at": "2026-10-03T13:36:08-04:00",
+  "depart_at": "2026-10-03T13:49:08-04:00",
+  "travel_minutes": 51.583333333333336,
+  "arrive_at": "2026-10-03T14:40:43-04:00",
+  "leave_buffer_minutes": 13
+}
 ```
 
-`travel_minutes` is the selected route's total door-to-door duration in minutes
-(walking, waiting, transit, and final walking for a transit trip), with fractional
-minutes preserved. It excludes prep, safety, weather, and other scheduling
-buffers. Consumers such as an album picker should use this value directly;
-`start - leave_at` includes buffers and must not be used to infer trip duration.
+`travel_minutes` is the selected route's door-to-door duration, preserving
+fractional minutes. When both route timestamps are known, it is their elapsed
+seconds divided by 60; otherwise it uses that alternative's complete provider
+leg durations. It includes walking, waiting, transit, and final walking for a
+transit trip. It excludes prep and scheduling buffers. An album picker should
+use it directly, rather than infer duration from event or alarm times.
 
-`arrive_at` is the stored route arrival as an ISO 8601 timestamp with a timezone
-offset. Either field is `null` when its route data is unknown; both are `null`
-when there is no route. Missing provider times are not replaced with the current
-time or event start. Cached routes and coarse fallback estimates are included,
-so timing can be approximate: a cached arrival retains the original route's
-timestamp, and an estimated arrival is the estimate's target arrival. Existing
-stored routes work without a database migration. `plan` and the `plan-event.sh`
-skill script currently provide text output only.
+`depart_at` and `arrive_at` are the route's door-to-door departure and arrival,
+expressed as ISO 8601 timestamps with timezone offsets. For a fresh timed route:
+
+- `arrive_at - depart_at = travel_minutes` (compare elapsed minutes).
+- `leave_at = depart_at - leave_buffer_minutes`.
+- `prep_at = leave_at - prep_minutes`.
+
+`leave_at` is the earlier buffered alarm, not the route departure. The persisted
+`leave_buffer_minutes` is the safety + weather buffer used when
+planning; it excludes prep. The example's route still takes 51m 35s even though
+its leave alarm is 13 minutes earlier. Scheduled transit can naturally arrive
+before the event; alarms now respect its actual departure instead of working
+backwards from event start and potentially missing the selected train.
+
+Unknown route timing is `null`; all three route fields are `null` without a
+route. In particular, Google can return a cycling/driving/walking duration
+without scheduled timestamps: `travel_minutes` is then available while
+`depart_at` and `arrive_at` remain `null`, even with `error: null`. Missing
+provider times are never replaced with processing time or event start. Without
+a current departure schedule, the alarm uses
+`event start - travel duration - scheduling buffer`.
+
+Cached routes still supply approximate duration, but their historical departure
+and arrival are suppressed as `null` and never anchor a new alarm. Coarse
+fallback estimates retain their estimated timestamps; all fallback timing is
+best-effort. Existing plans require no database migration: their buffer is
+`null` if not originally persisted, and their saved `leave_at` is unchanged
+until normal replanning replaces it. `status` does not repair or re-route old
+plans. `plan` and the `plan-event.sh` skill script provide text output only.
 
 ## OpenClaw integration
 
