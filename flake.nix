@@ -44,6 +44,7 @@
             ruff.enable = true;
             mypy = {
               enable = true;
+              require_serial = true;
               settings.binPath = "${pythonEnv}/bin/mypy";
             };
             pytest = {
