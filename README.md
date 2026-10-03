@@ -70,6 +70,9 @@ Later feeds are skipped on exhaustion; partial observations and failure status
 are retained. This bounds new I/O admission, not slow streaming/parsing wall
 time (HTTPX timeouts are phase/inactivity limits). Results cache for 60 seconds.
 
+See [real-time follow-up work](./docs/realtime-followups.md) for proposed next
+steps, priorities, and acceptance criteria for the remaining integration gaps.
+
 ## Machine-readable trip timing
 
 Run `commutecompass status --json`, or the NixOS-installed
