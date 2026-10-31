@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -171,7 +173,7 @@ def test_store_init_schema_creates_tables(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
     # Verify tables exist by executing a query on each
-    with __import__("sqlite3").connect(tmp_db_path) as conn:
+    with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
         for table in ["plans", "pings", "geocode_cache", "alerts_seen"]:
             result = conn.execute(
                 f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
@@ -701,7 +703,7 @@ def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path: Path) -> None
     assert retrieved.leave_at.tzinfo is not None
 
     # Parse from stored JSON directly and verify isoformat matches
-    with __import__("sqlite3").connect(tmp_db_path) as conn:
+    with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
         row = conn.execute(
             "SELECT plan_json FROM plans WHERE event_id = ?", ("evt-roundtrip",)
         ).fetchone()
@@ -713,7 +715,6 @@ def test_plan_round_trip_with_datetime_iso8601_offset(tmp_db_path: Path) -> None
 def test_route_selection_and_leave_buffer_persistence(
     tmp_db_path: Path, scheduled_directions: dict[str, Any],
 ) -> None:
-    import sqlite3
     from commutecompass.routing import _parse_route, route_timing
 
     route = _parse_route(scheduled_directions)
@@ -734,7 +735,7 @@ def test_route_selection_and_leave_buffer_persistence(
     # Simulate a pre-change row by omitting the new additive metadata.
     old_data = plan.model_dump(mode="json", exclude={"leave_buffer_minutes"})
     del old_data["route"]["provider_route_index"]
-    with sqlite3.connect(tmp_db_path) as conn:
+    with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
         conn.execute("UPDATE plans SET plan_json = ? WHERE event_id = ?",
                      (json.dumps(old_data), plan.event.id))
     legacy = store.get_plan(plan.event.id)
@@ -765,7 +766,7 @@ def test_ping_entry_round_trip_with_datetime(tmp_db_path: Path) -> None:
     pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
     next((p for p in pending if p.id == "ping-rt"), None)
     # After marking fired it won't appear in pending; verify via direct query
-    with __import__("sqlite3").connect(tmp_db_path) as conn:
+    with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
         row = conn.execute(
             "SELECT fired_at FROM pings WHERE id = ?", ("ping-rt",)
         ).fetchone()
@@ -962,11 +963,9 @@ class TestCurrentLocation:
         self, tmp_db_path: Path
     ) -> None:
         """init_schema must idempotently add accuracy_m to an older current_location table."""
-        import sqlite3
-
         # Hand-create the pre-migration table.
         tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(tmp_db_path) as conn:
+        with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
             conn.execute("""
                 CREATE TABLE current_location (
                     id TEXT PRIMARY KEY DEFAULT 'singleton',
@@ -982,7 +981,7 @@ class TestCurrentLocation:
         store = Store(tmp_db_path)
         store.init_schema()
 
-        with sqlite3.connect(tmp_db_path) as conn:
+        with closing(sqlite3.connect(tmp_db_path)) as conn, conn:
             cols = {row[1] for row in conn.execute("PRAGMA table_info(current_location)").fetchall()}
         assert "accuracy_m" in cols
 
