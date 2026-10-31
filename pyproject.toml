@@ -43,9 +43,10 @@ artifacts = ["src/commutecompass/data/*.csv"]
 line-length = 100
 target-version = "py312"
 
-[tool.ruff.lint]
-# Pin ruff's pre-0.17 default rule set; 0.17 widened the defaults.
-select = ["E4", "E7", "E9", "F"]
+[tool.ruff.lint.per-file-ignores]
+# Job orchestrators deliberately catch everything per step so one failing
+# dependency (calendar, HA, MTA, routing, notifier) never aborts the run.
+"src/commutecompass/jobs/*.py" = ["BLE001"]
 
 [tool.mypy]
 strict = true

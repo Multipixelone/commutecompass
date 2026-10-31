@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel
@@ -63,7 +62,7 @@ class VenueRegistry:
                     self._fuzzy.append((collapsed, idx))
 
     @classmethod
-    def load(cls, path: Path) -> "VenueRegistry":
+    def load(cls, path: Path) -> VenueRegistry:
         """Load venue entries from a YAML file."""
         with open(path, encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
@@ -74,7 +73,7 @@ class VenueRegistry:
             entries.append(VenueEntry.model_validate(item))
         return cls(entries=entries)
 
-    def match(self, raw: str) -> Optional[ResolvedLocation]:
+    def match(self, raw: str) -> ResolvedLocation | None:
         """Match a raw location string against known aliases.
 
         Matching strategy:

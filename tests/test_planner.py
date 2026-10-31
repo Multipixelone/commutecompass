@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from commutecompass.config import (
-    Config,
     CalendarSpec,
+    Config,
     HomeAssistantConfig,
     LocationOverride,
     ModeOverride,
@@ -21,6 +22,7 @@ from commutecompass.config import (
     SchedulingConfig,
     ZoneOrigin,
 )
+from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import (
     CurrentLocation,
     Event,
@@ -34,12 +36,10 @@ from commutecompass.planner import (
     get_effective_mode,
     plan_event,
 )
-from commutecompass.venues import VenueRegistry
-from commutecompass.llm import OpencodeGoClient
-from commutecompass.timeutil import NYC_TZ
 from commutecompass.routing import _parse_route, route_timing
+from commutecompass.timeutil import NYC_TZ
+from commutecompass.venues import VenueRegistry
 from commutecompass.weather import WeatherBuffer
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────────
 

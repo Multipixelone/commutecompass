@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class WeatherBuffer(NamedTuple):
     minutes: int
-    reason: Optional[str]  # human-readable note, e.g. "rain", or None when clear
+    reason: str | None  # human-readable note, e.g. "rain", or None when clear
 
 
 _CLEAR = WeatherBuffer(0, None)
@@ -34,7 +34,7 @@ def weather_buffer(
     at_time: datetime,
     config: WeatherConfig,
     *,
-    fetcher: Optional[Any] = None,
+    fetcher: Any | None = None,
 ) -> WeatherBuffer:
     """Return extra buffer minutes (and a reason) for precipitation at ``at_time``.
 
@@ -48,7 +48,7 @@ def weather_buffer(
     fetch = fetcher or _fetch_forecast
     try:
         hourly = fetch(lat, lon, config.forecast_url)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - weather is optional; fail open
         logger.debug("weather fetch failed (lat=%s lon=%s): %s", lat, lon, exc)
         return _CLEAR
 
@@ -108,7 +108,7 @@ def _buffer_from_hourly(
     return _CLEAR
 
 
-def _at(series: Any, idx: int) -> Optional[float]:
+def _at(series: Any, idx: int) -> float | None:
     """Safely read index ``idx`` from a forecast series, as a float."""
     if not isinstance(series, list) or idx >= len(series):
         return None

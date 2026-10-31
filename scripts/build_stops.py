@@ -31,8 +31,8 @@ import csv
 import io
 import sys
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import httpx
 
@@ -57,10 +57,9 @@ def _read_stops(zip_url: str) -> list[dict[str, str]]:
     print(f"  fetching {zip_url}", file=sys.stderr)
     resp = httpx.get(zip_url, timeout=60.0, follow_redirects=True)
     resp.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        with zf.open("stops.txt") as fh:
-            text = io.TextIOWrapper(fh, encoding="utf-8-sig")
-            return list(csv.DictReader(text))
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf, zf.open("stops.txt") as fh:
+        text = io.TextIOWrapper(fh, encoding="utf-8-sig")
+        return list(csv.DictReader(text))
 
 
 def _write_csv(path: Path, rows: Iterable[tuple[str, ...]], header: tuple[str, ...]) -> None:

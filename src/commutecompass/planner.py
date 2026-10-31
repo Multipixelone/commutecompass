@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from commutecompass.config import Config
 from commutecompass.geocode import GeocodeResult
-from commutecompass.models import Event, Origin, Plan, ZoneInfo
-from commutecompass.venues import VenueRegistry
 from commutecompass.llm import OpencodeGoClient
+from commutecompass.models import Event, Origin, Plan, ZoneInfo
 from commutecompass.timeutil import now_nyc
+from commutecompass.venues import VenueRegistry
 
 if TYPE_CHECKING:
     from commutecompass.store import Store
@@ -34,7 +34,7 @@ def get_effective_location(
 def get_effective_mode(
     effective_location: str,
     config: Config,
-) -> Optional[Literal["transit", "driving", "walking", "bicycling"]]:
+) -> Literal["transit", "driving", "walking", "bicycling"] | None:
     """Return the forced travel mode if the location matches a mode_override.
 
     ``location_contains`` is matched case-insensitively as a substring against
@@ -50,9 +50,9 @@ def get_effective_mode(
 
 def effective_origin(
     config: Config,
-    store: "Store",
+    store: Store,
     *,
-    override: Optional[Origin] = None,
+    override: Origin | None = None,
 ) -> Origin:
     """Pick the origin to plan from.
 
@@ -112,12 +112,12 @@ def plan_event(
     event: Event,
     config: Config,
     venues: VenueRegistry,
-    store: "Store",
+    store: Store,
     llm: OpencodeGoClient,
     *,
-    mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None,
-    origin_override: Optional[Origin] = None,
-    ha_zones: Optional[dict[str, ZoneInfo]] = None,
+    mode_override: Literal["transit", "driving", "walking", "bicycling"] | None = None,
+    origin_override: Origin | None = None,
+    ha_zones: dict[str, ZoneInfo] | None = None,
 ) -> Plan:
     """Compute optimal departure time for an event.
 
@@ -130,9 +130,9 @@ def plan_event(
 
     Returns a Plan with route and timing, or an error Plan on failure.
     """
+    from commutecompass.geocode import geocode
     from commutecompass.resolver import resolve
     from commutecompass.routing import estimate_route, plan_route, route_cache_key, route_timing
-    from commutecompass.geocode import geocode
 
     # Step 1: resolve location (override applied first)
     raw_location = get_effective_location(event, config)
@@ -145,7 +145,7 @@ def plan_event(
         or "transit"
     )
 
-    def geocoder(addr: str) -> Optional[GeocodeResult]:
+    def geocoder(addr: str) -> GeocodeResult | None:
         return geocode(addr, config.google_maps_api_key)
 
     resolved = resolve(
@@ -186,8 +186,8 @@ def plan_event(
 
     # Step 3: compute timings.  Add a weather buffer when precipitation is
     # expected around the event so the alarm fires earlier on a rainy/snowy day.
-    from commutecompass.weather import weather_buffer as _weather_buffer
     from commutecompass.realtime import realtime_delay as _realtime_delay
+    from commutecompass.weather import weather_buffer as _weather_buffer
 
     wx = _weather_buffer(route_origin.lat, route_origin.lon, event.start, config.weather)
     # Real-time delay on the boarding line — only ever adds buffer (leave earlier),

@@ -6,7 +6,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from google.transit.gtfs_realtime_pb2 import (
@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "NYC_TZ",
-    "fetch_alerts",
     "alerts_affecting_route",
+    "fetch_alerts",
     "select_actionable_alerts",
 ]
 
@@ -46,7 +46,7 @@ def fetch_alerts(
     subway_url: str,
     lirr_url: str,
     bus_url: str,
-    client: Optional[httpx.Client] = None,
+    client: httpx.Client | None = None,
 ) -> list[Alert]:
     """Fetch and parse MTA GTFS-RT alert feeds from all sources.
 
@@ -81,7 +81,7 @@ def fetch_alerts(
                 return _fetch_feed(u, s, client)
             try:
                 alerts.extend(retry(_do_fetch, label=f"mta_feed({system})"))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one feed failing must not drop others
                 logger.warning("Failed to fetch %s alerts from %s: %s", system, url, exc)
                 failed_systems.append(system)
 
@@ -109,7 +109,7 @@ def _fetch_feed(url: str, system: str, client: httpx.Client) -> list[Alert]:
     return alerts
 
 
-def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> Optional[Alert]:
+def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> Alert | None:
     """Map a GTFS-RT Alert proto into our Alert model."""
     if not gtfs_alert.informed_entity:
         return None
@@ -156,7 +156,7 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> 
     )
 
     # Extract URL if present
-    url: Optional[str] = None
+    url: str | None = None
     if gtfs_alert.HasField("url") and gtfs_alert.url.HasField("translation"):
         translations = gtfs_alert.url.translation
         if translations:
@@ -199,7 +199,7 @@ def _extract_text(text_proto: Any) -> str:
     return ""
 
 
-def _parse_timestamp(seconds: int) -> Optional[datetime]:
+def _parse_timestamp(seconds: int) -> datetime | None:
     """Convert GTFS-RT Unix timestamp to aware NYC datetime."""
     if seconds == 0:
         return None
@@ -275,7 +275,7 @@ def select_actionable_alerts(
     route: Route,
     at_time: datetime,
     *,
-    llm: Optional["OpencodeGoClient"] = None,
+    llm: OpencodeGoClient | None = None,
 ) -> list[Alert]:
     """Return the subset of affecting alerts likely to impact this commute.
 
@@ -399,12 +399,9 @@ def _is_location_specific_alert(
     words_in_text = set(re.findall(r"\b[\w]+", text))
 
     overlap = stop_tokens & words_in_text
-    if overlap:
-        # Alert mentions at least one stop the route actually uses — keep it
-        return False
-
-    # No overlap: location-specific alert unrelated to this route
-    return True
+    # Overlap: alert mentions at least one stop the route actually uses — keep it.
+    # No overlap: location-specific alert unrelated to this route.
+    return not overlap
 
 
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
@@ -423,7 +420,7 @@ def _heuristic_relevance_decision(
     alert: Alert,
     route_lines: set[str],
     route: Route,
-) -> Optional[bool]:
+) -> bool | None:
     """Return True/False when heuristic is confident, else None.
 
     - True: explicit disruption wording that references route lines, or severe alert.
@@ -439,11 +436,14 @@ def _heuristic_relevance_decision(
     stop_names, line_ids = _build_route_context(route)
 
     # Filter far-away location-specific alerts
-    if _is_location_specific_alert(alert, stop_names, line_ids):
-        # Do NOT drop severe/system-wide alerts
-        if alert.severity != "SEVERE" and alert.affected_routes != {"*"}:
-            logger.debug("Filtered location-specific alert %s (no route stop overlap)", alert.id)
-            return False
+    # Do NOT drop severe/system-wide alerts
+    if (
+        _is_location_specific_alert(alert, stop_names, line_ids)
+        and alert.severity != "SEVERE"
+        and alert.affected_routes != {"*"}
+    ):
+        logger.debug("Filtered location-specific alert %s (no route stop overlap)", alert.id)
+        return False
 
     severe = alert.severity == "SEVERE"
     has_disruption_words = _contains_any(text, _DISRUPTION_PATTERNS)
@@ -469,10 +469,7 @@ def _alert_affects_route(alert: Alert, route: Route, at_time: datetime) -> bool:
         return False
 
     # 2. Time-window overlap check
-    if not _time_overlaps(alert, route, at_time):
-        return False
-
-    return True
+    return _time_overlaps(alert, route, at_time)
 
 
 def _systems_lines_overlap(alert: Alert, route: Route) -> bool:
@@ -482,11 +479,14 @@ def _systems_lines_overlap(alert: Alert, route: Route) -> bool:
             continue
 
         # Check system match
-        if alert.affected_systems and leg.system:
-            if leg.system in alert.affected_systems:
-                # System matches — now check line/route overlap
-                if _line_matches(alert, leg):
-                    return True
+        # System matches — now check line/route overlap
+        if (
+            alert.affected_systems
+            and leg.system
+            and leg.system in alert.affected_systems
+            and _line_matches(alert, leg)
+        ):
+            return True
 
         # Also check route-level: some alerts affect entire systems
         if alert.affected_systems and leg.system and "*" in alert.affected_routes:
@@ -558,8 +558,8 @@ def _ensure_aware(dt: datetime) -> datetime:
 def _periods_overlap(
     start1: datetime,
     end1: datetime,
-    start2: Optional[datetime],
-    end2: Optional[datetime],
+    start2: datetime | None,
+    end2: datetime | None,
 ) -> bool:
     """Check if two time periods overlap (treating None as open-ended)."""
     # Handle open-ended periods

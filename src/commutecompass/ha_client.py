@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 
 import httpx
 
@@ -20,8 +19,8 @@ def fetch_location(
     token: str,
     *,
     timeout: float = 5.0,
-    min_accuracy_m: Optional[float] = None,
-) -> Optional[CurrentLocation]:
+    min_accuracy_m: float | None = None,
+) -> CurrentLocation | None:
     """Fetch current location from a Home Assistant tracker entity.
 
     Works for `device_tracker.*` or `person.*` — both expose
@@ -74,7 +73,7 @@ def fetch_location(
         return None
 
     accuracy_raw = attrs.get("gps_accuracy")
-    accuracy_m: Optional[float] = (
+    accuracy_m: float | None = (
         float(accuracy_raw) if isinstance(accuracy_raw, (int, float)) else None
     )
     if (
@@ -157,7 +156,7 @@ def push_tomorrow_alarm(
     service: str,
     alarm_at: datetime,
     *,
-    extra_data: Optional[dict[str, object]] = None,
+    extra_data: dict[str, object] | None = None,
     timeout: float = 5.0,
 ) -> bool:
     """POST tomorrow's alarm time to an HA script as ``domain.service``.
@@ -272,7 +271,7 @@ def _parse_last_updated(raw: object) -> datetime:
     """Parse HA's ISO-8601 last_updated; fall back to now_nyc() on failure."""
     if isinstance(raw, str):
         try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(raw)
         except ValueError:
             return now_nyc()
         if dt.tzinfo is None:

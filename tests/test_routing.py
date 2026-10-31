@@ -11,10 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from commutecompass.models import Origin, ResolvedLocation, Route
 from commutecompass.config import RealtimeConfig
+from commutecompass.models import Origin, ResolvedLocation, Route
 from commutecompass.realtime import FetchResult, Predictions, _accumulate, realtime_delay
-from commutecompass.store import Store
 from commutecompass.routing import (
     _parse_route,
     _provider_time,
@@ -24,8 +23,8 @@ from commutecompass.routing import (
     route_cache_key,
     route_timing,
 )
+from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
-
 
 # ─── Transfer counting ─────────────────────────────────────────────────────────
 

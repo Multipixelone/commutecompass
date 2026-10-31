@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import httpx
 from pydantic import BaseModel
 
@@ -16,7 +14,7 @@ class GeocodeResult(BaseModel):
     formatted_address: str
     lat: float
     lon: float
-    place_id: Optional[str] = None
+    place_id: str | None = None
 
 
 # NYC metro bounding box for region biasing
@@ -40,7 +38,7 @@ def _do_geocode_request(address: str, api_key: str) -> httpx.Response:
     return response
 
 
-def geocode(address: str, api_key: str) -> Optional[GeocodeResult]:
+def geocode(address: str, api_key: str) -> GeocodeResult | None:
     """Geocode an address using Google Geocoding API.
 
     Returns None on ZERO_RESULTS. Raises RuntimeError on transport errors

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from commutecompass.calendar_client import CalendarClient
 from commutecompass.config import Config
@@ -43,7 +43,7 @@ from commutecompass.models import (
 logger = logging.getLogger(__name__)
 
 
-def run(config: Config, *, dry_run: bool = False) -> Optional[Plan]:
+def run(config: Config, *, dry_run: bool = False) -> Plan | None:
     """Compute tomorrow's earliest prep_at and push it to HA.
 
     Returns the chosen Plan (so the CLI can echo it) or None when nothing
@@ -159,7 +159,7 @@ def run(config: Config, *, dry_run: bool = False) -> Optional[Plan]:
     return earliest
 
 
-def _earliest_prep(plans: list[Plan]) -> Optional[Plan]:
+def _earliest_prep(plans: list[Plan]) -> Plan | None:
     """Return the plan with the smallest prep_at, ignoring errored/empty plans."""
     from datetime import datetime as _dt
 
@@ -179,7 +179,7 @@ def _plan_event_safe(
     config: Config,
     venue_registry: VenueRegistry,
     store: Store,
-    llm_client: "OpencodeGoClient",
+    llm_client: OpencodeGoClient,
     ha_zones: dict[str, ZoneInfo] | None = None,
 ) -> Plan:
     """Call plan_event with error handling, returning an error Plan on failure."""

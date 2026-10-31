@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
 import click
 
-from commutecompass.config import ConfigError  # noqa: F401
+from commutecompass.config import ConfigError
 from commutecompass.joblock import JobLock, LockHeld, lock_path_for
 from commutecompass.models import CalendarSpec
 
@@ -36,7 +37,7 @@ _logger = logging.getLogger(__name__)
 # ─────────── Config helper ────────────────────────────────────────────────────
 
 
-def _load_config(config_path: Path) -> "Config":
+def _load_config(config_path: Path) -> Config:
     """Load and return the Config, exiting gracefully on error."""
     # Import module to allow patching at the right spot
     from commutecompass import config as config_mod
@@ -48,7 +49,7 @@ def _load_config(config_path: Path) -> "Config":
         sys.exit(EXIT_CONFIG)
 
 
-def _resolve_or_exit(selector: str, store: "Store") -> str:
+def _resolve_or_exit(selector: str, store: Store) -> str:
     """Resolve a selector via ``selector.resolve_event_selector`` or exit cleanly.
 
     Centralises the error → exit-code mapping so every event-scoped command
@@ -65,7 +66,7 @@ def _resolve_or_exit(selector: str, store: "Store") -> str:
         sys.exit(exc.exit_code)
 
 
-def _run_with_job_lock(cfg: "Config", job_name: str, fn: "Callable[[], None]") -> None:
+def _run_with_job_lock(cfg: Config, job_name: str, fn: Callable[[], None]) -> None:
     """Wrap a job invocation in a non-blocking flock so morning/poll cannot overlap.
 
     If another process already holds the lock, exit ``EXIT_TRANSIENT`` so cron
@@ -244,7 +245,7 @@ def tomorrow(ctx: click.Context, dry_run: bool) -> None:
     "Does NOT save the resulting plan (preview only).",
 )
 @click.pass_context
-def plan(ctx: click.Context, selector: str, here: bool, from_address: Optional[str]) -> None:
+def plan(ctx: click.Context, selector: str, here: bool, from_address: str | None) -> None:
     """Replan a single event by selector (next / today:N / [id] / title).
 
     Without ``--here`` or ``--from``, saves the new plan into the store.
@@ -261,8 +262,8 @@ def plan(ctx: click.Context, selector: str, here: bool, from_address: Optional[s
     from commutecompass.models import Origin
     from commutecompass.planner import plan_event
     from commutecompass.store import Store
-    from commutecompass.venues import VenueRegistry
     from commutecompass.timeutil import now_nyc
+    from commutecompass.venues import VenueRegistry
 
     if here and from_address is not None:
         click.echo("Error: --here and --from are mutually exclusive.", err=True)
@@ -287,7 +288,7 @@ def plan(ctx: click.Context, selector: str, here: bool, from_address: Optional[s
         model=cfg.opencode_go.model,
     )
 
-    origin_override: Optional[Origin] = None
+    origin_override: Origin | None = None
     if here:
         cl = store.get_current_location(max_age_minutes=None)
         if cl is None:
@@ -415,7 +416,7 @@ def where(ctx: click.Context) -> None:
 # ─────────── status ──────────────────────────────────────────────────────────
 
 
-def _route_travel_fields(route: Optional[Route]) -> dict[str, float | str | None]:
+def _route_travel_fields(route: Route | None) -> dict[str, float | str | None]:
     """Export the same persisted route timing used by the planner."""
     from commutecompass.routing import route_timing
 
@@ -540,7 +541,7 @@ def status(ctx: click.Context, as_json: bool) -> None:
 @click.option("--list", "as_list", is_flag=True, help="List all cached entries.")
 @click.option("--invalidate", type=str, default=None, help="Delete the cache entry for this raw query string.")
 @click.pass_context
-def geocode_cache(ctx: click.Context, as_list: bool, invalidate: Optional[str]) -> None:
+def geocode_cache(ctx: click.Context, as_list: bool, invalidate: str | None) -> None:
     """Inspect or invalidate cached geocode lookups.
 
     The cache is keyed on the raw query string the resolver passed to Google
@@ -627,7 +628,7 @@ def adjust(
     ctx: click.Context,
     selector: str,
     add_prep: int,
-    idempotency_key: Optional[str],
+    idempotency_key: str | None,
 ) -> None:
     """Shift today's prep time for SELECTOR by --add-prep minutes.
 
@@ -651,11 +652,11 @@ def adjust(
 
 
 def _apply_adjust(
-    store: "Store",
+    store: Store,
     event_id: str,
     *,
     add_prep: int,
-    idempotency_key: Optional[str] = None,
+    idempotency_key: str | None = None,
 ) -> None:
     """Core prep-shift logic shared by ``adjust`` and (indirectly) ``undo``.
 
@@ -699,8 +700,7 @@ def _apply_adjust(
 
     now = now_nyc()
     new_prep_at = plan.prep_at - timedelta(minutes=add_prep)
-    if new_prep_at < now:
-        new_prep_at = now
+    new_prep_at = max(new_prep_at, now)
     plan.prep_at = new_prep_at
 
     store.upsert_plan(plan)
@@ -874,7 +874,7 @@ def config_reset(ctx: click.Context, yes: bool) -> None:
 )
 @click.pass_context
 def snooze(
-    ctx: click.Context, selector: str, minutes: Optional[int], skip: bool
+    ctx: click.Context, selector: str, minutes: int | None, skip: bool
 ) -> None:
     """Snooze or skip the unfired *prep* ping for SELECTOR.
 
@@ -930,7 +930,7 @@ def snooze(
     help="Mute every event in today's plans until end-of-day.",
 )
 @click.pass_context
-def mute(ctx: click.Context, selector: Optional[str], today: bool) -> None:
+def mute(ctx: click.Context, selector: str | None, today: bool) -> None:
     """Suppress notifications for an event (forever) or all of today's events.
 
     Enforced inside the poll loop right before notifying on a claimed ping —
@@ -1003,7 +1003,7 @@ def unmute(ctx: click.Context, selector: str) -> None:
 @cli.command()
 @click.argument("selector", required=False)
 @click.pass_context
-def undo(ctx: click.Context, selector: Optional[str]) -> None:
+def undo(ctx: click.Context, selector: str | None) -> None:
     """Revert the most recent adjust (globally or scoped to SELECTOR).
 
     Restores ``prep_at`` to the exact value recorded in ``adjust_log``, marks
@@ -1011,6 +1011,7 @@ def undo(ctx: click.Context, selector: Optional[str]) -> None:
     ``undo`` again walks one more step back through the adjust history.
     """
     import uuid
+
     from commutecompass.format import format_prep_ping
     from commutecompass.models import PingEntry
     from commutecompass.store import Store
@@ -1020,7 +1021,7 @@ def undo(ctx: click.Context, selector: Optional[str]) -> None:
     cfg = _load_config(config_path)
     store = Store(Path(cfg.paths.db_path))
 
-    event_id_filter: Optional[str] = None
+    event_id_filter: str | None = None
     if selector is not None:
         event_id_filter = _resolve_or_exit(selector, store)
 
@@ -1043,8 +1044,7 @@ def undo(ctx: click.Context, selector: Optional[str]) -> None:
     assert row.prev_prep_at is not None
     now = now_nyc()
     restored = row.prev_prep_at
-    if restored < now:
-        restored = now
+    restored = max(restored, now)
     plan.prep_at = restored
     store.upsert_plan(plan)
     store.mark_adjust_undone(row.key)
@@ -1096,7 +1096,7 @@ def mta_alerts(ctx: click.Context) -> None:
             lirr_url=cfg.mta.lirr_alerts_url,
             bus_url=cfg.mta.bus_alerts_url,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any fetch failure maps to EXIT_TRANSIENT
         click.echo(f"Error: failed to fetch MTA alerts: {exc}", err=True)
         sys.exit(EXIT_TRANSIENT)
 

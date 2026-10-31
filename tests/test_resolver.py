@@ -11,7 +11,6 @@ from commutecompass.models import ResolvedLocation, ZoneInfo
 from commutecompass.resolver import looks_like_address, resolve
 from commutecompass.venues import VenueEntry, VenueRegistry
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────────
 
 @pytest.fixture

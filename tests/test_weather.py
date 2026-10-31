@@ -9,7 +9,6 @@ from commutecompass.config import WeatherConfig
 from commutecompass.timeutil import NYC_TZ
 from commutecompass.weather import weather_buffer
 
-
 AT = datetime(2026, 5, 8, 14, 30, tzinfo=NYC_TZ)  # → forecast hour "...T14:00"
 
 

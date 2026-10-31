@@ -13,10 +13,11 @@ from __future__ import annotations
 import csv
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from importlib import resources
-from typing import Any, Callable, Literal, NamedTuple, Optional, TypedDict
+from typing import Any, Literal, NamedTuple, TypedDict
 
 import httpx
 from rapidfuzz import fuzz, process
@@ -34,11 +35,11 @@ __all__ = ["RealtimeDelay", "realtime_delay"]
 
 class RealtimeDelay(NamedTuple):
     minutes: int
-    reason: Optional[str]  # e.g. "Q running ~6 min late", or None when on time
+    reason: str | None  # e.g. "Q running ~6 min late", or None when on time
     status: Literal[
         "observed", "unavailable", "unmatched", "not_applicable", "cancelled", "skipped"
     ] = "not_applicable"
-    detail: Optional[str] = None
+    detail: str | None = None
     departures: tuple[datetime, ...] = ()
     feed_failed: bool = False
 
@@ -66,18 +67,18 @@ class Prediction:
     trip_id: str
     start_date: str
     start_time: str
-    direction_id: Optional[int]
-    stop_sequence: Optional[int]
-    departure: Optional[datetime]
-    arrival: Optional[datetime]
-    delay: Optional[int]  # None is not the same as an explicit zero
+    direction_id: int | None
+    stop_sequence: int | None
+    departure: datetime | None
+    arrival: datetime | None
+    delay: int | None  # None is not the same as an explicit zero
     trip_relationship: int
     stop_relationship: int
-    header_timestamp: Optional[int]
-    update_timestamp: Optional[int]
+    header_timestamp: int | None
+    update_timestamp: int | None
     fresh: bool
-    arrival_delay: Optional[int] = None
-    trip_delay: Optional[int] = None
+    arrival_delay: int | None = None
+    trip_delay: int | None = None
 
 
 Predictions = dict[str, list[Prediction]]
@@ -115,8 +116,8 @@ def realtime_delay(
     at_time: datetime,
     config: RealtimeConfig,
     *,
-    fetcher: Optional[Fetcher] = None,
-    clock: Optional[Clock] = None,
+    fetcher: Fetcher | None = None,
+    clock: Clock | None = None,
 ) -> RealtimeDelay:
     """Return extra buffer minutes (and a reason) for the boarding line's delay.
 
@@ -129,13 +130,13 @@ def realtime_delay(
         return _CLEAR
     try:
         return _compute(route, config, fetcher, clock or (lambda: datetime.now(NYC_TZ)))
-    except Exception as exc:  # fail-open: never let real-time break a plan
+    except Exception as exc:  # noqa: BLE001 - fail-open: never let real-time break a plan
         logger.debug("realtime delay failed: %s", exc)
         return RealtimeDelay(0, None, "unavailable", "feed fetch or parse failed", feed_failed=True)
 
 
 def _compute(
-    route: Route, config: RealtimeConfig, fetcher: Optional[Fetcher], clock: Clock
+    route: Route, config: RealtimeConfig, fetcher: Fetcher | None, clock: Clock
 ) -> RealtimeDelay:
     transit_legs = [leg for leg in route.legs if leg.mode == "TRANSIT"]
     if not transit_legs:
@@ -221,7 +222,7 @@ def _compute(
     if (pred.departure.astimezone(UTC) - timedelta(seconds=pred.delay)
             != leg.depart_at.astimezone(UTC)):
         return RealtimeDelay(0, None, "unmatched", "scheduled boarding timestamp differs", **common)
-    delay_minutes = int(round(max(0, pred.delay) / 60.0))
+    delay_minutes = round(max(0, pred.delay) / 60.0)
     if delay_minutes == 0 or delay_minutes < config.min_delay_minutes:
         return RealtimeDelay(
             0, None, "observed", f"measured departure delay {pred.delay} sec; no padding", **common
@@ -362,7 +363,7 @@ def _normalize_feed_stop(stop_id: str, system: str) -> str:
 
 
 def _fetch_predictions(
-    urls: list[str], system: str, *, clock: Optional[Clock] = None,
+    urls: list[str], system: str, *, clock: Clock | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> FetchResult:
     """Fetch sequentially within a five-second admission budget per feed set.
@@ -394,7 +395,7 @@ def _fetch_predictions(
             try:
                 feed = retry(_do, attempts=2, base_delay=0, max_delay=0,
                              label=f"realtime({system})")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - fail-open per feed
                 logger.debug("realtime feed fetch failed (%s): %s", url, exc)
                 result.failures += 1
                 continue
@@ -406,13 +407,13 @@ def _fetch_predictions(
                     result.usable_feeds += 1
                 for stop_id, updates in predictions.items():
                     result.predictions.setdefault(stop_id, []).extend(updates)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - fail-open per feed
                 logger.debug("realtime feed parse failed (%s): %s", url, exc)
                 result.failures += 1
     return result
 
 
-def _fresh(header: Optional[int], update: Optional[int], now: datetime) -> bool:
+def _fresh(header: int | None, update: int | None, now: datetime) -> bool:
     if header is None:
         return False
     for timestamp in (header, update):
@@ -424,7 +425,7 @@ def _fresh(header: Optional[int], update: Optional[int], now: datetime) -> bool:
     return True
 
 
-def _accumulate(feed: Any, preds: Predictions, system: str, *, now: Optional[datetime] = None) -> bool:
+def _accumulate(feed: Any, preds: Predictions, system: str, *, now: datetime | None = None) -> bool:
     observed_at = now or datetime.now(NYC_TZ)
     header_ts = feed.header.timestamp if feed.header.HasField("timestamp") else None
     # Differential feeds require state reconciliation, which we do not have.

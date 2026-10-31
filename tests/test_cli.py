@@ -17,7 +17,6 @@ from commutecompass.models import Event, Plan
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
 
-
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -196,6 +195,7 @@ def test_enabled_realtime_diagnostic_status(
     scenario: str, status: str, exit_code: int,
 ) -> None:
     from test_realtime import NOW, SCHED, feed_with, make_route, result_for
+
     from commutecompass.realtime import FetchResult
 
     minimal_toml.write_text(minimal_toml.read_text() + "\n[realtime]\nenabled = true\n")
@@ -274,7 +274,15 @@ class TestInitDb:
         db_path = tmp_path / "test.db"
 
         with mock.patch("commutecompass.config.load_config") as mock_cfg:
-            from commutecompass.config import Config, Origin, PrepConfig, SchedulingConfig, PathsConfig, OpencodeGoConfig, MtaConfig
+            from commutecompass.config import (
+                Config,
+                MtaConfig,
+                OpencodeGoConfig,
+                Origin,
+                PathsConfig,
+                PrepConfig,
+                SchedulingConfig,
+            )
 
             cfg = Config(
                 origin=Origin(
@@ -483,7 +491,7 @@ class TestAdjustCommand:
 
         from commutecompass.timeutil import now_nyc
 
-        cfg, store, plan = self._seed_plan(tmp_path, prep_offset_min=90)
+        cfg, store, _plan = self._seed_plan(tmp_path, prep_offset_min=90)
 
         with mock.patch("commutecompass.config.load_config", return_value=cfg):
             result = runner.invoke(cli, ["adjust", "evt-abc", "--add-prep", "30"])
@@ -693,8 +701,13 @@ class TestStatusCommand:
 
     def _config(self, tmp_path: Path) -> Config:
         from commutecompass.config import (
-            Config, MtaConfig, OpencodeGoConfig, Origin, PathsConfig,
-            PrepConfig, SchedulingConfig,
+            Config,
+            MtaConfig,
+            OpencodeGoConfig,
+            Origin,
+            PathsConfig,
+            PrepConfig,
+            SchedulingConfig,
         )
 
         return Config(
@@ -967,8 +980,13 @@ class TestStatusCommand:
 class TestGeocodeCacheCommand:
     def _config(self, tmp_path: Path) -> Config:
         from commutecompass.config import (
-            Config, MtaConfig, OpencodeGoConfig, Origin, PathsConfig,
-            PrepConfig, SchedulingConfig,
+            Config,
+            MtaConfig,
+            OpencodeGoConfig,
+            Origin,
+            PathsConfig,
+            PrepConfig,
+            SchedulingConfig,
         )
 
         return Config(
@@ -1046,7 +1064,8 @@ def _seed_today_plan(
     """
     from datetime import timedelta
 
-    from commutecompass.models import Event, Plan as _Plan
+    from commutecompass.models import Event
+    from commutecompass.models import Plan as _Plan
     from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
 
     cfg = _fake_config(tmp_path)
@@ -1190,6 +1209,7 @@ class TestMuteCommand:
         assert result.exit_code == 0, result.output
         assert store.is_muted("evt-abc") is True
         from datetime import timedelta
+
         from commutecompass.timeutil import now_nyc
         pending = store.pending_pings(now_nyc() + timedelta(hours=24))
         assert not any(p.event_id == "evt-abc" for p in pending)
@@ -1307,7 +1327,8 @@ class TestMtaAlertsCommand:
     ) -> None:
         from datetime import timedelta
 
-        from commutecompass.models import Alert, Event, Plan as _Plan, Route, TransitLeg
+        from commutecompass.models import Alert, Event, Route, TransitLeg
+        from commutecompass.models import Plan as _Plan
         from commutecompass.timeutil import now_nyc
 
         cfg = _fake_config(tmp_path)

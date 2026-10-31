@@ -5,11 +5,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 import httpx
+import pytest
 
-from commutecompass.geocode import geocode, GeocodeResult
-
+from commutecompass.geocode import GeocodeResult, geocode
 
 # ─────────── Mock response builders ───────────
 

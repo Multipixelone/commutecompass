@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Literal, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple
 
 import httpx
 
@@ -29,12 +29,12 @@ def route_cache_key(origin: Origin) -> str:
 class RouteTiming(NamedTuple):
     """Door-to-door timing, with unknown/provider placeholder values excluded."""
 
-    duration_seconds: Optional[float] = None
-    depart_at: Optional[datetime] = None
-    arrive_at: Optional[datetime] = None
+    duration_seconds: float | None = None
+    depart_at: datetime | None = None
+    arrive_at: datetime | None = None
 
 
-def _provider_time(value: object) -> Optional[datetime]:
+def _provider_time(value: object) -> datetime | None:
     # Overall endpoints and nested boarding times share placeholder validation.
     return _scheduled_time(value, NYC_TZ)
 
@@ -64,7 +64,7 @@ def _provider_timing(candidate: object) -> RouteTiming:
     return RouteTiming(float(sum(durations)), depart, arrive)
 
 
-def route_timing(route: Optional[Route]) -> RouteTiming:
+def route_timing(route: Route | None) -> RouteTiming:
     """Read timing from one selected alternative, including legacy saved routes.
 
     Cached schedules describe a historical journey: only their duration remains
@@ -112,12 +112,11 @@ def route_timing(route: Optional[Route]) -> RouteTiming:
             if depart is None and arrive is None:
                 if candidate_timing.duration_seconds != route.total_duration_seconds:
                     continue
-            elif depart is None or arrive is None:
-                if (
-                    candidate_timing.duration_seconds is not None
-                    and candidate_timing.duration_seconds != route.total_duration_seconds
-                ):
-                    continue
+            elif (depart is None or arrive is None) and (
+                candidate_timing.duration_seconds is not None
+                and candidate_timing.duration_seconds != route.total_duration_seconds
+            ):
+                continue
             matches.append(candidate_timing)
         if not matches:
             return RouteTiming()
@@ -159,7 +158,7 @@ def estimate_route(
     destination: ResolvedLocation,
     arrival_time: datetime,
     mode: Literal["transit", "driving", "walking", "bicycling"] = "transit",
-) -> Optional[Route]:
+) -> Route | None:
     """Build a coarse distance/speed route estimate when live routing is down.
 
     Returns None when the destination has no coordinates (e.g. an unresolved
@@ -200,7 +199,7 @@ def estimate_route(
     )
 
 
-def _scheduled_time(value: Any, nyc_tz: Any) -> Optional[datetime]:
+def _scheduled_time(value: Any, nyc_tz: Any) -> datetime | None:
     """Read an explicit Directions timestamp, rejecting missing/placeholders."""
     if not isinstance(value, dict):
         return None
@@ -215,7 +214,7 @@ def _scheduled_time(value: Any, nyc_tz: Any) -> Optional[datetime]:
         return None
 
 
-def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
+def _parse_step(step: dict[str, Any], nyc_tz: Any) -> TransitLeg | None:
     """Parse a single step from a Directions leg into a TransitLeg.
 
     Returns None for unsupported travel modes.
@@ -263,11 +262,11 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
         depart_at = scheduled_departure or datetime.now(nyc_tz)
         arrive_at = scheduled_arrival or datetime.now(nyc_tz)
 
-    system: Optional[str] = None
-    line: Optional[str] = None
-    headsign: Optional[str] = None
-    departure_stop_name: Optional[str] = None
-    arrival_stop_name: Optional[str] = None
+    system: str | None = None
+    line: str | None = None
+    headsign: str | None = None
+    departure_stop_name: str | None = None
+    arrival_stop_name: str | None = None
     summary = ""
 
     if mode == "TRANSIT":
@@ -340,7 +339,7 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     )
 
 
-def _parse_route(response: dict[str, Any]) -> Optional[Route]:
+def _parse_route(response: dict[str, Any]) -> Route | None:
     """Parse a Google Directions API response into a Route.
 
     Returns None if no valid routes found.
@@ -448,7 +447,7 @@ def plan_route(
     arrival_time: datetime,
     mode: Literal["transit", "driving", "walking", "bicycling"] = "transit",
     api_key: str = "",
-) -> Optional[Route]:
+) -> Route | None:
     """Plan a route from origin to destination.
 
     Calls Google Directions API and returns the best route based on scoring:

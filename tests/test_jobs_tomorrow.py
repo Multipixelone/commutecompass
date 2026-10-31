@@ -180,7 +180,7 @@ def test_picks_earliest_prep_and_pushes(tomorrow_config: Config) -> None:
     assert result.prep_at == early_prep
 
     mock_push.assert_called_once()
-    args, kwargs = mock_push.call_args
+    args, _kwargs = mock_push.call_args
     assert args[0] == "http://ha.local:8123"
     assert args[1] == "ha-tok"
     assert args[2] == "script.commute_set_tomorrow_alarm"

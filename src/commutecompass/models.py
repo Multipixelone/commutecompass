@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-
 
 # ─────────── Configuration models ───────────
 
@@ -32,8 +31,8 @@ class PrepConfig(BaseModel):
 class SchedulingConfig(BaseModel):
     morning_run_time: time = time(6, 0)
     poll_interval_seconds: int = Field(default=60, ge=1, le=86_400)
-    quiet_hours_start: Optional[time] = None
-    quiet_hours_end: Optional[time] = None
+    quiet_hours_start: time | None = None
+    quiet_hours_end: time | None = None
 
 
 class PathsConfig(BaseModel):
@@ -55,7 +54,7 @@ class MtaConfig(BaseModel):
 
 class LocationOverride(BaseModel):
     calendar_id: str
-    title_contains: Optional[str] = None
+    title_contains: str | None = None
     location: str
 
 
@@ -171,8 +170,8 @@ class Config(BaseModel):
 class ResolvedLocation(BaseModel):
     kind: Literal["address", "station"]
     value: str
-    lat: Optional[float] = None
-    lon: Optional[float] = None
+    lat: float | None = None
+    lon: float | None = None
     source: Literal["known_venues", "geocode", "llm", "cache", "ha_zone"]
 
 
@@ -183,16 +182,16 @@ class Event(BaseModel):
     title: str
     start: datetime
     end: datetime
-    location_raw: Optional[str] = None
-    location_resolved: Optional[ResolvedLocation] = None
-    mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None
+    location_raw: str | None = None
+    location_resolved: ResolvedLocation | None = None
+    mode_override: Literal["transit", "driving", "walking", "bicycling"] | None = None
 
 
 class TransitLeg(BaseModel):
     mode: Literal["WALKING", "TRANSIT", "DRIVING", "BICYCLING"]
-    system: Optional[str] = None
-    line: Optional[str] = None
-    headsign: Optional[str] = None
+    system: str | None = None
+    line: str | None = None
+    headsign: str | None = None
     depart_at: datetime
     arrive_at: datetime
     duration_seconds: int
@@ -200,8 +199,8 @@ class TransitLeg(BaseModel):
     # Structured boarding/alighting stop names.  Kept separately from ``summary``
     # so consumers (e.g. MTA alert relevance) don't have to re-parse the
     # human-readable string, which breaks on stop names containing "to"/"and".
-    departure_stop: Optional[str] = None
-    arrival_stop: Optional[str] = None
+    departure_stop: str | None = None
+    arrival_stop: str | None = None
     # Only explicit provider boarding timestamps may drive realtime padding.
     # Legacy persisted legs lack this field and must remain untrusted, while
     # their durations can still be used for fail-open planning.
@@ -209,13 +208,13 @@ class TransitLeg(BaseModel):
     # Independently validated GTFS boarding identity, not inferred from names or
     # headsigns. Directions does not currently provide this context. Defaults
     # keep both legacy cached routes and ordinary Directions routes ineligible.
-    gtfs_trip_id: Optional[str] = None
-    gtfs_route_id: Optional[str] = None
-    gtfs_start_date: Optional[str] = None
-    gtfs_start_time: Optional[str] = None
-    gtfs_boarding_stop_id: Optional[str] = None
-    gtfs_boarding_stop_sequence: Optional[int] = None
-    gtfs_direction_id: Optional[int] = None
+    gtfs_trip_id: str | None = None
+    gtfs_route_id: str | None = None
+    gtfs_start_date: str | None = None
+    gtfs_start_time: str | None = None
+    gtfs_boarding_stop_id: str | None = None
+    gtfs_boarding_stop_sequence: int | None = None
+    gtfs_direction_id: int | None = None
 
 
 class Route(BaseModel):
@@ -224,11 +223,11 @@ class Route(BaseModel):
     arrive_at: datetime
     total_duration_seconds: int
     transfers: int = 0
-    fare_estimate_cents: Optional[int] = None
-    raw_provider_payload: Optional[dict[str, Any]] = None
+    fare_estimate_cents: int | None = None
+    raw_provider_payload: dict[str, Any] | None = None
     # Index of the selected alternative in raw_provider_payload. Older saved
     # routes omit this and must be matched by their duration and timestamps.
-    provider_route_index: Optional[int] = Field(default=None, ge=0)
+    provider_route_index: int | None = Field(default=None, ge=0)
     # True when the route did not come from a live Directions response — either
     # a previously-cached route reused during an API outage, or a coarse
     # distance/speed estimate.  Surfaced in the digest so the user knows the
@@ -241,23 +240,23 @@ class Route(BaseModel):
 
 class Plan(BaseModel):
     event: Event
-    route: Optional[Route] = None
-    leave_at: Optional[datetime] = None
-    prep_at: Optional[datetime] = None
-    error: Optional[str] = None
+    route: Route | None = None
+    leave_at: datetime | None = None
+    prep_at: datetime | None = None
+    error: str | None = None
     # Safety + weather + realtime buffer used when this plan was computed.
     # None for older plans; current config cannot recover their original buffer.
-    leave_buffer_minutes: Optional[int] = Field(default=None, ge=0)
+    leave_buffer_minutes: int | None = Field(default=None, ge=0)
     # Extra minutes folded into the buffer for expected precipitation, plus a
     # short reason ("rain"/"snow") for display.  Zero when weather is disabled
     # or the forecast is clear.
     weather_buffer_minutes: int = 0
-    weather_reason: Optional[str] = None
+    weather_reason: str | None = None
     # Extra minutes folded into the buffer because the boarding line is running
     # late (GTFS-RT), plus a short reason ("Q running ~6 min late").  Zero when
     # real-time is disabled, unmatched, or service is on time.
     realtime_buffer_minutes: int = 0
-    realtime_reason: Optional[str] = None
+    realtime_reason: str | None = None
 
 
 class Alert(BaseModel):
@@ -266,9 +265,9 @@ class Alert(BaseModel):
     description: str
     affected_routes: set[str] = Field(default_factory=set)
     affected_systems: set[str] = Field(default_factory=set)
-    active_periods: list[tuple[datetime, Optional[datetime]]] = Field(default_factory=list)
+    active_periods: list[tuple[datetime, datetime | None]] = Field(default_factory=list)
     severity: Literal["INFO", "WARNING", "SEVERE"] = "INFO"
-    url: Optional[str] = None
+    url: str | None = None
 
 
 class PingEntry(BaseModel):
@@ -277,7 +276,7 @@ class PingEntry(BaseModel):
     kind: Literal["digest", "prep", "leave", "service_update"]
     fire_at: datetime
     fired: bool = False
-    fired_at: Optional[datetime] = None
+    fired_at: datetime | None = None
     message: str
     # Number of send attempts that have already failed for this ping.  Used by
     # the poll loop to bound cross-tick re-fire of actionable pings whose send
@@ -288,10 +287,10 @@ class PingEntry(BaseModel):
 class CurrentLocation(BaseModel):
     lat: float
     lon: float
-    zone: Optional[str] = None
+    zone: str | None = None
     captured_at: datetime
     source: str = "home_assistant"
-    accuracy_m: Optional[float] = None
+    accuracy_m: float | None = None
 
 
 class ZoneInfo(BaseModel):
@@ -315,5 +314,5 @@ class AdjustRow(BaseModel):
     event_id: str
     applied_at: datetime
     add_prep_minutes: int
-    prev_prep_at: Optional[datetime] = None
+    prev_prep_at: datetime | None = None
     undone: bool = False

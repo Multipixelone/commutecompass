@@ -45,7 +45,7 @@ from commutecompass.models import (
 logger = logging.getLogger(__name__)
 
 
-def run(config: Config) -> None:  # noqa: C901
+def run(config: Config) -> None:
     """Run the morning digest job.
 
     Args:
@@ -330,7 +330,7 @@ def _plan_event_safe(
     config: Config,
     venue_registry: VenueRegistry,
     store: Store,
-    llm_client: "OpencodeGoClient",
+    llm_client: OpencodeGoClient,
     ha_zones: dict[str, ZoneInfo] | None = None,
 ) -> Plan:
     """Call plan_event with error handling, returning an error Plan on failure."""

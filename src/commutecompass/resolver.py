@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from commutecompass.geocode import GeocodeResult
 from commutecompass.models import ResolvedLocation, ZoneInfo
 from commutecompass.venues import VenueRegistry
 
 if TYPE_CHECKING:
-    from commutecompass.store import Store
     from commutecompass.llm import OpencodeGoClient
+    from commutecompass.store import Store
 
 log = logging.getLogger(__name__)
 
@@ -58,14 +59,14 @@ def _is_placeholder(raw: str) -> bool:
 
 
 def resolve(
-    raw: Optional[str],
+    raw: str | None,
     *,
     venues: VenueRegistry,
-    store: "Store",
-    geocoder: Callable[[str], Optional[GeocodeResult]],
-    llm: "OpencodeGoClient",
-    ha_zones: Optional[dict[str, ZoneInfo]] = None,
-) -> Optional[ResolvedLocation]:
+    store: Store,
+    geocoder: Callable[[str], GeocodeResult | None],
+    llm: OpencodeGoClient,
+    ha_zones: dict[str, ZoneInfo] | None = None,
+) -> ResolvedLocation | None:
     """Resolve a raw location string through the resolution pipeline.
 
     Pipeline (§6.10, with HA zones in front):

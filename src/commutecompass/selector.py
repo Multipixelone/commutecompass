@@ -57,7 +57,7 @@ class SelectorError(Exception):
 
 
 def resolve_event_selector(
-    selector: str, store: "Store", *, now: datetime
+    selector: str, store: Store, *, now: datetime
 ) -> str:
     """Map a user-friendly selector to a single Google Calendar event_id.
 
@@ -135,7 +135,7 @@ def resolve_event_selector(
             limit=3,
         )
         if scored:
-            best_title, best_score, best_idx = scored[0]
+            _best_title, best_score, best_idx = scored[0]
             runner_score = scored[1][1] if len(scored) > 1 else 0.0
             if best_score - runner_score >= _FUZZ_MARGIN:
                 return plans[best_idx].event.id

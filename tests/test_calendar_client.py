@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecompass.models import CalendarSpec
 from commutecompass.calendar_client import AuthError, CalendarClient
+from commutecompass.models import CalendarSpec
 from commutecompass.timeutil import NYC_TZ
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -21,7 +20,7 @@ from commutecompass.timeutil import NYC_TZ
 
 def make_aware(dt: datetime) -> datetime:
     """Make a datetime timezone-aware (UTC)."""
-    return dt.replace(tzinfo=timezone.utc)
+    return dt.replace(tzinfo=UTC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,9 +410,11 @@ def test_refresh_error_raises_auth_error(client_secret_json: str, token_path: Pa
         mock_creds.expired = True
         mock_from_info.return_value = mock_creds
 
-        with patch.object(mock_creds, "refresh", side_effect=GoogleRefreshError("Token expired")):  # type: ignore[no-untyped-call]
-            with pytest.raises(AuthError, match="Token refresh failed"):
-                client._load_credentials()
+        with (
+            patch.object(mock_creds, "refresh", side_effect=GoogleRefreshError("Token expired")),  # type: ignore[no-untyped-call]
+            pytest.raises(AuthError, match="Token refresh failed"),
+        ):
+            client._load_credentials()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

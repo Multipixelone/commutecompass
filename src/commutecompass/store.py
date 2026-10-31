@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Optional, cast
-
-import sqlite3
+from typing import Any, cast
 
 from commutecompass.models import (
     AdjustRow,
     CurrentLocation,
-    Plan,
     PingEntry,
+    Plan,
     ResolvedLocation,
     Route,
 )
@@ -222,7 +222,7 @@ class Store:
                 ),
             )
 
-    def get_plan(self, event_id: str) -> Optional[Plan]:
+    def get_plan(self, event_id: str) -> Plan | None:
         """Retrieve a plan by event ID."""
         with self._connect() as conn:
             row = conn.execute(
@@ -291,7 +291,7 @@ class Store:
         return [Plan.model_validate_json(row[0]) for row in rows]
 
     def increase_realtime_buffer(
-        self, expected: Plan, minutes: int, reason: Optional[str], now: datetime,
+        self, expected: Plan, minutes: int, reason: str | None, now: datetime,
     ) -> bool:
         """CAS the observed plan and shift pending alarms in one write transaction.
 
@@ -355,6 +355,7 @@ class Store:
         No network work occurs while holding the write lock.
         """
         from uuid import uuid4
+
         from commutecompass.format import format_leave_ping, format_prep_ping
 
         if updated.event.id != expected.event.id:
@@ -505,7 +506,7 @@ class Store:
     def claim_ping_entry(
         self, ping_id: str, fired_at: datetime, *, leave_only: bool = False,
         due_only: bool = False,
-    ) -> Optional[PingEntry]:
+    ) -> PingEntry | None:
         """Atomically claim and return the authoritative current ping payload.
 
         Returns None if absent, already claimed, or suppressed by ``leave_only``.
@@ -577,7 +578,7 @@ class Store:
                 (raw, _json_dumps(resolved.model_dump()), _now_iso()),
             )
 
-    def get_geocode(self, raw: str, max_age_days: int = 30) -> Optional[ResolvedLocation]:
+    def get_geocode(self, raw: str, max_age_days: int = 30) -> ResolvedLocation | None:
         """Retrieve a cached geocode result if it exists and is fresh."""
         from datetime import timedelta
 
@@ -622,7 +623,7 @@ class Store:
 
     def get_cached_route(
         self, origin_key: str, dest_value: str, mode: str, max_age_days: int = 30
-    ) -> Optional[Route]:
+    ) -> Route | None:
         """Return the most recent cached route for the triple, if fresh enough."""
         from datetime import timedelta
 
@@ -655,7 +656,7 @@ class Store:
                 (job, at.isoformat()),
             )
 
-    def get_job_heartbeat(self, job: str) -> Optional[datetime]:
+    def get_job_heartbeat(self, job: str) -> datetime | None:
         """Return the last successful run time for a job, or None if never run."""
         with self._connect() as conn:
             row = conn.execute(
@@ -785,8 +786,8 @@ class Store:
         add_prep_minutes: int,
         prev_prep_at: datetime,
         *,
-        key: Optional[str] = None,
-    ) -> Optional[str]:
+        key: str | None = None,
+    ) -> str | None:
         """Record a full adjustment row so ``undo`` can restore the prior prep_at.
 
         When ``key`` is provided, behaves like ``record_adjust_key`` w.r.t.
@@ -816,7 +817,7 @@ class Store:
                 return None
         return actual_key
 
-    def last_adjust(self, event_id: Optional[str] = None) -> Optional[AdjustRow]:
+    def last_adjust(self, event_id: str | None = None) -> AdjustRow | None:
         """Return the most recent non-undone adjust row, optionally filtered to one event.
 
         ``undo`` calls this to find the row to revert.  Rows where
@@ -859,7 +860,7 @@ class Store:
     # ── Mute ledger ────────────────────────────────────────────────────────────
 
     def mute_event(
-        self, event_id: str, *, expires_at: Optional[datetime] = None
+        self, event_id: str, *, expires_at: datetime | None = None
     ) -> None:
         """Suppress all pings for ``event_id`` until ``expires_at`` (or forever).
 
@@ -914,7 +915,7 @@ class Store:
 
     # ── Pending-ping lookup ────────────────────────────────────────────────────
 
-    def get_pending_ping(self, event_id: str, kind: str) -> Optional[PingEntry]:
+    def get_pending_ping(self, event_id: str, kind: str) -> PingEntry | None:
         """Return the unfired ping (if any) for ``(event_id, kind)``.
 
         Used by ``snooze`` to look up the ping it's about to shift or skip.
@@ -968,8 +969,8 @@ class Store:
             )
 
     def get_current_location(
-        self, max_age_minutes: Optional[int] = None
-    ) -> Optional[CurrentLocation]:
+        self, max_age_minutes: int | None = None
+    ) -> CurrentLocation | None:
         """Return the singleton current_location if it exists.
 
         When max_age_minutes is set, return None if the row is older than that.

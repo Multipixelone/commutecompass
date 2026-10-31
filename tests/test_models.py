@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from commutecompass.models import (
-    Origin,
-    CalendarSpec,
-    PrepConfig,
-    SchedulingConfig,
-    PathsConfig,
-    OpencodeGoConfig,
-    MtaConfig,
-    Config,
-    ResolvedLocation,
-    Event,
-    TransitLeg,
-    Route,
-    Plan,
     Alert,
+    CalendarSpec,
+    Config,
+    Event,
+    MtaConfig,
+    OpencodeGoConfig,
+    Origin,
+    PathsConfig,
     PingEntry,
+    Plan,
+    PrepConfig,
+    ResolvedLocation,
+    Route,
+    SchedulingConfig,
+    TransitLeg,
 )
-
 
 # ─────────── Timezone helpers ───────────
 

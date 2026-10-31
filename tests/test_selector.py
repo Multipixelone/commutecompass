@@ -11,7 +11,6 @@ from commutecompass.models import Event, Plan
 from commutecompass.selector import SelectorError, resolve_event_selector
 from commutecompass.store import Store
 
-
 # Exit codes mirrored from cli.py for assertion clarity.
 EXIT_NOT_FOUND = 65
 EXIT_UNRESOLVED = 66

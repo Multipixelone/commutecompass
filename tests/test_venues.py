@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from commutecompass.models import ResolvedLocation
-from commutecompass.venues import VenueRegistry, VenueEntry
-
+from commutecompass.venues import VenueEntry, VenueRegistry
 
 FIXTURE_PATH = Path(__file__).parent.parent / "data" / "known_venues.yaml"
 

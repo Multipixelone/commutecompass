@@ -4,26 +4,24 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
+from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from typing import Literal, Protocol, cast
-
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import Alert, Route, TransitLeg
 from commutecompass.mta import (
+    NYC_TZ,
+    _build_route_context,
     _fetch_feed,
     _is_location_specific_alert,
-    _build_route_context,
-    _time_overlaps,
     _systems_lines_overlap,
-    NYC_TZ,
-    fetch_alerts,
+    _time_overlaps,
     alerts_affecting_route,
+    fetch_alerts,
     select_actionable_alerts,
 )
-
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -138,8 +136,8 @@ class TestFetchAlerts:
     def test_filters_entities_without_alerts(self) -> None:
         """Feed entities without alert payload are ignored."""
         from google.transit.gtfs_realtime_pb2 import (
-            FeedMessage,
             FeedEntity,
+            FeedMessage,
         )
 
         # Build a feed with one alert entity and one trip-update entity
@@ -692,14 +690,6 @@ class _StubLLM:
     def classify_alert_relevance(self, alert: Alert, route: Route, *, at_time: datetime) -> bool | None:
         self.calls += 1
         return self.decision
-
-
-class _LLMClientProto(Protocol):
-    """Minimal protocol for the llm parameter accepted by select_actionable_alerts."""
-
-    calls: int
-
-    def classify_alert_relevance(self, alert: Alert, route: Route, *, at_time: datetime) -> bool | None: ...
 
 
 class TestSelectActionableAlerts:

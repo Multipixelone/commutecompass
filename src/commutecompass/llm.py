@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -52,7 +52,7 @@ class OpencodeGoClient:
         self.token = token
         self.model = model
 
-    def resolve_location(self, raw: str, hints: dict[str, Any]) -> Optional[ResolvedLocation]:
+    def resolve_location(self, raw: str, hints: dict[str, Any]) -> ResolvedLocation | None:
         """Resolve a raw location string to a ResolvedLocation using the LLM.
 
         Returns None on failure, parse error, timeout, or kind=="unknown".
@@ -62,7 +62,7 @@ class OpencodeGoClient:
         except httpx.TimeoutException:
             log.warning("opencode-go request timed out for raw=%r", raw)
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - LLM is optional; fail soft
             log.warning("opencode-go request failed for raw=%r: %s", raw, exc)
             return None
 
@@ -116,7 +116,7 @@ class OpencodeGoClient:
         content = message.get("content")
         return content if isinstance(content, str) else ""
 
-    def _parse_response(self, content: str) -> Optional[ResolvedLocation]:
+    def _parse_response(self, content: str) -> ResolvedLocation | None:
         """Parse JSON from the response content, handling fenced JSON."""
         # Strip markdown code fences if present
         cleaned = re.sub(r"```(?:json)?\s*", "", content.strip()).strip()
@@ -149,11 +149,11 @@ class OpencodeGoClient:
 
     def classify_alert_relevance(
         self,
-        alert: "Alert",
-        route: "Route",
+        alert: Alert,
+        route: Route,
         *,
         at_time: datetime,
-    ) -> Optional[bool]:
+    ) -> bool | None:
         """Classify alert relevance for a specific route/time.
 
         Returns True/False when model is confident, None otherwise.
@@ -200,7 +200,7 @@ class OpencodeGoClient:
         except httpx.TimeoutException:
             log.debug("alert relevance LLM timeout alert_id=%s", alert.id)
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - LLM is optional; fail soft
             log.debug("alert relevance LLM failed alert_id=%s: %s", alert.id, exc)
             return None
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
@@ -15,8 +15,6 @@ from commutecompass.timeutil import (
     parse_iso_nyc,
     to_nyc,
 )
-
-UTC = timezone.utc
 
 
 class TestNowNyc:

@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 from google.auth.exceptions import RefreshError
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 class AuthError(Exception):
     """Raised when OAuth refresh fails and user needs to re-authenticate."""
 
-    pass
 
 
 # Scopes for read-only calendar access
@@ -36,7 +35,7 @@ class CalendarClient:
     def __init__(self, client_secret_json: str, token_path: Path | str) -> None:
         self.client_secret_json = client_secret_json
         self.token_path = Path(token_path)
-        self._creds: Optional[Credentials] = None
+        self._creds: Credentials | None = None
 
     def _load_credentials(self) -> Credentials:
         """Load credentials from token file, if they exist."""
@@ -83,7 +82,7 @@ class CalendarClient:
         self._save_credentials(creds)
         self._creds = creds
 
-    def _build_service(self) -> "googleapiclient.discovery.Resource":
+    def _build_service(self) -> googleapiclient.discovery.Resource:
         """Build the Google Calendar API service object."""
         from googleapiclient import discovery
 
@@ -97,7 +96,7 @@ class CalendarClient:
         Google may provide a timezone-aware ISO string (with Z/offset), or a
         naive datetime paired with a separate ``timeZone`` field.
         """
-        parsed = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(dt_str)
         if parsed.tzinfo is None:
             if tz_name:
                 parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
@@ -132,7 +131,7 @@ class CalendarClient:
             if not cal.enabled:
                 continue
 
-            page_token: Optional[str] = None
+            page_token: str | None = None
             while True:
                 response = (
                     service.events()

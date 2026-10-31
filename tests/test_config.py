@@ -20,7 +20,6 @@ from commutecompass.config import (
     update_config_field,
 )
 
-
 # ─────────── Fixtures ───────────
 
 @pytest.fixture

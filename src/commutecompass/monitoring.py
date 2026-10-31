@@ -34,6 +34,6 @@ def ping_heartbeat(url: str, *, timeout: float = 5.0) -> bool:
     try:
         retry(_do, attempts=2, label="heartbeat")
         return True
-    except Exception as exc:  # pragma: no cover - exercised via swallow path
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - heartbeat must never break a job
         logger.debug("heartbeat ping failed for %s: %s", url, exc)
         return False

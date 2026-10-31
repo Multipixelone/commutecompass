@@ -37,7 +37,7 @@ def fetch_feed_message(url: str, system: str, client: httpx.Client) -> FeedMessa
         )
 
     preview = content[:200]
-    if content.startswith(b"<?xml") or content.startswith(b"<Error") or content.startswith(b"<error"):
+    if content.startswith((b"<?xml", b"<Error", b"<error")):
         raise ValueError(
             f"MTA feed {system} ({url}) returned XML/HTML instead of protobuf: "
             f"status={response.status_code}, content_type={content_type}, "
