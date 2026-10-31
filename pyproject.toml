@@ -43,6 +43,11 @@ artifacts = ["src/commutecompass/data/*.csv"]
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint.per-file-ignores]
+# Job orchestrators deliberately catch everything per step so one failing
+# dependency (calendar, HA, MTA, routing, notifier) never aborts the run.
+"src/commutecompass/jobs/*.py" = ["BLE001"]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"

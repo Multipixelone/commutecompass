@@ -48,9 +48,8 @@ def test_lock_path_for_under_db_dir(tmp_path: Path) -> None:
 def test_lock_context_manager_releases_on_exception(tmp_path: Path) -> None:
     """Even if the wrapped block raises, the lock is released."""
     p = tmp_path / ".test.lock"
-    with pytest.raises(RuntimeError):
-        with JobLock(p, job_name="test"):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), JobLock(p, job_name="test"):
+        raise RuntimeError("boom")
     # The lock should be reusable now.
     with JobLock(p, job_name="test"):
         pass

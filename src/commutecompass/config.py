@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import time as dt_time
-from datetime import datetime
-from pathlib import Path
-
 import tomllib
-from typing import Any, Literal, Optional
+from datetime import datetime
+from datetime import time as dt_time
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
-
 
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
@@ -64,7 +62,7 @@ class MtaConfig(BaseModel):
 
 class LocationOverride(BaseModel):
     calendar_id: str
-    title_contains: Optional[str] = None
+    title_contains: str | None = None
     location: str
 
 
@@ -123,7 +121,7 @@ class HomeAssistantConfig(BaseModel):
     @classmethod
     def _validate_base_url(cls, v: str) -> str:
         """When set, the URL must start with http:// or https:// (no path traversal)."""
-        if v and not (v.startswith("http://") or v.startswith("https://")):
+        if v and not v.startswith(("http://", "https://")):
             raise ValueError(
                 f"home_assistant.base_url must start with http(s)://, got {v!r}"
             )
@@ -153,7 +151,7 @@ class WeatherConfig(BaseModel):
     @field_validator("forecast_url")
     @classmethod
     def _validate_forecast_url(cls, v: str) -> str:
-        if v and not (v.startswith("http://") or v.startswith("https://")):
+        if v and not v.startswith(("http://", "https://")):
             raise ValueError(f"weather.forecast_url must start with http(s)://, got {v!r}")
         return v.rstrip("/")
 
@@ -205,7 +203,7 @@ class RealtimeConfig(BaseModel):
     @classmethod
     def _validate_subway_urls(cls, v: list[str]) -> list[str]:
         for url in v:
-            if url and not (url.startswith("http://") or url.startswith("https://")):
+            if url and not url.startswith(("http://", "https://")):
                 raise ValueError(
                     f"realtime.subway_tripupdate_urls entries must start with http(s)://, got {url!r}"
                 )
@@ -214,7 +212,7 @@ class RealtimeConfig(BaseModel):
     @field_validator("lirr_tripupdate_url", "bus_tripupdate_url")
     @classmethod
     def _validate_tripupdate_url(cls, v: str) -> str:
-        if v and not (v.startswith("http://") or v.startswith("https://")):
+        if v and not v.startswith(("http://", "https://")):
             raise ValueError(f"realtime trip-update URL must start with http(s)://, got {v!r}")
         return v
 
@@ -228,13 +226,13 @@ class MonitoringConfig(BaseModel):
     the threshold past which the morning digest flags that poll has not run.
     """
 
-    heartbeat_url: Optional[str] = None
+    heartbeat_url: str | None = None
     poll_staleness_minutes: int = Field(default=15, ge=1, le=24 * 60)
 
     @field_validator("heartbeat_url")
     @classmethod
-    def _validate_heartbeat_url(cls, v: Optional[str]) -> Optional[str]:
-        if v and not (v.startswith("http://") or v.startswith("https://")):
+    def _validate_heartbeat_url(cls, v: str | None) -> str | None:
+        if v and not v.startswith(("http://", "https://")):
             raise ValueError(
                 f"monitoring.heartbeat_url must start with http(s)://, got {v!r}"
             )

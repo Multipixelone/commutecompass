@@ -11,12 +11,9 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
 
 import httpx
-
-
-T = TypeVar("T")
 
 _logger = logging.getLogger(__name__)
 
@@ -36,7 +33,7 @@ def is_transient_http_error(exc: BaseException) -> bool:
     return False
 
 
-def retry(
+def retry[T](
     fn: Callable[[], T],
     *,
     attempts: int = 3,

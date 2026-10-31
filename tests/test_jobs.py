@@ -4,23 +4,23 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecompass.jobs.morning import run as morning_run
-from commutecompass.jobs.poll import run as poll_run
 from commutecompass.config import (
     CalendarSpec,
     Config,
+    MtaConfig,
+    OpencodeGoConfig,
     Origin,
     PathsConfig,
     PrepConfig,
     SchedulingConfig,
-    OpencodeGoConfig,
-    MtaConfig,
 )
+from commutecompass.jobs.morning import run as morning_run
+from commutecompass.jobs.poll import run as poll_run
 from commutecompass.models import (
     Alert,
     Event,
@@ -29,11 +29,10 @@ from commutecompass.models import (
     Route,
     TransitLeg,
 )
-from commutecompass.store import Store
-from commutecompass.timeutil import NYC_TZ, now_nyc
 from commutecompass.notify import TelegramNotifier
 from commutecompass.realtime import FetchResult, Prediction
-
+from commutecompass.store import Store
+from commutecompass.timeutil import NYC_TZ, now_nyc
 
 # ─────────── Fixtures ──────────────────────────────────────────────────────────
 
@@ -185,7 +184,7 @@ def test_poll_retry_grace_uses_elapsed_network_time(
 ])
 def test_poll_refresh_advances_in_place_before_dispatch(
     minimal_config: Config, store: Store, minutes: int, leave_minutes: int,
-    fired_kind: Optional[str],
+    fired_kind: str | None,
 ) -> None:
     now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
     minimal_config.realtime.enabled = True
@@ -305,6 +304,7 @@ def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
     minimal_config: Config, store: Store, source: str,
 ) -> None:
     import json
+
     from commutecompass.routing import _parse_route
 
     now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
@@ -516,6 +516,7 @@ def test_replan_safety_keeps_only_same_journey_padding_and_manual_interval(store
 ])
 def test_same_journey_rejects_real_parsed_changes(store: Store, change: str) -> None:
     import json
+
     from commutecompass.jobs.poll import _same_journey
     from commutecompass.routing import _parse_route
 
@@ -542,6 +543,7 @@ def test_same_journey_rejects_real_parsed_changes(store: Store, change: str) -> 
 @pytest.mark.parametrize("missing", ["route", "transit"])
 def test_same_journey_ignores_missing_schedule_placeholders(store: Store, missing: str) -> None:
     import json
+
     from commutecompass.jobs.poll import _same_journey
     from commutecompass.routing import _parse_route
 
@@ -561,6 +563,7 @@ def test_same_journey_ignores_missing_schedule_placeholders(store: Store, missin
 
 def test_same_journey_compares_schedule_instants_across_dst_fold(store: Store) -> None:
     from datetime import UTC
+
     from commutecompass.jobs.poll import _same_journey
 
     old = refresh_fixture(store, now_nyc())
@@ -579,6 +582,7 @@ def test_parsed_directions_plan_cannot_advance_due_alarm(
 ) -> None:
     import json
     from dataclasses import replace
+
     from commutecompass.routing import _parse_route
 
     now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
@@ -638,7 +642,8 @@ def test_realtime_refresh_cas_rejects_stale_observation_and_preserves_manual_off
 def test_morning_saved_plan_then_serialized_update_refreshes_normal_poll(
     minimal_config: Config, store: Store,
 ) -> None:
-    from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+    from google.transit import gtfs_realtime_pb2 as gtfs
+
     from commutecompass.realtime import Predictions, _accumulate
 
     now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
@@ -689,7 +694,7 @@ def test_morning_saved_plan_then_serialized_update_refreshes_normal_poll(
         assert current.fire_at.timestamp() == original.fire_at.timestamp() - 120
 
 @pytest.fixture
-def minimal_config(tmp_path: Path) -> "Config":
+def minimal_config(tmp_path: Path) -> Config:
     """Minimal config for testing."""
     db_path = tmp_path / "test.db"
     venues_path = tmp_path / "venues.yaml"
@@ -768,7 +773,7 @@ def wide_today_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from commutecompass import timeutil
 
-    def _wide_bounds(reference: Optional[datetime] = None, **_: Any) -> tuple[datetime, datetime]:
+    def _wide_bounds(reference: datetime | None = None, **_: Any) -> tuple[datetime, datetime]:
         anchor = timeutil.to_nyc(reference) if reference is not None else timeutil.now_nyc()
         return (anchor - timedelta(hours=24), anchor + timedelta(hours=24))
 
@@ -1348,8 +1353,8 @@ class MockPlanner:
 
     def __init__(
         self,
-        plan: Optional[Plan] = None,
-        raise_on: Optional[Exception] = None,
+        plan: Plan | None = None,
+        raise_on: Exception | None = None,
     ) -> None:
         self.plan = plan
         self.raise_on = raise_on
@@ -2622,7 +2627,7 @@ def _seed_due_leave_plan(
     config: Config,
     event: Event,
     route: Route,
-    now: "datetime",
+    now: datetime,
     *,
     fire_offset_minutes: int = 5,
     kind: str = "leave",
@@ -2650,7 +2655,7 @@ def _seed_due_leave_plan(
     return store
 
 
-def _poll_at(config: Config, store: Store, plan: Plan, notifier: object, at: "datetime") -> None:
+def _poll_at(config: Config, store: Store, plan: Plan, notifier: object, at: datetime) -> None:
     poll_run(
         config,
         store=store,

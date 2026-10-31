@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import Optional, TextIO
+from typing import TextIO
 
 import httpx
 
 from commutecompass.config import Config
 from commutecompass.ha_client import call_service as _ha_call_service
-
 
 _logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ STDOUT_MSG_END = "===COMMUTECOMPASS-END==="
 # Zero-width space prepended to any body line that would otherwise be parsed as
 # a delimiter.  Invisible in Telegram / chat clients but breaks the exact
 # string match in the contrib shell script (and any other naive line parser).
-_ZWSP = "​"
+_ZWSP = "\u200b"
 
 
 def _escape_stdout_delimiters(body: str) -> str:
@@ -198,7 +197,7 @@ class HomeAssistantAlarmNotifier:
         token: str,
         domain: str,
         service: str,
-        extra_data: Optional[dict[str, object]] = None,
+        extra_data: dict[str, object] | None = None,
         title: str = "CommuteCompass",
     ) -> None:
         self.base_url = base_url
@@ -241,7 +240,7 @@ def build_notifier(config: Config) -> Notifier:
     return StdoutNotifier()
 
 
-def build_ha_alarm_notifier(config: Config) -> Optional["HomeAssistantAlarmNotifier"]:
+def build_ha_alarm_notifier(config: Config) -> HomeAssistantAlarmNotifier | None:
     """Build the additive HA alarm notifier when configured, else None.
 
     Requires both ``[home_assistant].enabled`` and ``[home_assistant.alarm]

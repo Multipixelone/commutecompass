@@ -3,25 +3,23 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import patch
 
 import pytest
-from typing import Any
 
-
-from commutecompass.store import Store
 from commutecompass.models import (
     CurrentLocation,
     Event,
-    Plan,
     PingEntry,
+    Plan,
     ResolvedLocation,
     Route,
     TransitLeg,
 )
-
+from commutecompass.store import Store
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -97,7 +95,7 @@ def make_ping(event_id: str = "evt-001", fire_offset_minutes: int = -10) -> Ping
         id="ping-001",
         event_id=event_id,
         kind="prep",
-        fire_at=datetime.now(timezone.utc) + timedelta(minutes=fire_offset_minutes),
+        fire_at=datetime.now(UTC) + timedelta(minutes=fire_offset_minutes),
         fired=False,
         fired_at=None,
         message="Start getting ready",
@@ -113,7 +111,7 @@ def test_poll_reconciliation_rejects_non_upcoming_events_atomically(
 ) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
-    now = datetime(2026, 10, 3, 16, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 3, 16, tzinfo=UTC)
     plan = make_plan(make_event())
     plan.event.start = now + timedelta(hours=1)
     if expired in {"current", "both"}:
@@ -144,7 +142,7 @@ def test_poll_reconciliation_rejects_non_upcoming_events_atomically(
 def test_poll_reconciliation_creates_urgent_alarms_for_upcoming_event(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
-    now = datetime(2026, 10, 3, 16, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 3, 16, tzinfo=UTC)
     plan = make_plan(make_event())
     plan.event.start = now + timedelta(minutes=10)
     plan.event.end = now + timedelta(hours=1)
@@ -277,7 +275,7 @@ def test_today_plans_before_2am_includes_0130_as_previous_day(tmp_db_path: Path)
     # Fixed reference: Saturday 2026-05-09 01:30 NYC — logical day is Fri May 8 02:00
     ref = datetime(2026, 5, 9, 1, 30, tzinfo=NYC_TZ)
     with patch("commutecompass.timeutil.now_nyc", return_value=ref):
-        day_start, day_end = logical_day_bounds_nyc(ref)
+        _day_start, _day_end = logical_day_bounds_nyc(ref)
         # Verify our assumption: event at 01:30 today is BEFORE day_start → previous day
         event_at_0130 = Event(
             id="evt-0130",
@@ -308,7 +306,7 @@ def test_today_plans_after_2am_includes_0230_as_current_day(tmp_db_path: Path) -
     # Fixed reference: Saturday 2026-05-09 03:00 NYC — logical day is Sat May 9 02:00
     ref = datetime(2026, 5, 9, 3, 0, tzinfo=NYC_TZ)
     with patch("commutecompass.timeutil.now_nyc", return_value=ref):
-        day_start, day_end = logical_day_bounds_nyc(ref)
+        _day_start, _day_end = logical_day_bounds_nyc(ref)
         # Verify our assumption: event at 02:30 today is AFTER day_start → current day
         event_at_0230 = Event(
             id="evt-0230",
@@ -337,7 +335,7 @@ def test_delete_old_plans(tmp_db_path: Path) -> None:
     store.init_schema()
 
     # Old event (yesterday)
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    yesterday = datetime.now(UTC) - timedelta(days=1)
     old_event = Event(
         id="evt-old",
         calendar_id="cal-001",
@@ -354,7 +352,7 @@ def test_delete_old_plans(tmp_db_path: Path) -> None:
     new_plan = make_plan(new_event)
     store.upsert_plan(new_plan)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
+    cutoff = datetime.now(UTC) - timedelta(hours=12)
     deleted = store.delete_old_plans(cutoff)
     assert deleted >= 1
     assert store.get_plan("evt-old") is None
@@ -370,7 +368,7 @@ def test_schedule_ping_insert(tmp_db_path: Path) -> None:
     ping = make_ping("evt-ping-1", fire_offset_minutes=30)
     store.schedule_ping(ping)
 
-    pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
+    pending = store.pending_pings(datetime.now(UTC) + timedelta(hours=1))
     assert len(pending) >= 1
     assert any(p.id == "ping-001" for p in pending)
 
@@ -384,7 +382,7 @@ def test_cancel_pings(tmp_db_path: Path) -> None:
         id="ping-cancel-1",
         event_id="evt-cancel",
         kind="prep",
-        fire_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+        fire_at=datetime.now(UTC) + timedelta(minutes=30),
         fired=False,
         message="Prep",
     )
@@ -392,7 +390,7 @@ def test_cancel_pings(tmp_db_path: Path) -> None:
         id="ping-cancel-2",
         event_id="evt-cancel",
         kind="leave",
-        fire_at=datetime.now(timezone.utc) + timedelta(minutes=50),
+        fire_at=datetime.now(UTC) + timedelta(minutes=50),
         fired=False,
         message="Leave",
     )
@@ -401,7 +399,7 @@ def test_cancel_pings(tmp_db_path: Path) -> None:
 
     cancelled = store.cancel_pings("evt-cancel")
     assert cancelled == 2
-    assert store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=2)) == []
+    assert store.pending_pings(datetime.now(UTC) + timedelta(hours=2)) == []
 
 
 # ── Ping dedup / idempotency ─────────────────────────────────────────────────────
@@ -416,7 +414,7 @@ def test_schedule_ping_dedup_same_event_id_kind(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     base = now + timedelta(hours=3)
 
     # First ping
@@ -459,7 +457,7 @@ def test_schedule_ping_same_event_different_kinds_both_coexist(tmp_db_path: Path
     store = Store(tmp_db_path)
     store.init_schema()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     prep_fire = now + timedelta(hours=1)
     leave_fire = now + timedelta(hours=2)
 
@@ -493,14 +491,14 @@ def test_pending_pings_filters_fired(tmp_db_path: Path) -> None:
     store.schedule_ping(ping)
 
     # Should appear before marking fired
-    before_mark = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
+    before_mark = store.pending_pings(datetime.now(UTC) + timedelta(hours=1))
     assert any(p.id == "ping-001" for p in before_mark)
 
     # Mark as fired
-    store.mark_fired("ping-001", datetime.now(timezone.utc))
+    store.mark_fired("ping-001", datetime.now(UTC))
 
     # Should not appear after marking fired
-    after_mark = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
+    after_mark = store.pending_pings(datetime.now(UTC) + timedelta(hours=1))
     assert not any(p.id == "ping-001" for p in after_mark)
 
 
@@ -511,10 +509,10 @@ def test_mark_fired(tmp_db_path: Path) -> None:
     ping = make_ping("evt-fired", fire_offset_minutes=15)
     store.schedule_ping(ping)
 
-    fired_at = datetime.now(timezone.utc)
+    fired_at = datetime.now(UTC)
     store.mark_fired("ping-001", fired_at)
 
-    pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
+    pending = store.pending_pings(datetime.now(UTC) + timedelta(hours=1))
     assert not any(p.id == "ping-001" for p in pending)
 
 
@@ -527,14 +525,14 @@ def test_pending_pings_respects_before_bound(tmp_db_path: Path) -> None:
         id="ping-future",
         event_id="evt-future",
         kind="prep",
-        fire_at=datetime.now(timezone.utc) + timedelta(hours=5),
+        fire_at=datetime.now(UTC) + timedelta(hours=5),
         fired=False,
         message="Future",
     )
     store.schedule_ping(future_ping)
 
     # Query with a before time 1 hour from now — the 5-hour-ahead ping should not appear
-    soon = datetime.now(timezone.utc) + timedelta(hours=1)
+    soon = datetime.now(UTC) + timedelta(hours=1)
     pending = store.pending_pings(soon)
     assert not any(p.id == "ping-future" for p in pending)
 
@@ -592,7 +590,7 @@ def test_cache_route_round_trip(tmp_db_path: Path) -> None:
     """A cached route is retrievable for the same (origin, dest, mode) triple."""
     store = Store(tmp_db_path)
     store.init_schema()
-    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=UTC))
 
     store.cache_route("40.6950,-73.9890", "Midtown", "transit", route)
     got = store.get_cached_route("40.6950,-73.9890", "Midtown", "transit")
@@ -607,9 +605,9 @@ def test_cache_route_keeps_latest(tmp_db_path: Path) -> None:
     """Re-caching the same triple overwrites the previous route."""
     store = Store(tmp_db_path)
     store.init_schema()
-    older = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    older = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=UTC))
     older.total_duration_seconds = 1000
-    newer = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    newer = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=UTC))
     newer.total_duration_seconds = 2000
 
     store.cache_route("k", "d", "transit", older)
@@ -623,7 +621,7 @@ def test_get_cached_route_respects_max_age(tmp_db_path: Path) -> None:
     """A stale cached route past max_age is treated as a miss."""
     store = Store(tmp_db_path)
     store.init_schema()
-    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=timezone.utc))
+    route = make_route(datetime(2026, 5, 8, 14, 0, tzinfo=UTC))
     store.cache_route("k", "d", "transit", route)
     assert store.get_cached_route("k", "d", "transit", max_age_days=0) is None
 
@@ -651,8 +649,8 @@ def test_job_heartbeat_round_trip(tmp_db_path: Path) -> None:
     store.init_schema()
     assert store.get_job_heartbeat("poll") is None
 
-    t1 = datetime(2026, 5, 8, 6, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 5, 8, 6, 1, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 8, 6, 0, tzinfo=UTC)
+    t2 = datetime(2026, 5, 8, 6, 1, tzinfo=UTC)
     store.record_job_success("poll", t1)
     assert store.get_job_heartbeat("poll") == t1
     store.record_job_success("poll", t2)
@@ -714,6 +712,7 @@ def test_route_selection_and_leave_buffer_persistence(
     tmp_db_path: Path, scheduled_directions: dict[str, Any],
 ) -> None:
     import sqlite3
+
     from commutecompass.routing import _parse_route, route_timing
 
     route = _parse_route(scheduled_directions)
@@ -753,16 +752,16 @@ def test_ping_entry_round_trip_with_datetime(tmp_db_path: Path) -> None:
         id="ping-rt",
         event_id="evt-rt",
         kind="leave",
-        fire_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        fire_at=datetime.now(UTC) - timedelta(minutes=5),
         fired=True,
-        fired_at=datetime.now(timezone.utc),
+        fired_at=datetime.now(UTC),
         message="Leave now",
     )
     store.schedule_ping(ping)
     assert ping.fired_at is not None
     store.mark_fired("ping-rt", ping.fired_at)
 
-    pending = store.pending_pings(datetime.now(timezone.utc) + timedelta(hours=1))
+    pending = store.pending_pings(datetime.now(UTC) + timedelta(hours=1))
     next((p for p in pending if p.id == "ping-rt"), None)
     # After marking fired it won't appear in pending; verify via direct query
     with __import__("sqlite3").connect(tmp_db_path) as conn:
@@ -802,7 +801,7 @@ def test_full_plan_with_nested_route_round_trip(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     start = now + timedelta(hours=3)
     event = Event(
         id="evt-full",
@@ -996,7 +995,7 @@ def test_claim_ping_entry_returns_current_payload_and_preserves_retry(tmp_db_pat
     other = Store(tmp_db_path)
     ping = make_ping("evt-current", fire_offset_minutes=-5)
     store.schedule_ping(ping)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     snapshot = store.pending_pings(now)[0]
     assert other.claim_ping(ping.id, now)
     assert other.release_ping(ping.id)
@@ -1020,7 +1019,7 @@ def test_claim_ping_entry_due_filter_rechecks_postponed_row(tmp_db_path: Path) -
     store = Store(tmp_db_path)
     store.init_schema()
     other = Store(tmp_db_path)
-    now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
     future = now + timedelta(minutes=10)
     ping = make_ping("evt-postponed").model_copy(update={"fire_at": now})
     store.schedule_ping(ping)
@@ -1042,7 +1041,7 @@ def test_claim_ping_entry_due_filter_rechecks_postponed_row(tmp_db_path: Path) -
 def test_claim_ping_future_default_compatibility(tmp_db_path: Path, boolean_wrapper: bool) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ping = make_ping("evt-future").model_copy(update={"fire_at": now + timedelta(hours=1)})
     store.schedule_ping(ping)
     if boolean_wrapper:
@@ -1080,7 +1079,7 @@ def test_claim_ping_entry_quiet_filter_uses_current_kind(tmp_db_path: Path) -> N
     other = Store(tmp_db_path)
     ping = make_ping("evt-quiet-current", fire_offset_minutes=-5)
     store.schedule_ping(ping)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with other._connect() as conn:
         conn.execute("UPDATE pings SET kind = 'prep' WHERE id = ?", (ping.id,))
     assert store.claim_ping_entry(ping.id, now, leave_only=True) is None
@@ -1097,7 +1096,7 @@ def test_claim_ping_returns_true_first_time(tmp_db_path: Path) -> None:
     ping = make_ping("evt-claim-1", fire_offset_minutes=-5)
     store.schedule_ping(ping)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert store.claim_ping(ping.id, now) is True
 
 
@@ -1108,7 +1107,7 @@ def test_claim_ping_returns_false_on_second_call(tmp_db_path: Path) -> None:
     ping = make_ping("evt-claim-2", fire_offset_minutes=-5)
     store.schedule_ping(ping)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert store.claim_ping(ping.id, now) is True
     # Second claim must NOT re-fire; this is the race protection.
     assert store.claim_ping(ping.id, now) is False
@@ -1121,7 +1120,7 @@ def test_claim_ping_marks_fired_in_db(tmp_db_path: Path) -> None:
     ping = make_ping("evt-claim-3", fire_offset_minutes=-5)
     store.schedule_ping(ping)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store.claim_ping(ping.id, now)
 
     pending = store.pending_pings(before=now + timedelta(hours=1))
@@ -1154,7 +1153,7 @@ def test_claim_ping_concurrent_threads_only_one_wins(tmp_db_path: Path) -> None:
 
     def attempt() -> None:
         barrier.wait()
-        results.append(store.claim_ping(ping.id, datetime.now(timezone.utc)))
+        results.append(store.claim_ping(ping.id, datetime.now(UTC)))
 
     threads = [threading.Thread(target=attempt) for _ in range(2)]
     for t in threads:
@@ -1175,7 +1174,7 @@ def test_record_adjust_with_explicit_key_dedups_on_retry(tmp_db_path: Path) -> N
     store = Store(tmp_db_path)
     store.init_schema()
 
-    prev = datetime.now(timezone.utc)
+    prev = datetime.now(UTC)
     k1 = store.record_adjust("evt-1", add_prep_minutes=30, prev_prep_at=prev, key="k-stable")
     assert k1 == "k-stable"
 
@@ -1188,7 +1187,7 @@ def test_record_adjust_without_key_generates_auto_key(tmp_db_path: Path) -> None
     store = Store(tmp_db_path)
     store.init_schema()
 
-    prev = datetime.now(timezone.utc)
+    prev = datetime.now(UTC)
     a = store.record_adjust("evt-1", add_prep_minutes=15, prev_prep_at=prev)
     b = store.record_adjust("evt-1", add_prep_minutes=15, prev_prep_at=prev)
     assert a is not None and b is not None and a != b
@@ -1200,7 +1199,7 @@ def test_last_adjust_returns_most_recent_non_undone(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    base = datetime.now(timezone.utc)
+    base = datetime.now(UTC)
     # Three rows, last-applied wins.
     store.record_adjust("evt-A", add_prep_minutes=10, prev_prep_at=base, key="k1")
     store.record_adjust("evt-A", add_prep_minutes=20, prev_prep_at=base, key="k2")
@@ -1222,7 +1221,7 @@ def test_last_adjust_filters_by_event_id(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
 
-    base = datetime.now(timezone.utc)
+    base = datetime.now(UTC)
     store.record_adjust("evt-A", add_prep_minutes=10, prev_prep_at=base, key="kA")
     store.record_adjust("evt-B", add_prep_minutes=20, prev_prep_at=base, key="kB")
 
@@ -1252,7 +1251,7 @@ def test_mark_adjust_undone_twice_is_noop(tmp_db_path: Path) -> None:
     store.init_schema()
 
     store.record_adjust(
-        "evt-X", add_prep_minutes=5, prev_prep_at=datetime.now(timezone.utc), key="k"
+        "evt-X", add_prep_minutes=5, prev_prep_at=datetime.now(UTC), key="k"
     )
     assert store.mark_adjust_undone("k") is True
     assert store.mark_adjust_undone("k") is False
@@ -1348,7 +1347,7 @@ def test_get_pending_ping_skips_fired(tmp_db_path: Path) -> None:
 
     ping = make_ping("evt-fired", fire_offset_minutes=-5)
     store.schedule_ping(ping)
-    store.claim_ping(ping.id, datetime.now(timezone.utc))
+    store.claim_ping(ping.id, datetime.now(UTC))
 
     assert store.get_pending_ping("evt-fired", kind="prep") is None
 

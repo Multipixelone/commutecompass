@@ -7,19 +7,19 @@ from unittest.mock import patch
 
 import httpx
 
+from commutecompass.config import Config
 from commutecompass.notify import (
+    _MAX_MESSAGE_CHARS,
     STDOUT_MSG_END,
     STDOUT_MSG_START,
     HomeAssistantAlarmNotifier,
     StdoutNotifier,
     TelegramNotifier,
-    _MAX_MESSAGE_CHARS,
     _chunk_message,
     _strip_markdown_v2,
     build_ha_alarm_notifier,
     build_notifier,
 )
-from commutecompass.config import Config
 
 
 class TestTelegramNotifierSend:
@@ -287,7 +287,7 @@ class TestStdoutNotifier:
         assert "after" in lines
         defused = [ln for ln in lines if ln != STDOUT_MSG_END and STDOUT_MSG_END in ln]
         assert len(defused) == 1
-        assert defused[0].startswith("​")
+        assert defused[0].startswith("\u200b")
 
     def test_send_handles_broken_pipe_gracefully(self) -> None:
         """If the downstream pipe is closed, send() returns False instead of raising."""

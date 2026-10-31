@@ -7,30 +7,37 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+from google.transit import gtfs_realtime_pb2 as gtfs
 
 from commutecompass.config import RealtimeConfig
 from commutecompass.models import Event, Plan, Route, TransitLeg
 from commutecompass.realtime import (
-    FetchResult, Predictions, _accumulate, _cached_fetch, _feed_cache,
-    _fetch_predictions, _match_stop_ids, _route_matches, realtime_delay,
+    FetchResult,
+    Predictions,
+    _accumulate,
+    _cached_fetch,
+    _feed_cache,
+    _fetch_predictions,
+    _match_stop_ids,
+    _route_matches,
+    realtime_delay,
 )
-from commutecompass.timeutil import NYC_TZ
 from commutecompass.store import Store
+from commutecompass.timeutil import NYC_TZ
 
 SCHED = datetime(2026, 5, 8, 8, tzinfo=NYC_TZ)
 NOW = SCHED - timedelta(minutes=10)
 
 
 def make_route(**overrides: Any) -> Route:
-    fields: dict[str, Any] = dict(
-        mode="TRANSIT", system="MTA Subway", line="Q", headsign="Astoria",
-        depart_at=SCHED, arrive_at=SCHED + timedelta(minutes=20),
-        duration_seconds=1200, summary="leg", departure_stop="14 St-Union Sq",
-        scheduled_departure_valid=True, gtfs_trip_id="A", gtfs_route_id="Q",
-        gtfs_start_date="20260508", gtfs_start_time="07:30:00",
-        gtfs_boarding_stop_id="R20N", gtfs_boarding_stop_sequence=10, gtfs_direction_id=0,
-    )
+    fields: dict[str, Any] = {
+        "mode": "TRANSIT", "system": "MTA Subway", "line": "Q", "headsign": "Astoria",
+        "depart_at": SCHED, "arrive_at": SCHED + timedelta(minutes=20),
+        "duration_seconds": 1200, "summary": "leg", "departure_stop": "14 St-Union Sq",
+        "scheduled_departure_valid": True, "gtfs_trip_id": "A", "gtfs_route_id": "Q",
+        "gtfs_start_date": "20260508", "gtfs_start_time": "07:30:00",
+        "gtfs_boarding_stop_id": "R20N", "gtfs_boarding_stop_sequence": 10, "gtfs_direction_id": 0,
+    }
     fields.update(overrides)
     leg = TransitLeg(**fields)
     return Route(legs=[leg], depart_at=leg.depart_at, arrive_at=leg.arrive_at,
@@ -46,7 +53,9 @@ def feed_with(
 ) -> Any:
     feed = gtfs.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
-    feed.header.incrementality = int(differential)
+    feed.header.incrementality = (
+        gtfs.FeedHeader.DIFFERENTIAL if differential else gtfs.FeedHeader.FULL_DATASET
+    )
     if header is not None:
         feed.header.timestamp = int(header.timestamp())
     entity = feed.entity.add()
@@ -241,8 +250,12 @@ def test_freshness_across_fold_uses_elapsed_seconds() -> None:
     assert now.isoformat() == "2026-11-01T01:55:00-04:00"
     for age, status in [(300, "observed"), (301, "unavailable")]:
         observed_at = datetime.fromtimestamp(now.timestamp() + age, NYC_TZ)
+
+        def clock(observed_at: datetime = observed_at) -> datetime:
+            return observed_at
+
         delay = realtime_delay(route, SCHED, RealtimeConfig(enabled=True),
-                               fetcher=lambda urls, system: result, clock=lambda: observed_at)
+                               fetcher=lambda urls, system: result, clock=clock)
         assert delay.status == status
 
 

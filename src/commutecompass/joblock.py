@@ -13,8 +13,7 @@ import logging
 import os
 from pathlib import Path
 from types import TracebackType
-from typing import Optional, Type
-
+from typing import Self
 
 _logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class JobLock:
     def __init__(self, lock_path: Path | str, *, job_name: str) -> None:
         self.lock_path = Path(lock_path)
         self.job_name = job_name
-        self._fd: Optional[int] = None
+        self._fd: int | None = None
 
     def acquire(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,15 +55,15 @@ class JobLock:
             os.close(self._fd)
             self._fd = None
 
-    def __enter__(self) -> "JobLock":
+    def __enter__(self) -> Self:
         self.acquire()
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ) -> None:
         self.release()
 

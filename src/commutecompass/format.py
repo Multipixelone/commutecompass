@@ -72,7 +72,7 @@ def _normalize_line(line: str) -> str:
 
 # Unicode bidirectional control characters — strip from user-supplied strings
 # so a stray RTL override in an event title cannot mangle the rendered message.
-_BIDI_CONTROLS = "‪‫‬‭‮⁦⁧⁨⁩"
+_BIDI_CONTROLS = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 # Default maximum length for a sanitized field.  Long enough for realistic
 # event titles, short enough to keep digests legible and well under Telegram's
 # 4096-char message limit.

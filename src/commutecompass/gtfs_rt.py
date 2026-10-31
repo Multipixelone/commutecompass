@@ -12,9 +12,7 @@ same actionable error message.
 from __future__ import annotations
 
 import httpx
-from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
-    FeedMessage,
-)
+from google.transit.gtfs_realtime_pb2 import FeedMessage
 
 __all__ = ["fetch_feed_message"]
 
@@ -39,7 +37,7 @@ def fetch_feed_message(url: str, system: str, client: httpx.Client) -> FeedMessa
         )
 
     preview = content[:200]
-    if content.startswith(b"<?xml") or content.startswith(b"<Error") or content.startswith(b"<error"):
+    if content.startswith((b"<?xml", b"<Error", b"<error")):
         raise ValueError(
             f"MTA feed {system} ({url}) returned XML/HTML instead of protobuf: "
             f"status={response.status_code}, content_type={content_type}, "
@@ -52,4 +50,6 @@ def fetch_feed_message(url: str, system: str, client: httpx.Client) -> FeedMessa
             f"preview={preview[:80]!r}"
         )
 
-    return FeedMessage.FromString(content)
+    message = FeedMessage()
+    message.ParseFromString(content)
+    return message

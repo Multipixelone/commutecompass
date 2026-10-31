@@ -11,10 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from commutecompass.models import Origin, ResolvedLocation, Route
 from commutecompass.config import RealtimeConfig
+from commutecompass.models import Origin, ResolvedLocation, Route
 from commutecompass.realtime import FetchResult, Predictions, _accumulate, realtime_delay
-from commutecompass.store import Store
 from commutecompass.routing import (
     _parse_route,
     _provider_time,
@@ -24,8 +23,8 @@ from commutecompass.routing import (
     route_cache_key,
     route_timing,
 )
+from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
-
 
 # ─── Transfer counting ─────────────────────────────────────────────────────────
 
@@ -603,7 +602,7 @@ class TestParseRoute:
 # ─── Test plan_route ──────────────────────────────────────────────────────────
 
 def _boarding_predictions(boarding: datetime, observed: datetime) -> FetchResult:
-    from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+    from google.transit import gtfs_realtime_pb2 as gtfs
 
     feed = gtfs.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"

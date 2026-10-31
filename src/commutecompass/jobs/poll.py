@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, timedelta
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
 from commutecompass.config import Config
-from commutecompass.models import Alert, CurrentLocation, Plan, PingEntry, ZoneInfo
+from commutecompass.models import Alert, CurrentLocation, PingEntry, Plan, ZoneInfo
 from commutecompass.timeutil import is_within_quiet_hours, now_nyc
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from commutecompass.store import Store
-    from commutecompass.notify import Notifier
+
     from commutecompass.llm import OpencodeGoClient
+    from commutecompass.notify import Notifier
+    from commutecompass.store import Store
 
 logger = logging.getLogger(__name__)
 
@@ -39,22 +41,22 @@ _MAX_SEND_ATTEMPTS = 5
 _SEND_RETRY_GRACE_SECONDS = 15 * 60
 
 # Module-level memo: (captured_at, (subway_url, lirr_url, bus_url), alerts).
-_alerts_cache: "tuple[datetime, tuple[str, str, str], list[Alert]] | None" = None
+_alerts_cache: tuple[datetime, tuple[str, str, str], list[Alert]] | None = None
 
 
 def run(
     config: Config,
     *,
-    store: Optional[Store] = None,
-    fetch_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
-    alerts_affecting_route_fn: Optional[Callable[..., list[Alert]]] = None,
-    select_alerts_fn: Optional[Callable[..., list[Alert]]] = None,
-    notifier: Optional["Notifier"] = None,
-    ha_alarm_notifier: Optional["Notifier"] = None,
-    plan_event_fn: Optional[Callable[..., Plan]] = None,
-    now_fn: Optional[Callable[[], "datetime"]] = None,
-    ha_fetch_fn: Optional[Callable[..., Optional[CurrentLocation]]] = None,
-    ha_zones_fn: Optional[Callable[..., dict[str, ZoneInfo]]] = None,
+    store: Store | None = None,
+    fetch_alerts_fn: Callable[..., list[Alert]] | None = None,
+    alerts_affecting_route_fn: Callable[..., list[Alert]] | None = None,
+    select_alerts_fn: Callable[..., list[Alert]] | None = None,
+    notifier: Notifier | None = None,
+    ha_alarm_notifier: Notifier | None = None,
+    plan_event_fn: Callable[..., Plan] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+    ha_fetch_fn: Callable[..., CurrentLocation | None] | None = None,
+    ha_zones_fn: Callable[..., dict[str, ZoneInfo]] | None = None,
 ) -> None:
     """Run the poll loop job.
 
@@ -80,13 +82,13 @@ def run(
         now_fn: Time provider (default: real now_nyc).
     """
     # Resolve deps
-    from commutecompass.store import Store
+    from commutecompass.llm import OpencodeGoClient
     from commutecompass.mta import alerts_affecting_route as _affecting
     from commutecompass.mta import fetch_alerts as _fetch
     from commutecompass.mta import select_actionable_alerts as _select_actionable
     from commutecompass.notify import build_ha_alarm_notifier, build_notifier
     from commutecompass.planner import plan_event as _plan_event
-    from commutecompass.llm import OpencodeGoClient
+    from commutecompass.store import Store
 
     _store: Store = store or Store(config.paths.db_path)
     _use_alerts_cache = fetch_alerts_fn is None
@@ -97,7 +99,7 @@ def run(
         _select_alerts = select_alerts_fn
     elif alerts_affecting_route_fn is not None:
         # Backward-compatible test injection path.
-        _select_alerts = lambda alerts, route, at_time, llm=None: _alerts_affecting(  # noqa: E731
+        _select_alerts = lambda alerts, route, at_time, llm=None: _alerts_affecting(
             alerts, route, at_time
         )
     else:
@@ -107,15 +109,15 @@ def run(
     # also inject one (tests do).  We do not fall back to build_ha_alarm_notifier
     # when ha_alarm_notifier is explicitly None *and* the test path supplied
     # other overrides, so a None test value stays None.
-    _ha_alarm: Optional[Notifier] = (
+    _ha_alarm: Notifier | None = (
         ha_alarm_notifier if ha_alarm_notifier is not None else build_ha_alarm_notifier(config)
     )
     _ha_alarm_kinds: set[str] = set(config.home_assistant.alarm.kinds)
     _plan_event_fn: Callable[..., Plan] = plan_event_fn or _plan_event
-    _now_fn: Callable[[], "datetime"] = now_fn or now_nyc
+    _now_fn: Callable[[], datetime] = now_fn or now_nyc
     if ha_fetch_fn is None:
         from commutecompass.ha_client import fetch_location as _ha_fetch
-        _ha_fetch_fn: Callable[..., Optional[CurrentLocation]] = _ha_fetch
+        _ha_fetch_fn: Callable[..., CurrentLocation | None] = _ha_fetch
     else:
         _ha_fetch_fn = ha_fetch_fn
     if ha_zones_fn is None:
@@ -167,7 +169,7 @@ def run(
     now = _now_fn()
     quiet_start = config.scheduling.quiet_hours_start
     quiet_end = config.scheduling.quiet_hours_end
-    def quiet_at(at: "datetime") -> bool:
+    def quiet_at(at: datetime) -> bool:
         return (
             quiet_start is not None
             and quiet_end is not None
@@ -265,11 +267,15 @@ def run(
         # Additive HA alarm: fire AFTER the primary send attempt regardless of
         # its outcome (claim already consumed the row).  An HA outage cannot
         # un-fire the ping or cause repeat sends.
-        if sent_ok and _ha_alarm is not None and ping.kind in _ha_alarm_kinds:
-            if not _ha_alarm.send(ping.message):
-                logger.warning(
-                    "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
-                )
+        if (
+            sent_ok
+            and _ha_alarm is not None
+            and ping.kind in _ha_alarm_kinds
+            and not _ha_alarm.send(ping.message)
+        ):
+            logger.warning(
+                "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
+            )
 
     # ── Phase 3: fetch alerts ─────────────────────────────────────────────────
     global _alerts_cache
@@ -568,16 +574,14 @@ def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
     # Check leg lines/systems
     old_lines = {(leg.system, leg.line) for leg in old_plan.route.legs if leg.mode == "TRANSIT"}
     new_lines = {(leg.system, leg.line) for leg in new_plan.route.legs if leg.mode == "TRANSIT"}
-    if old_lines != new_lines:
-        return True
-
-    return False
+    return old_lines != new_lines
 
 
-def _schedule_pings_for_plan(plan: Plan, store: "Store", now: "datetime") -> None:
+def _schedule_pings_for_plan(plan: Plan, store: Store, now: datetime) -> None:
     """Schedule prep and leave pings for a plan (skip if already past)."""
-    from commutecompass.format import format_prep_ping, format_leave_ping
     from uuid import uuid4
+
+    from commutecompass.format import format_leave_ping, format_prep_ping
 
     if plan.leave_at is not None and plan.leave_at > now:
         leave_msg = format_leave_ping(plan)
