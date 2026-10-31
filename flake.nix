@@ -19,7 +19,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
         commutecompass = pkgs.callPackage ./nix/package.nix { };
-        pythonEnv = pkgs.python313.withPackages (
+        pythonEnv = pkgs.python3.withPackages (
           ps: with ps; [
             pip
             pytest
