@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+from google.transit import gtfs_realtime_pb2 as gtfs
 
 from commutecompass.config import RealtimeConfig
 from commutecompass.models import Event, Plan, Route, TransitLeg
@@ -46,7 +46,9 @@ def feed_with(
 ) -> Any:
     feed = gtfs.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
-    feed.header.incrementality = int(differential)
+    feed.header.incrementality = (
+        gtfs.FeedHeader.DIFFERENTIAL if differential else gtfs.FeedHeader.FULL_DATASET
+    )
     if header is not None:
         feed.header.timestamp = int(header.timestamp())
     entity = feed.entity.add()

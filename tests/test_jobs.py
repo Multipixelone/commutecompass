@@ -638,7 +638,7 @@ def test_realtime_refresh_cas_rejects_stale_observation_and_preserves_manual_off
 def test_morning_saved_plan_then_serialized_update_refreshes_normal_poll(
     minimal_config: Config, store: Store,
 ) -> None:
-    from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+    from google.transit import gtfs_realtime_pb2 as gtfs
     from commutecompass.realtime import Predictions, _accumulate
 
     now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)

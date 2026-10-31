@@ -603,7 +603,7 @@ class TestParseRoute:
 # ─── Test plan_route ──────────────────────────────────────────────────────────
 
 def _boarding_predictions(boarding: datetime, observed: datetime) -> FetchResult:
-    from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
+    from google.transit import gtfs_realtime_pb2 as gtfs
 
     feed = gtfs.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"

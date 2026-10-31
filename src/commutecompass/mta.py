@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
-from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
+from google.transit.gtfs_realtime_pb2 import (
     Alert as GtfsAlert,
 )
 

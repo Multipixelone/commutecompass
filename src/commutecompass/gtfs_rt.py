@@ -12,9 +12,7 @@ same actionable error message.
 from __future__ import annotations
 
 import httpx
-from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
-    FeedMessage,
-)
+from google.transit.gtfs_realtime_pb2 import FeedMessage
 
 __all__ = ["fetch_feed_message"]
 
@@ -52,4 +50,6 @@ def fetch_feed_message(url: str, system: str, client: httpx.Client) -> FeedMessa
             f"preview={preview[:80]!r}"
         )
 
-    return FeedMessage.FromString(content)
+    message = FeedMessage()
+    message.ParseFromString(content)
+    return message

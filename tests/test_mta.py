@@ -137,7 +137,7 @@ class TestFetchAlerts:
 
     def test_filters_entities_without_alerts(self) -> None:
         """Feed entities without alert payload are ignored."""
-        from google.transit.gtfs_realtime_pb2 import (  # type: ignore[import-untyped]
+        from google.transit.gtfs_realtime_pb2 import (
             FeedMessage,
             FeedEntity,
         )
