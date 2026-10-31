@@ -1111,7 +1111,8 @@ def test_morning_run_idempotent(
         assert call_count == 4
 
         import sqlite3
-        with sqlite3.connect(minimal_config.paths.db_path) as conn:
+        from contextlib import closing
+        with closing(sqlite3.connect(minimal_config.paths.db_path)) as conn, conn:
             rows = conn.execute("SELECT COUNT(*) FROM pings").fetchone()
             # Dedup invariant: one prep + one leave ping for evt-1 (evt-2 has no route → 0 pings).
             # Second run replaces the first run's pings, it does not stack — total = 2, not 4.
