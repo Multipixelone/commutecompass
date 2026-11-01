@@ -43,6 +43,12 @@ to stdout; relay that stdout back to the user.
 | "run a poll cycle now" / "check alerts now"                              | `scripts/poll.sh`                                 |
 | "what time will my alarm be tomorrow?" / "preview tomorrow's wake time"  | `scripts/tomorrow.sh` (dry-run; no HA push)       |
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
+| "when is my wake/nap alarm?" | `scripts/alarm-status.sh [--json]` |
+| "nap for 30 minutes" / "wake me at 15:30" | `scripts/alarm-nap.sh 30` or `--until 15:30` |
+| "skip my next wake/nap alarm" | `scripts/alarm-skip.sh` |
+| "enable wake alarms" / "disable wake alarms" | `scripts/alarm-on.sh` / `scripts/alarm-off.sh` |
+| "refresh my wake alarm" | `scripts/alarm-publish.sh [--dry-run]` |
+| Operator: run the desktop ringer (long-running; not chat) | `scripts/alarm-daemon.sh` |
 | "what's my prep buffer set to?" / "show me my config"                    | `scripts/config-show.sh`                          |
 | "set my prep buffer to 30 min"                                           | `scripts/config-set.sh <dotted.key> <value>`      |
 | "turn off quiet hours" / "remove that override"                          | `scripts/config-unset.sh <dotted.key>`            |

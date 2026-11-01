@@ -226,6 +226,183 @@ def tomorrow(ctx: click.Context, dry_run: bool) -> None:
     )
 
 
+# ─────────── alarm (wake & nap) ──────────────────────────────────────────────
+
+
+def _alarm_ha_or_exit(cfg: "Config") -> tuple[str, str]:
+    """Return (base_url, token) or exit EXIT_CONFIG when HA isn't configured."""
+    from commutecompass.alarm import AlarmConfigError, require_ha
+
+    try:
+        return require_ha(cfg)
+    except AlarmConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
+
+
+def _alarm_call(cfg: "Config", service: str, data: dict[str, object]) -> None:
+    """Call ``domain.service`` on HA; exit EXIT_CONFIG/EXIT_TRANSIENT on failure."""
+    from commutecompass.alarm import AlarmConfigError, split_service
+    from commutecompass.ha_client import call_service
+
+    base_url, token = _alarm_ha_or_exit(cfg)
+    try:
+        domain, name = split_service(service)
+    except AlarmConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
+    if not call_service(base_url, token, domain, name, data):
+        click.echo(f"Error: Home Assistant call {service} failed", err=True)
+        sys.exit(EXIT_TRANSIENT)
+
+
+@cli.group()
+@click.pass_context
+def alarm(ctx: click.Context) -> None:
+    """Wake & nap alarm (publishes to Home Assistant; daemon rings link)."""
+    cfg = _load_config(ctx.obj["config_path"])
+    if not cfg.alarm.enabled:
+        click.echo("Error: [alarm].enabled is false", err=True)
+        sys.exit(EXIT_CONFIG)
+
+
+@alarm.command(name="publish")
+@click.option("--dry-run", is_flag=True, help="Compute and print the wake time; skip the HA push.")
+@click.pass_context
+def alarm_publish(ctx: click.Context, dry_run: bool) -> None:
+    """Compute the next morning wake and publish it to HA."""
+    cfg = _load_config(ctx.obj["config_path"])
+    from commutecompass.alarm import AlarmConfigError, AlarmError, publish
+
+    try:
+        result, ok = publish(cfg, dry_run=dry_run)
+    except AlarmConfigError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
+    except AlarmError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_TRANSIENT)
+    nxt = result.next_prep_at.isoformat() if result.next_prep_at else "-"
+    suffix = " (dry-run — HA push skipped)" if dry_run else ""
+    click.echo(f"Wake: {result.wake_at.isoformat()} ({result.source}) next_prep_at={nxt}{suffix}")
+    if not dry_run and not ok:
+        click.echo("Error: Home Assistant publish failed", err=True)
+        sys.exit(EXIT_TRANSIENT)
+
+
+@alarm.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@click.pass_context
+def alarm_status(ctx: click.Context, as_json: bool) -> None:
+    """Show HA's next alarm, master switch and daemon state/heartbeat."""
+    import json as _json
+
+    cfg = _load_config(ctx.obj["config_path"])
+    base_url, token = _alarm_ha_or_exit(cfg)
+    from commutecompass.alarm_daemon import HAUnavailable, fetch_states, parse_ha_datetime
+
+    try:
+        states = fetch_states(base_url, token)
+    except HAUnavailable as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_TRANSIENT)
+    a = cfg.alarm
+
+    def st(entity: str) -> Optional[str]:
+        raw = states.get(entity, {}).get("state")
+        return raw if isinstance(raw, str) else None
+
+    nxt = parse_ha_datetime(st(a.next_alarm_entity))
+    attrs = states.get(a.next_alarm_entity, {}).get("attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    hb = parse_ha_datetime(st(a.heartbeat_entity))
+    payload = {
+        "enabled": st(a.enabled_entity) == "on",
+        "next_alarm": nxt.isoformat() if nxt else None,
+        "kind": attrs.get("kind"),
+        "event": attrs.get("event"),
+        "daemon_state": st(a.state_entity),
+        "heartbeat": hb.isoformat() if hb else None,
+    }
+    if as_json:
+        click.echo(_json.dumps(payload, indent=2))
+        return
+    click.echo(f"Alarm enabled: {'yes' if payload['enabled'] else 'no'}")
+    when = payload["next_alarm"] or "none"
+    kind = f" ({payload['kind']})" if payload["kind"] else ""
+    click.echo(f"Next alarm: {when}{kind}")
+    if payload["event"]:
+        click.echo(f"Event: {payload['event']}")
+    click.echo(f"Daemon: {payload['daemon_state'] or 'unknown'} heartbeat={payload['heartbeat'] or 'never'}")
+
+
+@alarm.command(name="nap")
+@click.argument("minutes", type=click.IntRange(1, 24 * 60), required=False)
+@click.option("--until", "until", help="Wake at this NYC time (HH:MM) instead of after MINUTES.")
+@click.pass_context
+def alarm_nap(ctx: click.Context, minutes: Optional[int], until: Optional[str]) -> None:
+    """Start a nap: ring after MINUTES (or at --until HH:MM). HA caps it at the next prep."""
+    if (minutes is None) == (until is None):
+        click.echo("Error: give exactly one of MINUTES or --until HH:MM", err=True)
+        sys.exit(EXIT_USAGE)
+    if until is not None:
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from commutecompass.timeutil import NYC_TZ, now_nyc
+
+        try:
+            clock = _dt.strptime(until, "%H:%M").time()
+        except ValueError:
+            click.echo(f"Error: --until expects HH:MM, got {until!r}", err=True)
+            sys.exit(EXIT_USAGE)
+        now = now_nyc()
+        target = _dt.combine(now.date(), clock, tzinfo=NYC_TZ)
+        if target <= now:
+            target = _dt.combine(now.date() + _td(days=1), clock, tzinfo=NYC_TZ)
+        minutes = max(1, int((target.timestamp() - now.timestamp() + 59) // 60))
+    cfg = _load_config(ctx.obj["config_path"])
+    _alarm_call(cfg, cfg.alarm.nap_script, {"minutes": minutes})
+    click.echo(f"Nap set: {minutes} min (HA caps at the next prep time).")
+
+
+@alarm.command(name="skip")
+@click.pass_context
+def alarm_skip(ctx: click.Context) -> None:
+    """Skip the next alarm (auto-resets after it passes)."""
+    cfg = _load_config(ctx.obj["config_path"])
+    _alarm_call(cfg, cfg.alarm.skip_script, {})
+    click.echo("Next alarm skipped.")
+
+
+@alarm.command(name="on")
+@click.pass_context
+def alarm_on(ctx: click.Context) -> None:
+    """Turn the alarm master switch on."""
+    cfg = _load_config(ctx.obj["config_path"])
+    _alarm_call(cfg, "input_boolean.turn_on", {"entity_id": cfg.alarm.enabled_entity})
+    click.echo("Alarm enabled.")
+
+
+@alarm.command(name="off")
+@click.pass_context
+def alarm_off(ctx: click.Context) -> None:
+    """Turn the alarm master switch off."""
+    cfg = _load_config(ctx.obj["config_path"])
+    _alarm_call(cfg, "input_boolean.turn_off", {"entity_id": cfg.alarm.enabled_entity})
+    click.echo("Alarm disabled.")
+
+
+@alarm.command(name="daemon")
+@click.pass_context
+def alarm_daemon_cmd(ctx: click.Context) -> None:
+    """Run the long-lived ringer (polls HA, plays via PipeWire)."""
+    cfg = _load_config(ctx.obj["config_path"])
+    _alarm_ha_or_exit(cfg)
+    from commutecompass.alarm_daemon import run_daemon
+
+    run_daemon(cfg)
+
 # ─────────── plan EVENT_ID ───────────────────────────────────────────────────
 
 

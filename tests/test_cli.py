@@ -17,6 +17,7 @@ from commutecompass.models import Event, Plan
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
 
+
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -1491,3 +1492,96 @@ class TestPlanFromOption:
             )
         assert result.exit_code == EXIT_USAGE
         assert "mutually exclusive" in result.output.lower()
+
+
+class TestAlarmCLI:
+    def _config(self, tmp_path: Path) -> Config:
+        cfg = _fake_config(tmp_path)
+        cfg.alarm.enabled = True
+        cfg.home_assistant.enabled = True
+        cfg.home_assistant.base_url = "http://ha.local"
+        cfg.home_assistant_token = "ha-tok"
+        return cfg
+
+    def test_nap_minutes(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.ha_client.call_service", return_value=True
+        ) as cs:
+            result = runner.invoke(cli, ["alarm", "nap", "30"])
+        assert result.exit_code == 0, result.output
+        assert cs.call_args.args == ("http://ha.local", "ha-tok", "script", "commute_nap", {"minutes": 30})
+        assert "caps" in result.output
+
+    def test_nap_until(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        now = datetime(2026, 10, 15, 14, 0, tzinfo=NYC_TZ)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.timeutil.now_nyc", return_value=now
+        ), mock.patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+            result = runner.invoke(cli, ["alarm", "nap", "--until", "14:45"])
+        assert result.exit_code == 0, result.output
+        assert cs.call_args.args[-1] == {"minutes": 45}
+
+    @pytest.mark.parametrize("args", [[], ["0"], ["--until", "bad"], ["20", "--until", "15:00"]])
+    def test_nap_bad_arguments(self, runner: CliRunner, args: list[str], tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            result = runner.invoke(cli, ["alarm", "nap", *args])
+        assert result.exit_code in (2, 64)
+
+    def test_skip(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.ha_client.call_service", return_value=True
+        ) as cs:
+            result = runner.invoke(cli, ["alarm", "skip"])
+        assert result.exit_code == 0
+        assert cs.call_args.args[-3:] == ("script", "commute_alarm_skip", {})
+
+    @pytest.mark.parametrize("cmd,service", [("on", "turn_on"), ("off", "turn_off")])
+    def test_master_switch(self, runner: CliRunner, tmp_path: Path, cmd: str, service: str) -> None:
+        cfg = self._config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.ha_client.call_service", return_value=True
+        ) as cs:
+            result = runner.invoke(cli, ["alarm", cmd])
+        assert result.exit_code == 0
+        assert cs.call_args.args[-3:] == ("input_boolean", service, {"entity_id": cfg.alarm.enabled_entity})
+
+    def test_status_json(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        states = {
+            cfg.alarm.enabled_entity: {"state": "on"},
+            cfg.alarm.next_alarm_entity: {
+                "state": "2026-10-15T15:00:00-04:00", "attributes": {"kind": "nap", "event": "Class"}
+            },
+            cfg.alarm.state_entity: {"state": "idle"},
+            cfg.alarm.heartbeat_entity: {"state": "2026-10-15 14:00:00"},
+        }
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.alarm_daemon.fetch_states", return_value=states
+        ):
+            result = runner.invoke(cli, ["alarm", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["enabled"] and data["kind"] == "nap"
+        assert data["daemon_state"] == "idle"
+        assert data["next_alarm"] == "2026-10-15T15:00:00-04:00"
+
+    def test_ha_failure_is_transient(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = self._config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.ha_client.call_service", return_value=False
+        ):
+            assert runner.invoke(cli, ["alarm", "nap", "30"]).exit_code == 75
+        from commutecompass.alarm_daemon import HAUnavailable
+        with mock.patch("commutecompass.config.load_config", return_value=cfg), mock.patch(
+            "commutecompass.alarm_daemon.fetch_states", side_effect=HAUnavailable("down")
+        ):
+            assert runner.invoke(cli, ["alarm", "status"]).exit_code == 75
+
+    def test_missing_ha_is_config_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = _fake_config(tmp_path)
+        with mock.patch("commutecompass.config.load_config", return_value=cfg):
+            assert runner.invoke(cli, ["alarm", "skip"]).exit_code == 78
