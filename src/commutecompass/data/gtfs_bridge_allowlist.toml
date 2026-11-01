@@ -1,0 +1,63 @@
+# Stage-1 GTFS identity-bridge allowlist (docs/realtime-identity-bridge.md §3, D1).
+#
+# The bridge only produces trusted GTFS identity for Directions legs that board
+# at one of these platforms on one of these routes.  Everything else stays
+# unmatched.  Every entry is re-checked against the imported static stops.txt
+# by `commutecompass gtfs-refresh`; a mismatch in stop_id, name or coordinates
+# fails the whole import (the previous gtfs.db is kept).
+#
+# Fields:
+#   route_ids            GTFS route_id values; never "X" variants implicitly.
+#   directions_line      accepted Directions line.short_name values (exact,
+#                        after uppercase/whitespace normalization).
+#   parent_station       expected static parent stop_id (location_type=1).
+#   stop_name            expected static stops.txt stop_name of the parent.
+#   stop_lat / stop_lon  expected static parent coordinates (WGS84).
+#   platforms            directional child platforms; N and S both required.
+#   directions_names     accepted Directions departure_stop.name values
+#                        (exact, normalized).
+#   max_coord_distance_m max distance between the Directions stop location and
+#                        the static parent; also the import-time tolerance for
+#                        stop_lat/stop_lon drift.
+#
+# Verified 2026-10-31 against the MTA supplemented and regular subway feeds
+# (feed_version 20261028-fall-2026-pick-with-long-term-supplements).
+
+schema_version = 1
+
+[[platform]]
+# Utica Av (IND Fulton St) — home.
+route_ids = ["A", "C"]
+directions_line = ["A", "C"]
+parent_station = "A48"
+stop_name = "Utica Av"
+stop_lat = 40.679364
+stop_lon = -73.930729
+platforms = { N = "A48N", S = "A48S" }
+directions_names = ["Utica Av"]
+max_coord_distance_m = 150
+
+[[platform]]
+# W 4 St-Wash Sq, upper (8 Av) level — work: Salt & Straw.  The lower 6 Av
+# level is D20 and is deliberately not listed.
+route_ids = ["A", "C"]
+directions_line = ["A", "C"]
+parent_station = "A32"
+stop_name = "W 4 St-Wash Sq"
+stop_lat = 40.732338
+stop_lon = -74.000495
+platforms = { N = "A32N", S = "A32S" }
+directions_names = ["W 4 St-Wash Sq", "W 4 St - Wash Sq"]
+max_coord_distance_m = 150
+
+[[platform]]
+# 47-50 Sts-Rockefeller Ctr (IND 6 Av) — work: FAO Schwarz.
+route_ids = ["B", "D", "F", "M"]
+directions_line = ["B", "D", "F", "M"]
+parent_station = "D15"
+stop_name = "47-50 Sts-Rockefeller Ctr"
+stop_lat = 40.758663
+stop_lon = -73.981329
+platforms = { N = "D15N", S = "D15S" }
+directions_names = ["47-50 Sts-Rockefeller Ctr", "47-50 Sts - Rockefeller Ctr"]
+max_coord_distance_m = 150
