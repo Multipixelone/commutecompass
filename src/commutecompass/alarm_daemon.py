@@ -30,14 +30,15 @@ import shutil
 import signal
 import struct
 import subprocess
-import time as _time
 import tempfile
+import time as _time
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import httpx
 
@@ -67,20 +68,20 @@ class Inputs:
     """One poll's worth of HA state.  ``ha_ok=False`` → everything else unknown."""
 
     ha_ok: bool
-    next_alarm: Optional[datetime] = None
+    next_alarm: datetime | None = None
     kind: str = ""
     # None means unavailable: preserve the last known master switch.
-    enabled: Optional[bool] = None
-    stop_pressed_at: Optional[datetime] = None
-    snooze_pressed_at: Optional[datetime] = None
-    wake_at: Optional[datetime] = None
-    nap_at: Optional[datetime] = None
-    skipped_at: Optional[datetime] = None
+    enabled: bool | None = None
+    stop_pressed_at: datetime | None = None
+    snooze_pressed_at: datetime | None = None
+    wake_at: datetime | None = None
+    nap_at: datetime | None = None
+    skipped_at: datetime | None = None
     # Known helpers (including explicit cleared states) distinguish cancelled
     # schedules from the future-only sensor simply moving past its deadline.
     wake_known: bool = False
     nap_known: bool = False
-    prep_threshold: Optional[datetime] = None
+    prep_threshold: datetime | None = None
     prep_known: bool = False
 
 
@@ -88,7 +89,7 @@ class HAUnavailable(Exception):
     """HA could not be reached or returned garbage."""
 
 
-def parse_ha_datetime(raw: object) -> Optional[datetime]:
+def parse_ha_datetime(raw: object) -> datetime | None:
     """Parse an HA entity state as a tz-aware NYC datetime (None if unknown)."""
     if not isinstance(raw, str) or raw.strip().lower() in _UNKNOWN_STATES:
         return None
@@ -126,7 +127,7 @@ def fetch_states(base_url: str, token: str, *, timeout: float = 5.0) -> dict[str
 
 def _helper_time(
     states: dict[str, dict[str, Any]], utc_entity: str,
-) -> tuple[Optional[datetime], bool]:
+) -> tuple[datetime | None, bool]:
     """UTC authority: (instant, known), with epoch zero an explicit clear.
 
     Missing, unavailable, malformed or offset-free text is unknown, never a
@@ -137,7 +138,7 @@ def _helper_time(
     if not isinstance(raw, str):
         return None, False
     try:
-        instant = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        instant = datetime.fromisoformat(raw)
     except ValueError:
         return None, False
     if instant.tzinfo is None:
@@ -146,7 +147,7 @@ def _helper_time(
     return (None if instant.timestamp() == 0 else instant), True
 
 
-def inputs_from_states(states: dict[str, dict[str, Any]], cfg: "AlarmConfig") -> Inputs:
+def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> Inputs:
     """Map the raw HA state dump onto :class:`Inputs`."""
     nxt = states.get(cfg.next_alarm_entity, {})
     attrs = nxt.get("attributes") if isinstance(nxt.get("attributes"), dict) else {}
@@ -178,7 +179,7 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: "AlarmConfig") ->
 class HAReader:
     """Reads :class:`Inputs` from HA; never raises (returns ``ha_ok=False``)."""
 
-    def __init__(self, base_url: str, token: str, cfg: "AlarmConfig") -> None:
+    def __init__(self, base_url: str, token: str, cfg: AlarmConfig) -> None:
         self._base_url = base_url
         self._token = token
         self._cfg = cfg
@@ -200,14 +201,14 @@ class DaemonState:
     enabled: bool = True
     active_kind: str = ""
     audio_failed: bool = False
-    prep_threshold: Optional[datetime] = None
+    prep_threshold: datetime | None = None
     # Latest known alarm instant (from HA, or the cache while HA is down).
-    pending: Optional[datetime] = None
+    pending: datetime | None = None
     pending_kind: str = ""
     # Instant currently being serviced (ringing/snoozed).
-    active: Optional[datetime] = None
-    ring_started: Optional[datetime] = None
-    snooze_until: Optional[datetime] = None
+    active: datetime | None = None
+    ring_started: datetime | None = None
+    snooze_until: datetime | None = None
     snoozes: int = 0
     # ISO-UTC instants already rung (or skipped as stale) — never re-ring.
     done: tuple[str, ...] = ()
@@ -313,7 +314,7 @@ class PublishState:
     mode: Mode
 
 
-Action = Union[StartRing, StopRing, PublishState]
+Action = StartRing | StopRing | PublishState
 
 
 @dataclass(frozen=True)
@@ -326,7 +327,7 @@ class Settings:
     stale_limit: timedelta = STALE_LIMIT
 
     @classmethod
-    def from_config(cls, cfg: "AlarmConfig") -> "Settings":
+    def from_config(cls, cfg: AlarmConfig) -> Settings:
         return cls(
             max_ring=timedelta(minutes=cfg.max_ring_minutes),
             snooze=timedelta(minutes=cfg.snooze_minutes),
@@ -334,7 +335,7 @@ class Settings:
         )
 
 
-def _after(ts: Optional[datetime], ref: Optional[datetime]) -> bool:
+def _after(ts: datetime | None, ref: datetime | None) -> bool:
     return ts is not None and ref is not None and ts.astimezone(UTC) > ref.astimezone(UTC)
 
 
@@ -352,11 +353,15 @@ def _cancelled(
         return True
     known = inputs.nap_known if kind == "nap" else inputs.wake_known
     helper = inputs.nap_at if kind == "nap" else inputs.wake_at
-    if preserve_rollover and kind == "wake" and helper is not None:
-        # Publishing tomorrow is housekeeping, not cancellation of today's due
-        # or active alarm. Same-day reschedules and clears remain explicit.
-        if to_nyc(helper).date() > to_nyc(instant).date():
-            return False
+    # Publishing tomorrow is housekeeping, not cancellation of today's due
+    # or active alarm. Same-day reschedules and clears remain explicit.
+    if (
+        preserve_rollover
+        and kind == "wake"
+        and helper is not None
+        and to_nyc(helper).date() > to_nyc(instant).date()
+    ):
+        return False
     return known and (helper is None or _key(helper) != _key(instant))
 
 
@@ -490,11 +495,11 @@ class AudioPlayer(Protocol):
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
-def _default_run(args: list[str]) -> "subprocess.CompletedProcess[str]":
+def _default_run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
 
 
-def find_sink(pw_dump: object, needle: str) -> Optional[tuple[int, str]]:
+def find_sink(pw_dump: object, needle: str) -> tuple[int, str] | None:
     """Return (node id, node.name) of the first Audio/Sink matching ``needle``."""
     if not isinstance(pw_dump, list):
         return None
@@ -534,7 +539,7 @@ class PipeWirePlayer:
         sound: Path,
         *,
         run: Runner = _default_run,
-        popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         initial_volume: float = 0.3,
     ) -> None:
         self._sink = sink
@@ -542,19 +547,19 @@ class PipeWirePlayer:
         self._runner = run
         self._popen = popen
         self._initial_volume = max(0.0, min(1.0, initial_volume))
-        self._node: Optional[tuple[int, str]] = None
-        self._saved: Optional[tuple[float, bool]] = None
-        self._proc: Optional["subprocess.Popen[bytes]"] = None
-        self._volume: Optional[float] = None
+        self._node: tuple[int, str] | None = None
+        self._saved: tuple[float, bool] | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._volume: float | None = None
         self._spawned_at = 0.0
 
-    def _run(self, args: list[str]) -> "subprocess.CompletedProcess[str]":
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         result = self._runner(args)
         if result.returncode != 0:
             raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr[:200]}")
         return result
 
-    def _resolve(self) -> Optional[tuple[int, str]]:
+    def _resolve(self) -> tuple[int, str] | None:
         res = self._run(["pw-dump"])
         try:
             node = find_sink(json.loads(res.stdout or "[]"), self._sink)
@@ -659,7 +664,7 @@ def synthesize_tone(path: Path, *, rate: int = 22_050) -> Path:
 # ─────────── Daemon loop ──────────────────────────────────────────────────────
 
 
-def default_cache_path(config: "Config") -> Path:
+def default_cache_path(config: Config) -> Path:
     if config.alarm.cache_path:
         return Path(config.alarm.cache_path)
     return Path(config.paths.db_path).parent / "alarm-cache.json"
@@ -674,13 +679,13 @@ class ActivityMonitor:
 
     def __init__(
         self, display: str = "", *,
-        popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     ) -> None:
         self.display = display
         self._popen = popen
-        self._proc: Optional[subprocess.Popen[bytes]] = None
-        self._directory: Optional[tempfile.TemporaryDirectory[str]] = None
-        self._socket: Optional[Path] = None
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._directory: tempfile.TemporaryDirectory[str] | None = None
+        self._socket: Path | None = None
         self._retry_at = 0.0
         self._backoff = 5.0
 
@@ -768,18 +773,18 @@ class AlarmDaemon:
     heartbeat: Callable[[datetime], bool] = lambda _t: True
     publish_audio_failed: Callable[[bool], bool] = lambda _f: True
     publish_handled: Callable[[datetime], bool] = lambda _t: True
-    activity_monitor: Optional["ActivityMonitor"] = None
+    activity_monitor: ActivityMonitor | None = None
     clock: Callable[[], datetime] = now_nyc
     sleep: Callable[[float], None] = _time.sleep
     state: DaemonState = field(default_factory=DaemonState)
     _running: bool = True
-    _last_heartbeat: Optional[datetime] = None
+    _last_heartbeat: datetime | None = None
     _audio_healthy: bool = True
-    _audio_reported: Optional[bool] = None
-    _activity_pressed: Optional[datetime] = None
+    _audio_reported: bool | None = None
+    _activity_pressed: datetime | None = None
     _resume_audio: bool = False
-    _handled_pending: Optional[datetime] = None
-    _published_mode: Optional[Mode] = None
+    _handled_pending: datetime | None = None
+    _published_mode: Mode | None = None
 
     def __post_init__(self) -> None:
         self.state = self.cache.load()
@@ -824,21 +829,26 @@ class AlarmDaemon:
                 self._stop_audio()
         if self.state.active != self._handled_pending or not self._audio_healthy:
             self._handled_pending = None
-        if inputs.ha_ok and self._handled_pending is not None:
-            if self.publish_handled(self._handled_pending):
-                self._handled_pending = None
+        if (
+            inputs.ha_ok
+            and self._handled_pending is not None
+            and self.publish_handled(self._handled_pending)
+        ):
+            self._handled_pending = None
         self.state = replace(self.state, audio_failed=not self._audio_healthy)
         if self.state != before:
             self.cache.save(self.state)
-        if inputs.ha_ok and self._audio_reported != self.state.audio_failed:
-            if self.publish_audio_failed(self.state.audio_failed):
-                self._audio_reported = self.state.audio_failed
+        if (
+            inputs.ha_ok
+            and self._audio_reported != self.state.audio_failed
+            and self.publish_audio_failed(self.state.audio_failed)
+        ):
+            self._audio_reported = self.state.audio_failed
         if inputs.ha_ok and self._audio_healthy and (
             self._last_heartbeat is None
             or (now.astimezone(UTC) - self._last_heartbeat.astimezone(UTC)).total_seconds() >= self.poll_seconds
-        ):
-            if self.heartbeat(now):
-                self._last_heartbeat = now
+        ) and self.heartbeat(now):
+            self._last_heartbeat = now
         return RINGING_POLL_SECONDS if self.state.mode != "idle" else self.poll_seconds
 
     def _apply(self, action: Action) -> None:
@@ -904,7 +914,7 @@ class AlarmDaemon:
             self._reconcile_mode()
 
 
-def build_daemon(config: "Config") -> AlarmDaemon:
+def build_daemon(config: Config) -> AlarmDaemon:
     """Wire the real HA reader, PipeWire player and HA write-back."""
     from commutecompass.alarm import require_ha
     from commutecompass.ha_client import call_service
@@ -955,11 +965,11 @@ def build_daemon(config: "Config") -> AlarmDaemon:
     )
 
 
-def run_daemon(config: "Config") -> None:
+def run_daemon(config: Config) -> None:
     """Entry point for ``alarm daemon``: install SIGTERM/SIGINT handlers and loop."""
     daemon = build_daemon(config)
 
-    def _handler(signum: int, _frame: Optional[FrameType]) -> None:
+    def _handler(signum: int, _frame: FrameType | None) -> None:
         logger.info("alarm daemon: signal %d — restoring audio and exiting", signum)
         daemon.request_stop()
 

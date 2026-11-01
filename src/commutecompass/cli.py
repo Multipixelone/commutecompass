@@ -229,7 +229,7 @@ def tomorrow(ctx: click.Context, dry_run: bool) -> None:
 # ─────────── alarm (wake & nap) ──────────────────────────────────────────────
 
 
-def _alarm_ha_or_exit(cfg: "Config") -> tuple[str, str]:
+def _alarm_ha_or_exit(cfg: Config) -> tuple[str, str]:
     """Return (base_url, token) or exit EXIT_CONFIG when HA isn't configured."""
     from commutecompass.alarm import AlarmConfigError, require_ha
 
@@ -240,7 +240,7 @@ def _alarm_ha_or_exit(cfg: "Config") -> tuple[str, str]:
         sys.exit(EXIT_CONFIG)
 
 
-def _alarm_call(cfg: "Config", service: str, data: dict[str, object]) -> None:
+def _alarm_call(cfg: Config, service: str, data: dict[str, object]) -> None:
     """Call ``domain.service`` on HA; exit EXIT_CONFIG/EXIT_TRANSIENT on failure."""
     from commutecompass.alarm import AlarmConfigError, split_service
     from commutecompass.ha_client import call_service
@@ -308,7 +308,7 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
         sys.exit(EXIT_TRANSIENT)
     a = cfg.alarm
 
-    def st(entity: str) -> Optional[str]:
+    def st(entity: str) -> str | None:
         raw = states.get(entity, {}).get("state")
         return raw if isinstance(raw, str) else None
 
@@ -340,7 +340,7 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
 @click.argument("minutes", type=click.IntRange(1, 24 * 60), required=False)
 @click.option("--until", "until", help="Wake at this NYC time (HH:MM) instead of after MINUTES.")
 @click.pass_context
-def alarm_nap(ctx: click.Context, minutes: Optional[int], until: Optional[str]) -> None:
+def alarm_nap(ctx: click.Context, minutes: int | None, until: str | None) -> None:
     """Start a nap: ring after MINUTES (or at --until HH:MM). HA caps it at the next prep."""
     if (minutes is None) == (until is None):
         click.echo("Error: give exactly one of MINUTES or --until HH:MM", err=True)

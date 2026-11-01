@@ -461,7 +461,7 @@ def run(
         ping_heartbeat(config.monitoring.heartbeat_url)
 
 
-def _earliest_prep_at(plans: list[Plan]) -> Optional[str]:
+def _earliest_prep_at(plans: list[Plan]) -> str | None:
     """Earliest non-errored prep_at as a UTC ISO string (stable comparison key)."""
     preps = [p.prep_at.astimezone(UTC) for p in plans if p.prep_at is not None and p.error is None]
     return min(preps).isoformat() if preps else None

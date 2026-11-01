@@ -299,12 +299,13 @@ def test_publish_next_future_wake_at_any_hour(tmp_path: Path, hour: int) -> None
 def test_partial_planning_never_posts_fallback(tmp_path: Path, bad_day: int) -> None:
     cfg = _config(tmp_path)
     plans = [_plan(_nyc(2026, 10, bad_day, 21), error="no_route")]
-    with patch("commutecompass.ha_client.call_service") as cs:
-        with pytest.raises(AlarmError, match="incomplete planning"):
-            publish(
-                cfg, now=_nyc(2026, 10, 15, 20),
-                plans_for_day=_provider({date(2026, 10, bad_day): plans}),
-            )
+    with patch("commutecompass.ha_client.call_service") as cs, pytest.raises(
+        AlarmError, match="incomplete planning"
+    ):
+        publish(
+            cfg, now=_nyc(2026, 10, 15, 20),
+            plans_for_day=_provider({date(2026, 10, bad_day): plans}),
+        )
     cs.assert_not_called()
 
 
@@ -312,20 +313,20 @@ def test_calendar_failure_is_not_empty_day(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     with patch("commutecompass.jobs.tomorrow.plan_window", return_value=None), patch(
         "commutecompass.ha_client.call_service"
-    ) as cs:
-        with pytest.raises(AlarmError, match="calendar fetch failed"):
-            publish(cfg, now=_nyc(2026, 10, 15, 20))
+    ) as cs, pytest.raises(AlarmError, match="calendar fetch failed"):
+        publish(cfg, now=_nyc(2026, 10, 15, 20))
     cs.assert_not_called()
 
 
 def test_no_future_wake_preserves_ha(tmp_path: Path) -> None:
     cfg = _config(tmp_path, wake_lead_minutes=180)
-    with patch("commutecompass.ha_client.call_service") as cs:
-        with pytest.raises(AlarmError, match="no future wake"):
-            publish(
-                cfg, now=_nyc(2026, 10, 16, 1, 30),
-                plans_for_day=_provider({date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 3))]}),
-            )
+    with patch("commutecompass.ha_client.call_service") as cs, pytest.raises(
+        AlarmError, match="no future wake"
+    ):
+        publish(
+            cfg, now=_nyc(2026, 10, 16, 1, 30),
+            plans_for_day=_provider({date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 3))]}),
+        )
     cs.assert_not_called()
 
 

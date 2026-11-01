@@ -7,7 +7,7 @@ import wave
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -42,7 +42,7 @@ def at(minutes: float) -> datetime:
     return T0 + timedelta(minutes=minutes)
 
 
-def inp(alarm: Optional[datetime] = T0, **kw: Any) -> Inputs:
+def inp(alarm: datetime | None = T0, **kw: Any) -> Inputs:
     return Inputs(ha_ok=True, next_alarm=alarm, kind="wake",
                   wake_at=alarm, wake_known=True, **kw)
 
@@ -79,7 +79,7 @@ def test_rings_at_alarm_time() -> None:
 def test_rings_from_pending_even_when_ha_moved_on() -> None:
     """HA's sensor only lists future alarms; a remembered instant still rings."""
     st, _ = step(DaemonState(), at(-1), inp(), S)
-    st, acts = step(st, at(0.5), inp(at(1440)), S)
+    st, _acts = step(st, at(0.5), inp(at(1440)), S)
     assert st.mode == "ringing"
     assert st.active == T0
     assert st.pending == at(1440)
@@ -156,7 +156,7 @@ def test_stale_on_startup_skipped() -> None:
 
 def test_slightly_late_on_startup_still_rings() -> None:
     cached = DaemonState(pending=T0, pending_kind="wake")
-    st, acts = step(cached, at(9), Inputs(ha_ok=False), S)
+    st, _acts = step(cached, at(9), Inputs(ha_ok=False), S)
     assert st.mode == "ringing"
 
 
@@ -167,9 +167,9 @@ def test_cache_fallback_when_ha_down(tmp_path: Path) -> None:
     # Restart with HA unreachable.
     st2 = cache.load()
     assert st2.pending == T0
-    st2, acts = step(st2, at(-1), Inputs(ha_ok=False), S)
+    st2, _acts = step(st2, at(-1), Inputs(ha_ok=False), S)
     assert st2.mode == "idle" and st2.pending == T0
-    st2, acts = step(st2, at(0), Inputs(ha_ok=False), S)
+    st2, _acts = step(st2, at(0), Inputs(ha_ok=False), S)
     assert st2.mode == "ringing"
 
 
@@ -248,9 +248,9 @@ def test_inputs_unknown_and_disabled() -> None:
 def test_ha_reader_down_returns_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     class Boom:
         def __init__(self, **_: Any) -> None: ...
-        def __enter__(self) -> "Boom":
+        def __enter__(self) -> Self:
             return self
-        def __exit__(self, *_: Any) -> None: ...
+        def __exit__(self, *_: object) -> None: ...
         def get(self, *_: Any, **__: Any) -> Any:
             raise httpx.ConnectError("down")
 
@@ -263,9 +263,9 @@ def test_ha_reader_parses_list(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class Ok:
         def __init__(self, **_: Any) -> None: ...
-        def __enter__(self) -> "Ok":
+        def __enter__(self) -> Self:
             return self
-        def __exit__(self, *_: Any) -> None: ...
+        def __exit__(self, *_: object) -> None: ...
         def get(self, url: str, **__: Any) -> httpx.Response:
             assert url == "http://ha/api/states"
             return httpx.Response(200, json=payload)
@@ -306,7 +306,7 @@ class _Proc:
         self.terminated = False
         self.done = False
 
-    def poll(self) -> Optional[int]:
+    def poll(self) -> int | None:
         return 0 if self.done else None
 
     def terminate(self) -> None:
@@ -477,8 +477,8 @@ def test_snooze_across_dst_uses_elapsed_minutes() -> None:
 
 
 def helper_inputs(
-    *, wake: Optional[datetime] = T0, nap: Optional[datetime] = None,
-    sensor: Optional[datetime] = None, skip: Optional[datetime] = None,
+    *, wake: datetime | None = T0, nap: datetime | None = None,
+    sensor: datetime | None = None, skip: datetime | None = None,
     enabled: bool = True, **kw: Any,
 ) -> Inputs:
     kw.setdefault("prep_known", "prep_threshold" in kw)
@@ -488,7 +488,7 @@ def helper_inputs(
 
 
 @pytest.mark.parametrize("sensor", [None, at(1440)])
-def test_future_only_sensor_startup_at_plus_30s(sensor: Optional[datetime]) -> None:
+def test_future_only_sensor_startup_at_plus_30s(sensor: datetime | None) -> None:
     st, acts = step(DaemonState(), at(0.5), helper_inputs(sensor=sensor), S)
     assert st.mode == "ringing" and "start" in kinds(acts)
     assert st.active == T0
@@ -622,7 +622,7 @@ def test_pwplay_failure_restores_partial_start(tmp_path: Path) -> None:
 def test_pwplay_nonzero_tick_is_not_respawned(tmp_path: Path) -> None:
     import subprocess
     class BadProc(_Proc):
-        def poll(self) -> Optional[int]:
+        def poll(self) -> int | None:
             return 1 if self.done else None
     proc = BadProc()
     dump = json.dumps([{"id": 52, "info": {"props": {"media.class": "Audio/Sink", "node.name": "analog"}}}])
@@ -653,8 +653,9 @@ def test_activity_callback_only_stops_active_alarm(tmp_path: Path) -> None:
 
 
 def test_activity_monitor_generated_config_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from commutecompass.alarm_daemon import ActivityMonitor
     import os
+
+    from commutecompass.alarm_daemon import ActivityMonitor
     monkeypatch.setattr("commutecompass.alarm_daemon.shutil.which", lambda _: "/fake/hypridle")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
@@ -812,6 +813,7 @@ def test_heartbeat_interval_crosses_dst_fall_back(tmp_path: Path) -> None:
 
 def test_activity_supervision_boot_absent_then_child_death(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import socket
+
     from commutecompass.alarm_daemon import ActivityMonitor
     monkeypatch.setattr("commutecompass.alarm_daemon.shutil.which", lambda _: "/fake/hypridle")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
@@ -960,7 +962,7 @@ def test_failed_mode_publication_retries_current_not_stale_mode(tmp_path: Path) 
 
 @pytest.mark.parametrize("raw", [None, "unknown", "unavailable", "bad", "2026-11-01 01:30:00"])
 def test_unknown_utc_authority_preserves_cache_and_cannot_seed_sensor(
-    raw: Optional[str],
+    raw: str | None,
 ) -> None:
     cfg = AlarmConfig()
     states = _states(**{cfg.wake_entity: {"state": at(60).isoformat()}})
@@ -993,7 +995,7 @@ def test_explicit_zero_schedule_cancels_despite_stale_sensor() -> None:
 
 
 @pytest.mark.parametrize("raw", [None, "unknown", "unavailable", ZERO])
-def test_cap_unknown_preserves_prior_zero_clears_without_ending_snooze(raw: Optional[str]) -> None:
+def test_cap_unknown_preserves_prior_zero_clears_without_ending_snooze(raw: str | None) -> None:
     cfg = AlarmConfig()
     states = _states(**{cfg.next_prep_utc_entity: {"state": at(8).isoformat()}})
     st, _ = step(DaemonState(), at(0), inputs_from_states(states, cfg), S)

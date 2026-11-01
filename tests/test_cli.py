@@ -17,7 +17,6 @@ from commutecompass.models import Event, Plan
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
 
-
 # ─────────── Fixtures ─────────────────────────────────────────────────────────
 
 

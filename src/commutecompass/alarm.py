@@ -17,9 +17,10 @@ days stay correct; wall-clock values are rendered in America/New_York.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Callable, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Literal
 
 from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc, now_nyc, to_nyc
 
@@ -50,15 +51,15 @@ class WakeResult:
     day: date
     source: Literal["event", "fallback"]
     # Plan whose prep_at drove the wake (None for fallback).
-    plan: Optional["Plan"]
+    plan: Plan | None
     # Earliest future prep_at across today/tomorrow, minus wake lead — HA nap cap.
-    next_prep_at: Optional[datetime]
+    next_prep_at: datetime | None
     next_event: str
 
 
-def _earliest_prep_plan(plans: "list[Plan]", *, after: Optional[datetime] = None) -> Optional["Plan"]:
+def _earliest_prep_plan(plans: list[Plan], *, after: datetime | None = None) -> Plan | None:
     """Plan with the smallest prep_at (non-errored), optionally strictly after ``after``."""
-    best: Optional[Plan] = None
+    best: Plan | None = None
     for p in plans:
         if p.prep_at is None or p.error is not None:
             continue
@@ -83,8 +84,8 @@ def fallback_for_day(day_start: datetime, fallback: time) -> datetime:
 
 
 def wake_for_day(
-    day_start: datetime, plans: "list[Plan]", config: "Config", *, now: Optional[datetime] = None
-) -> tuple[datetime, Optional["Plan"]]:
+    day_start: datetime, plans: list[Plan], config: Config, *, now: datetime | None = None
+) -> tuple[datetime, Plan | None]:
     """Return the day's first wake, retaining historical evidence it has elapsed.
 
     An unresolved event that has already started cannot require a future wake:
@@ -93,7 +94,7 @@ def wake_for_day(
     Unknown future timings still fail closed, even after the day's fallback.
     """
     wake = fallback_for_day(day_start, config.alarm.fallback_clock())
-    first: Optional[Plan] = None
+    first: Plan | None = None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
     now_utc = now.astimezone(UTC) if now is not None else None
     for p in plans:
@@ -121,7 +122,7 @@ def wake_for_day(
 
 
 def compute_wake(
-    config: "Config",
+    config: Config,
     now: datetime,
     plans_for_day: PlansProvider,
 ) -> WakeResult:
@@ -172,7 +173,7 @@ def split_service(service: str) -> tuple[str, str]:
     return domain, name
 
 
-def require_ha(config: "Config") -> tuple[str, str]:
+def require_ha(config: Config) -> tuple[str, str]:
     """Return (base_url, token) or raise :class:`AlarmConfigError`."""
     base_url = config.home_assistant.base_url
     token = config.home_assistant_token
@@ -184,14 +185,14 @@ def require_ha(config: "Config") -> tuple[str, str]:
 
 
 def _default_provider(
-    config: "Config",
-    planned: Mapping[date, "list[Plan]"],
-    store: Optional["Store"],
+    config: Config,
+    planned: Mapping[date, list[Plan]],
+    store: Store | None,
     now: datetime,
 ) -> PlansProvider:
     """Plans provider: explicit ``planned`` → stored plans (once morning ran) → fresh plan."""
 
-    def provider(day_start: datetime) -> "list[Plan]":
+    def provider(day_start: datetime) -> list[Plan]:
         key = to_nyc(day_start).date()
         if key in planned:
             return list(planned[key])
@@ -219,13 +220,13 @@ def build_payload(result: WakeResult) -> dict[str, object]:
 
 
 def publish(
-    config: "Config",
+    config: Config,
     *,
-    now: Optional[datetime] = None,
-    planned: Optional[Mapping[date, "list[Plan]"]] = None,
-    store: Optional["Store"] = None,
+    now: datetime | None = None,
+    planned: Mapping[date, list[Plan]] | None = None,
+    store: Store | None = None,
     dry_run: bool = False,
-    plans_for_day: Optional[PlansProvider] = None,
+    plans_for_day: PlansProvider | None = None,
 ) -> tuple[WakeResult, bool]:
     """Compute the wake and POST it to ``[alarm].publish_script``.
 
@@ -263,11 +264,11 @@ def publish(
 
 
 def publish_safe(
-    config: "Config",
+    config: Config,
     *,
-    store: Optional["Store"] = None,
-    planned: Optional[Mapping[date, "list[Plan]"]] = None,
-    now: Optional[datetime] = None,
+    store: Store | None = None,
+    planned: Mapping[date, list[Plan]] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """:func:`publish` for background callers (poll/tomorrow): never raises."""
     try:

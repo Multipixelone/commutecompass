@@ -12,7 +12,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
 class Origin(BaseModel):
