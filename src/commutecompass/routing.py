@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, Optional
 
 import httpx
 
+from commutecompass.gtfs_bridge import validate_leg
+from commutecompass.gtfs_index import GtfsIndex
 from commutecompass.models import Origin, ResolvedLocation, Route, TransitLeg
 from commutecompass.timeutil import NYC_TZ
+
+logger = logging.getLogger(__name__)
 
 
 def _unix(dt: datetime) -> int:
@@ -340,7 +345,36 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> Optional[TransitLeg]:
     )
 
 
-def _parse_route(response: dict[str, Any]) -> Optional[Route]:
+def _attach_bridge_identity(route: Route, gtfs_db_path: str) -> Route:
+    """Enrich only the selected route's first boarding; every failure is safe."""
+    first = next((i for i, leg in enumerate(route.legs) if leg.mode == "TRANSIT"), None)
+    if first is None:
+        return route
+    try:
+        index = GtfsIndex.open(gtfs_db_path)
+        if index is None:
+            logger.info("GTFS bridge: index unavailable (missing, stale or invalid): %s", gtfs_db_path)
+            return route
+        with index:
+            payload = route.raw_provider_payload
+            assert payload is not None and route.provider_route_index is not None
+            candidate = payload["routes"][route.provider_route_index]
+            step = next(step for leg in candidate["legs"] for step in leg.get("steps", [])
+                        if step.get("travel_mode", "").upper() == "TRANSIT")
+            result = validate_leg(route.legs[first], step, index)
+            if result.leg is None:
+                logger.info("GTFS bridge rejected boarding: %s", result.reason)
+                return route
+            updated = list(route.legs)
+            updated[first] = result.leg
+        return route.model_copy(update={"legs": updated})
+    except Exception:
+        # Neither database errors nor validator defects may break a commute.
+        logger.warning("GTFS bridge failed; keeping Directions route unchanged", exc_info=True)
+        return route
+
+
+def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Optional[Route]:
     """Parse a Google Directions API response into a Route.
 
     Returns None if no valid routes found.
@@ -439,7 +473,9 @@ def _parse_route(response: dict[str, Any]) -> Optional[Route]:
             best_score = score
             best_route = route_obj
 
-    return best_route
+    if best_route is not None:
+        return _attach_bridge_identity(best_route, gtfs_db_path)
+    return None
 
 
 def plan_route(
@@ -448,6 +484,8 @@ def plan_route(
     arrival_time: datetime,
     mode: Literal["transit", "driving", "walking", "bicycling"] = "transit",
     api_key: str = "",
+    *,
+    gtfs_db_path: str = "",
 ) -> Optional[Route]:
     """Plan a route from origin to destination.
 
@@ -493,4 +531,4 @@ def plan_route(
 
     if not isinstance(data, dict):
         return None
-    return _parse_route(data)
+    return _parse_route(data, gtfs_db_path=gtfs_db_path)

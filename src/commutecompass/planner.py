@@ -189,6 +189,7 @@ def plan_event(
         arrival_time=event.start,
         mode=mode,
         api_key=config.google_maps_api_key,
+        gtfs_db_path=config.paths.gtfs_db_path,
     )
     if route is not None:
         store.cache_route(cache_key, resolved.value, mode, route)
