@@ -1477,6 +1477,67 @@ class TestPlanFromOption:
 
 
 class TestGtfsRefresh:
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_config_collision_preserves_state_db(
+        self, runner: CliRunner, minimal_toml: Path, required_env: dict[str, str],
+        tmp_path: Path, explicit: bool,
+    ) -> None:
+        from commutecompass.cli import EXIT_CONFIG
+
+        state_db = tmp_path / "gtfs.db"
+        state_db.write_bytes(b"original plans database")
+        text = minimal_toml.read_text().replace(
+            'db_path = "/var/lib/commutecompass/state.db"', f'db_path = "{state_db}"'
+        )
+        if explicit:
+            text = text.replace("[paths]\n", f'[paths]\ngtfs_db_path = "{state_db}"\n')
+        minimal_toml.write_text(text)
+        before = set(tmp_path.iterdir())
+        with (
+            mock.patch.dict("os.environ", required_env),
+            mock.patch("commutecompass.gtfs_index.refresh") as refresh,
+            mock.patch("commutecompass.cli._run_with_job_lock") as lock,
+        ):
+            result = runner.invoke(cli, ["--config", str(minimal_toml), "gtfs-refresh"])
+        assert result.exit_code == EXIT_CONFIG, result.output
+        assert "gtfs_db_path must be separate" in result.output
+        refresh.assert_not_called()
+        lock.assert_not_called()
+        assert state_db.read_bytes() == b"original plans database"
+        assert set(tmp_path.iterdir()) == before
+
+    @pytest.mark.parametrize("mutation", ["config", "symlink", "hardlink"])
+    def test_entry_guard_rechecks_mutated_paths(
+        self, runner: CliRunner, tmp_path: Path, mutation: str
+    ) -> None:
+        from commutecompass.cli import EXIT_CONFIG
+
+        cfg = _fake_config(tmp_path)
+        state_db = Path(cfg.paths.db_path)
+        state_db.write_bytes(b"original plans database")
+        gtfs_db = Path(cfg.paths.gtfs_db_path)
+        if mutation == "config":
+            cfg.paths.gtfs_db_path = str(state_db)
+        elif mutation == "symlink":
+            gtfs_db.symlink_to(state_db)
+        else:
+            gtfs_db.hardlink_to(state_db)
+        before = set(tmp_path.iterdir())
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh") as refresh,
+            mock.patch("commutecompass.gtfs_allowlist.load_allowlist") as allowlist,
+            mock.patch("commutecompass.cli._run_with_job_lock") as lock,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == EXIT_CONFIG, result.output
+        assert "gtfs_db_path must be separate" in result.output
+        refresh.assert_not_called()
+        allowlist.assert_not_called()
+        lock.assert_not_called()
+        assert state_db.read_bytes() == b"original plans database"
+        assert set(tmp_path.iterdir()) == before
+
     def _stats(self) -> Any:
         from datetime import date as date_cls
         from datetime import timezone

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 import click
+from pydantic import ValidationError
 
 from commutecompass.config import ConfigError  # noqa: F401
 from commutecompass.joblock import JobLock, LockHeld, lock_path_for
@@ -43,7 +44,7 @@ def _load_config(config_path: Path) -> "Config":
 
     try:
         return config_mod.load_config(config_path)
-    except ConfigError as exc:
+    except (ConfigError, ValidationError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(EXIT_CONFIG)
 
@@ -1082,6 +1083,13 @@ def gtfs_refresh(ctx: click.Context) -> None:
 
     config_path: Path = ctx.obj["config_path"]
     cfg = _load_config(config_path)
+    # Recheck mutable config/filesystem aliases before even acquiring the lock
+    # (which can create state directories), downloading, or building the index.
+    try:
+        cfg.paths.ensure_distinct_db_paths()
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
     gtfs_db = Path(cfg.paths.gtfs_db_path)
 
     try:
