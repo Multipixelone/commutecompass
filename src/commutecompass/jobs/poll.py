@@ -309,6 +309,7 @@ def run(
 
     # ── Phase 4: process new affecting alerts ─────────────────────────────────
     today_plans = _store.today_plans()
+    earliest_prep_before = _earliest_prep_at(today_plans)
 
     for plan in today_plans:
         now = _now_fn()
@@ -403,7 +404,7 @@ def run(
             now = _now_fn()
             if plan.event.start.astimezone(UTC) <= now.astimezone(UTC):
                 continue
-            if plan.leave_at is None or plan.leave_at <= now:
+            if plan.leave_at is None or plan.leave_at.astimezone(UTC) <= now.astimezone(UTC):
                 continue
             if (plan.leave_at.astimezone(UTC) - now.astimezone(UTC)).total_seconds() > window_seconds:
                 continue
@@ -434,6 +435,18 @@ def run(
             else:
                 logger.warning("Location update send failed for event %s", plan.event.id)
 
+    # ── Phase 5b: re-publish the wake alarm if a replan moved the first prep ──
+    if config.alarm.enabled:
+        earliest_prep_after = _earliest_prep_at(_store.today_plans())
+        if earliest_prep_after != earliest_prep_before:
+            from commutecompass.alarm import publish_safe
+
+            logger.info(
+                "Earliest prep changed (%s -> %s); re-publishing wake alarm",
+                earliest_prep_before, earliest_prep_after,
+            )
+            publish_safe(config, store=_store)
+
     # ── Phase 6: heartbeat ────────────────────────────────────────────────────
     # Record that poll completed, and ping the external dead-man's-switch (if
     # configured) — the per-minute poll is the natural liveness signal.
@@ -443,6 +456,11 @@ def run(
 
         ping_heartbeat(config.monitoring.heartbeat_url)
 
+
+def _earliest_prep_at(plans: list[Plan]) -> Optional[str]:
+    """Earliest non-errored prep_at as a UTC ISO string (stable comparison key)."""
+    preps = [p.prep_at.astimezone(UTC) for p in plans if p.prep_at is not None and p.error is None]
+    return min(preps).isoformat() if preps else None
 
 def _same_journey(old: Plan, new: Plan) -> bool:
     """Compare structure and genuine schedules, not observation-time placeholders.
@@ -555,7 +573,7 @@ def _location_update_significant(old_plan: Plan, new_plan: Plan) -> bool:
         return True
     if old_plan.leave_at is None or new_plan.leave_at is None:
         return False
-    diff = abs((new_plan.leave_at - old_plan.leave_at).total_seconds())
+    diff = abs(new_plan.leave_at.timestamp() - old_plan.leave_at.timestamp())
     return diff >= _REPLAN_THRESHOLD_SECONDS
 
 
@@ -567,7 +585,7 @@ def _route_significantly_different(old_plan: Plan, new_plan: Plan) -> bool:
 
     # Check timing threshold
     if old_plan.leave_at is not None and new_plan.leave_at is not None:
-        diff = abs((new_plan.leave_at - old_plan.leave_at).total_seconds())
+        diff = abs(new_plan.leave_at.timestamp() - old_plan.leave_at.timestamp())
         if diff >= _REPLAN_THRESHOLD_SECONDS:
             return True
 
