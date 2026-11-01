@@ -377,3 +377,32 @@ def test_morning_pings_not_touched(tomorrow_config: Config) -> None:
     # Today's ping survived (tomorrow job didn't replace/cancel it)
     pending = store.pending_pings(before=now_nyc() + timedelta(days=2))
     assert any(p.id == "keep-me" for p in pending)
+
+
+def test_alarm_publish_called_when_enabled(tomorrow_config: Config) -> None:
+    """[alarm].enabled → tomorrow job re-publishes the wake with its plans."""
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    events = _tomorrow_events()
+    with patch("commutecompass.jobs.tomorrow.CalendarClient") as mock_cal, patch(
+        "commutecompass.jobs.tomorrow.plan_event",
+        side_effect=lambda event, **_: Plan(event=event, error="location_unresolved"),
+    ), patch("commutecompass.jobs.tomorrow.push_tomorrow_alarm"), patch(
+        "commutecompass.alarm.publish", side_effect=RuntimeError("HA down")
+    ) as mock_pub, patch("commutecompass.ha_client.fetch_zones", return_value={}):
+        mock_cal.return_value.fetch_events.return_value = events
+        tomorrow_run(tomorrow_config)  # must not raise
+
+    mock_pub.assert_called_once()
+    planned = mock_pub.call_args.kwargs["planned"]
+    assert len(next(iter(planned.values()))) == len(events)
+
+
+def test_alarm_publish_not_called_when_disabled(tomorrow_config: Config) -> None:
+    with patch("commutecompass.jobs.tomorrow.CalendarClient") as mock_cal, patch(
+        "commutecompass.alarm.publish"
+    ) as mock_pub:
+        mock_cal.return_value.fetch_events.return_value = []
+        tomorrow_run(tomorrow_config)
+    mock_pub.assert_not_called()

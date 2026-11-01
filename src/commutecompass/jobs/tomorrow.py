@@ -18,7 +18,7 @@ Sequence:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,11 +50,39 @@ def run(config: Config, *, dry_run: bool = False) -> Plan | None:
     was sent: no plan-able events tomorrow, or all plans errored.
 
     ``dry_run`` skips the HA POST but still computes and logs the choice.
+
+    When ``[alarm].enabled`` the wake alarm is re-published as well, reusing
+    the plans computed here (never fatal; failures are logged).
     """
     _now = now_nyc()
     tomorrow_ref = _now + timedelta(days=1)
     day_start, day_end = logical_day_bounds_nyc(tomorrow_ref)
 
+    plans = plan_window(config, day_start, day_end)
+    if plans is None:
+        return None
+    chosen = _push_earliest(config, plans, dry_run=dry_run)
+    if config.alarm.enabled and not dry_run:
+        _publish_alarm_safe(config, day_start, plans)
+    return chosen
+
+
+def _publish_alarm_safe(config: Config, day_start: datetime, plans: list[Plan]) -> None:
+    """Re-publish the wake alarm with already-planned tomorrow plans; never raises."""
+    from commutecompass.alarm import publish_safe
+
+    publish_safe(config, planned={day_start.date(): plans})
+
+
+def plan_window(
+    config: Config, day_start: datetime, day_end: datetime
+) -> list[Plan] | None:
+    """Fetch and plan every event in [day_start, day_end] without a DB upsert.
+
+    Returns ``None`` when the calendar fetch fails (caller must not treat that
+    as "no events"), else the (possibly empty) list of plans, including
+    errored ones.
+    """
     calendar_client = CalendarClient(
         client_secret_json=config.google_oauth_client_secret_json,
         token_path=Path(config.paths.oauth_token_path),
@@ -76,8 +104,7 @@ def run(config: Config, *, dry_run: bool = False) -> Plan | None:
     logger.info("tomorrow job: fetched %d events for %s", len(events), day_start.date())
 
     if not events:
-        logger.info("tomorrow job: no events tomorrow — nothing to push")
-        return None
+        return []
 
     store = Store(config.paths.db_path)
     store.init_schema()
@@ -104,15 +131,23 @@ def run(config: Config, *, dry_run: bool = False) -> Plan | None:
         model=config.opencode_go.model,
     )
 
-    plans: list[Plan] = []
-    for event in events:
-        plans.append(_plan_event_safe(event, config, venue_registry, store, llm_client, ha_zones))
+    return [
+        _plan_event_safe(event, config, venue_registry, store, llm_client, ha_zones)
+        for event in events
+    ]
+
+
+def _push_earliest(config: Config, plans: list[Plan], *, dry_run: bool) -> Plan | None:
+    """Pick the earliest prep_at across ``plans`` and push it to HA."""
+    if not plans:
+        logger.info("tomorrow job: no events tomorrow — nothing to push")
+        return None
 
     earliest = _earliest_prep(plans)
     if earliest is None:
         logger.info(
             "tomorrow job: no plan-able commutes tomorrow (events=%d) — nothing to push",
-            len(events),
+            len(plans),
         )
         return None
 
