@@ -150,7 +150,8 @@ max_coord_distance_m = 150
   - For each `D`, compute the instant as
     `datetime.combine(D, 12:00, NYC_TZ) − 12h + offset`. That is the GTFS
     definition: on DST-change days, noon is the stable anchor. Then require
-    equality with `T` in UTC, to the second.
+    `|T − instant| ≤ 30 s` in UTC (D3). Exactly one trip on the route may fall
+    inside that window; two or more candidates means rejection.
   - Service activity for `D` comes from `calendar.txt` (weekday flag and date
     range), overridden by `calendar_dates.txt` (1 = add, 2 = remove).
   - The result sets `gtfs_start_date = D.strftime("%Y%m%d")`. That is the
@@ -165,9 +166,19 @@ max_coord_distance_m = 150
 - **Feed choice.** Use `gtfs_supplemented.zip`. It carries the 7-day
   service-change pick, for example `L0S8`, which is active on 2026-10-31. The
   regular `gtfs_subway.zip` had `feed_start_date=20261101` on 2026-10-31, so
-  it did not cover that day at all. The regular feed is fallback only.
-- **Initial set.** 1–3 routes and the user's home and work platforms (open
-  decision D1). Everything else stays unmatched.
+  it did not cover that day at all. If the supplemented download or its
+  validation fails, fall back to the regular feed (D5). The import records
+  which feed it used, and the bridge only matches dates that feed covers.
+- **Initial set (D1).** Both platforms at each of these stations. Everything
+  else stays unmatched.
+  - Utica Av (A/C; home). Expected parent `A48`.
+  - W 4 St–Wash Sq, 8 Av level (A/C; work: Salt & Straw). Expected `A32`.
+  - 47–50 Sts–Rockefeller Ctr (B/D/F/M; work: FAO Schwarz). Expected `D15`.
+
+  These stop IDs are expected values. The importer must check each one against
+  `stops.txt` (name and coordinates) and refuse to activate the allowlist if any
+  check fails. The 6 Av level at W 4 St (`D20`) is not included, so a B/D/F/M
+  leg that boards there stays unmatched.
 
 ## 4. Static match algorithm (bridge)
 
@@ -204,7 +215,7 @@ yields no identity, plus a debug log line with the reason code.
 | Multiple plausible trips (two trips at T, express+local on shared platform, duplicate RT suffix) | >1 static row or duplicate suffix → no identity |
 | Same-name stations / complexes | name **and** coords **and** allowlisted parent; never pool parents |
 | Opposite direction | platform suffix, static direction_id, shape `N/S`, and RT derived direction must all agree; headsign never decides |
-| Directions time off-schedule (Google realtime-adjusted or rounded) | exact-second UTC equality only; no tolerance window (open decision D3) |
+| Directions time off-schedule (Google realtime-adjusted or rounded) | ±30 s UTC window (D3); exactly one candidate trip per route inside it, else reject |
 | Cancellation | `trip_relationship == CANCELED` on the exact trip → `cancelled`, never 0-delay `observed` (existing) |
 | Skipped boarding stop | exact trip, `stop_relationship == SKIPPED` → `skipped` (existing) |
 | Trip absent from feed | `unmatched` / zero padding; absence is not "on time" |
@@ -250,8 +261,8 @@ derives them across trips.
 
 The open safety question: a derived delay is a measurement only while the
 train is being tracked. Before assignment, NYCT predictions are the schedule
-(`NyctTripDescriptor.is_assigned` = false). Proposal: count unassigned trips as
-`unmatched`, not as 0-minute `observed` (open decision D4).
+(`NyctTripDescriptor.is_assigned` = false). Decision (D4): unassigned trips
+count as `unmatched`, not as 0-minute `observed`.
 
 ## 7. Static GTFS acquisition options
 
@@ -269,13 +280,13 @@ train is being tracked. Before assignment, NYCT predictions are the schedule
   `stop_times.txt`. It keeps only allowlisted platforms and their trips: the
   full stop sequence for each matched trip, which the `num_stops` check needs.
 - It writes into new tables (`gtfs_feed`, `gtfs_trip`, `gtfs_stop_time`,
-  `gtfs_service`) in a separate `gtfs.db`, or in `state.db` (open decision D2),
+  `gtfs_service`) in a separate `gtfs.db` (D2),
   inside one transaction, and then swaps the active `feed_version`.
 - No new dependencies are needed.
 - **Failure behaviour.** A refresh failure keeps the previous import. The
   bridge then produces nothing for dates outside `feed_start_date..end_date`,
-  or after a maximum age (proposed: 8 days, which covers the 7-day
-  supplement). Planning fails open; adjustment fails closed.
+  or after a maximum age of 8 days, which covers the 7-day supplement (D6).
+  Refresh runs daily at 04:30 NYC. Planning fails open; adjustment fails closed.
 - **Data.** The vendored `stops_subway.csv` stays for informational departures
   only. Bridge stop data comes from the imported `stops.txt`, which has
   coordinates.
@@ -398,21 +409,21 @@ End-to-end (`tests/test_jobs.py`), production-shaped:
 12. `docs: document identity bridge contracts`. Covers
     `poll-replan-safety.md`, `AGENTS.md` gotcha, and follow-ups status.
 
-## 12. Open decisions
+## 12. Decisions (resolved 2026-10-31)
 
-- **D1.** Which routes and platforms go in the stage-1 allowlist? Proposed:
-  the user's home and work boarding platforms on 1–3 routes.
-- **D2.** Put the GTFS index in a separate `gtfs.db` (proposed: it isolates
-  refresh writes from the plan/ping DB and can be deleted freely) or in
-  `state.db`?
-- **D3.** Exact-second equality between the Directions epoch and the static
-  time, or a ±30 s tolerance? Proposed: exact. Verify against 1–2 weeks of
-  logged real responses (behind a debug flag) before enabling.
-- **D4.** Treat unassigned NYCT trips (`is_assigned=false`) as `unmatched`
-  (proposed) or as measurements?
-- **D5.** Supplemented feed only (proposed), or fall back to the regular feed
-  when the supplemented download fails?
-- **D6.** Static index max age before the bridge stops producing identity
-  (proposed: 8 days) and refresh time (proposed: 04:30 NYC).
-- **D7.** Ship behind a `[realtime] identity_bridge = false` default flag
-  for a dry-run period that logs would-be matches?
+- **D1. Allowlist:** Utica Av (A/C), W 4 St 8 Av level (A/C) and
+  47–50 Sts–Rockefeller Ctr (B/D/F/M), both directions. Stop IDs must be
+  confirmed during import (§3).
+- **D2. Storage:** a separate `gtfs.db`.
+- **D3. Time match:** a ±30 s UTC window between the Directions epoch and the
+  static time. More than one candidate trip on the route inside the window
+  means rejection.
+- **D4. Unassigned NYCT trips** (`is_assigned=false`) count as `unmatched`.
+- **D5. Feed:** the supplemented feed first. Fall back to the regular
+  `gtfs_subway.zip` if the download or validation fails.
+- **D6. Freshness:** an 8-day maximum index age; refresh daily at 04:30 NYC.
+- **D7. Rollout:** on by default, with no dry-run flag. The bridge fails open
+  and transparently. If the index is missing, stale or ambiguous, or a lookup
+  errors, the plan is still produced with no identity (so no realtime
+  padding), and the reason is logged at INFO/WARNING. Bridge errors must never
+  break planning, morning or poll.
