@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 
 # ─────────── Configuration models ───────────
@@ -188,6 +188,21 @@ class Event(BaseModel):
     mode_override: Optional[Literal["transit", "driving", "walking", "bicycling"]] = None
 
 
+class GtfsProvenance(BaseModel):
+    """Proof that a leg's ``gtfs_*`` identity came from the static GTFS bridge.
+
+    Only the bridge writes this.  Realtime matching treats ``gtfs_*`` fields
+    without provenance as untrusted, so legacy rows (which deserialize with
+    ``None``) and hand-built identities stay ineligible for padding.
+    """
+
+    source: Literal["gtfs_bridge"]
+    feed_kind: Literal["supplemented", "regular"]
+    feed_version: str  # feed_info.feed_version of the imported static feed
+    feed_sha256: str  # hash of the downloaded zip
+    validated_at: AwareDatetime
+
+
 class TransitLeg(BaseModel):
     mode: Literal["WALKING", "TRANSIT", "DRIVING", "BICYCLING"]
     system: Optional[str] = None
@@ -216,6 +231,8 @@ class TransitLeg(BaseModel):
     gtfs_boarding_stop_id: Optional[str] = None
     gtfs_boarding_stop_sequence: Optional[int] = None
     gtfs_direction_id: Optional[int] = None
+    # Set together with every gtfs_* field by the bridge, never defaulted.
+    gtfs_provenance: Optional[GtfsProvenance] = None
 
 
 class Route(BaseModel):
