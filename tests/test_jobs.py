@@ -30,6 +30,7 @@ from commutecompass.models import (
     TransitLeg,
 )
 from commutecompass.store import Store
+from instants import same_plan, utc
 from commutecompass.timeutil import NYC_TZ, now_nyc
 from commutecompass.notify import TelegramNotifier
 from commutecompass.realtime import FetchResult, Prediction
@@ -105,14 +106,14 @@ def test_poll_live_freshness_and_postfetch_urgent_clamp(
         row = conn.execute("SELECT fire_at, fired FROM pings WHERE id='prep'").fetchone()
     if observed:
         assert saved.realtime_buffer_minutes == 6
-        assert datetime.fromisoformat(row[0]) == start + timedelta(seconds=2)
+        assert utc(datetime.fromisoformat(row[0])) == utc(start + timedelta(seconds=2))
         assert row[1] == 1
         notifier.send.assert_called_once()
     else:
-        assert saved == plan
-        assert datetime.fromisoformat(row[0]) == before.fire_at and row[1] == 0
+        assert same_plan(saved, plan)
+        assert utc(datetime.fromisoformat(row[0])) == utc(before.fire_at) and row[1] == 0
         leave = store.get_pending_ping(plan.event.id, "leave")
-        assert leave is not None and leave.fire_at == plan.leave_at
+        assert leave is not None and utc(leave.fire_at) == utc(plan.leave_at)
         notifier.send.assert_not_called()
 
 
@@ -249,7 +250,7 @@ def test_poll_refresh_keeps_safety_padding_on_non_actionable_observations(
     with patch("commutecompass.realtime._cached_fetch", return_value=feed) as fetch:
         poll_run(minimal_config, store=store, notifier=notifier, now_fn=lambda: now,
                  fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
-    assert store.get_plan(plan.event.id) == plan
+    assert same_plan(store.get_plan(plan.event.id), plan)
     if case in {"disabled", "distant", "past", "cancelled"}:
         fetch.assert_not_called()
     notifier.send.assert_not_called()
@@ -291,8 +292,8 @@ def test_poll_replan_cannot_rollback_refresh_or_recreate_prep(
     saved = store.get_plan(plan.event.id)
     assert saved is not None
     assert saved.realtime_buffer_minutes == 10
-    assert saved.leave_at == now + timedelta(minutes=15)
-    assert saved.prep_at == now - timedelta(minutes=5)
+    assert utc(saved.leave_at) == utc(now + timedelta(minutes=15))
+    assert utc(saved.prep_at) == utc(now - timedelta(minutes=5))
     assert saved.weather_buffer_minutes == 7
     with store._connect() as conn:
         rows = conn.execute("SELECT id, fired, send_attempts FROM pings ORDER BY id").fetchall()
@@ -357,9 +358,9 @@ def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
     planner.assert_called_once()
     saved = store.get_plan(plan.event.id)
     assert saved is not None and saved.realtime_buffer_minutes == 10
-    assert saved.leave_at == now + timedelta(minutes=15)
+    assert utc(saved.leave_at) == utc(now + timedelta(minutes=15))
     pending = store.get_pending_ping(plan.event.id, "leave")
-    assert pending is not None and pending.id == "leave" and pending.fire_at == saved.leave_at
+    assert pending is not None and pending.id == "leave" and utc(pending.fire_at) == utc(saved.leave_at)
     notifier.send.assert_not_called()
 
 
@@ -390,7 +391,7 @@ def test_poll_discards_replan_when_refresh_commits_during_network(
     assert saved is not None and saved.route is not None
     assert saved.realtime_buffer_minutes == 6 and saved.route.legs[0].line == "Q"
     pending = store.get_pending_ping(plan.event.id, "leave")
-    assert pending is not None and pending.id == "leave" and pending.fire_at == saved.leave_at
+    assert pending is not None and pending.id == "leave" and utc(pending.fire_at) == utc(saved.leave_at)
     assert not store.is_alert_seen(alert.id, plan.event.id)
     notifier.send.assert_not_called()
 
@@ -443,7 +444,7 @@ def test_poll_replan_does_not_create_alarms_for_non_upcoming_event(
         planner.assert_called_once()
     else:
         planner.assert_not_called()
-    assert store.get_plan(plan.event.id) == plan
+    assert same_plan(store.get_plan(plan.event.id), plan)
     with store._connect() as conn:
         assert conn.execute("SELECT * FROM pings").fetchall() == []
     assert not store.is_alert_seen(alert.id, plan.event.id)
@@ -468,7 +469,7 @@ def test_poll_reconciliation_preserves_fired_retry_offsets_and_new_due(store: St
     with store._connect() as conn:
         rows = conn.execute("SELECT id, fired, send_attempts, fire_at FROM pings ORDER BY id").fetchall()
     assert [(r[0], r[1], r[2]) for r in rows] == [("leave", 0, 1), ("prep", 1, 0)]
-    assert datetime.fromisoformat(rows[0][3]) == now + timedelta(minutes=3)
+    assert utc(datetime.fromisoformat(rows[0][3])) == utc(now + timedelta(minutes=3))
     assert not store.reconcile_poll_replan(plan, changed, now)
     # No existing kind: a past time must produce an immediately due row.
     store.cancel_pings(plan.event.id)
@@ -499,15 +500,15 @@ def test_replan_safety_keeps_only_same_journey_padding_and_manual_interval(store
     new.route.raw_provider_payload = {"different": True}
     retained = _retain_replan_safety(old, new)
     assert retained.leave_at is not None
-    assert retained.leave_at == old.leave_at - timedelta(minutes=5)
-    assert retained.prep_at == retained.leave_at - timedelta(minutes=35)
+    assert utc(retained.leave_at) == utc(old.leave_at - timedelta(minutes=5))
+    assert utc(retained.prep_at) == utc(retained.leave_at - timedelta(minutes=35))
     assert retained.realtime_buffer_minutes == 10 and retained.realtime_reason == "Q late"
     assert retained.weather_buffer_minutes == 12
     assert retained.leave_buffer_minutes == 27
     assert retained.route is not None and retained.route.legs[0].gtfs_trip_id is None
     new.route.legs[0].line = "N"
     different = _retain_replan_safety(old, new)
-    assert different.leave_at == new.leave_at
+    assert utc(different.leave_at) == utc(new.leave_at)
     assert different.realtime_buffer_minutes == 2 and different.realtime_reason == "Q less late"
 
 
@@ -610,11 +611,11 @@ def test_parsed_directions_plan_cannot_advance_due_alarm(
         }), store=store, notifier=notifier, now_fn=lambda: now,
                  fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     fetch.assert_called_once()
-    assert store.get_plan(plan.event.id) == plan
+    assert same_plan(store.get_plan(plan.event.id), plan)
     # Prep was already due, but the leave alarm must not falsely become due.
     assert notifier.send.call_count == 1
     pending = store.get_pending_ping(plan.event.id, "leave")
-    assert pending is not None and pending.fire_at == plan.leave_at
+    assert pending is not None and utc(pending.fire_at) == utc(plan.leave_at)
 
 
 def test_realtime_refresh_cas_rejects_stale_observation_and_preserves_manual_offset(
@@ -625,13 +626,13 @@ def test_realtime_refresh_cas_rejects_stale_observation_and_preserves_manual_off
     manual = plan.model_copy(update={"prep_at": now + timedelta(minutes=15)})
     store.upsert_plan(manual)
     assert not store.increase_realtime_buffer(plan, 6, "late", now)
-    assert store.get_plan(plan.event.id) == manual
+    assert same_plan(store.get_plan(plan.event.id), manual)
     assert store.increase_realtime_buffer(manual, 2, "late", now)
     assert not store.increase_realtime_buffer(manual, 2, "late", now)
     current = store.get_plan(plan.event.id)
-    assert current is not None and current.prep_at == now + timedelta(minutes=13)
+    assert current is not None and utc(current.prep_at) == utc(now + timedelta(minutes=13))
     pending = store.get_pending_ping(plan.event.id, "prep")
-    assert pending is not None and pending.fire_at == now + timedelta(minutes=18)
+    assert pending is not None and utc(pending.fire_at) == utc(now + timedelta(minutes=18))
     assert not store.increase_realtime_buffer(current, 1, "smaller", now)
 
 
@@ -993,8 +994,8 @@ def test_morning_run_fetches_and_plans(
         assert "evt-1" in ping_map
         prep_ping = next(p for p in pending if p.kind == "prep" and p.event_id == "evt-1")
         leave_ping = next(p for p in pending if p.kind == "leave" and p.event_id == "evt-1")
-        assert prep_ping.fire_at == evt1_plan.prep_at
-        assert leave_ping.fire_at == evt1_plan.leave_at
+        assert utc(prep_ping.fire_at) == utc(evt1_plan.prep_at)
+        assert utc(leave_ping.fire_at) == utc(evt1_plan.leave_at)
 
         # ── Verify no pings for evt-2 (error event) ─────────────────────
         evt2_pings = [p for p in pending if p.event_id == "evt-2"]
@@ -1995,7 +1996,7 @@ def test_poll_location_replan_sends_update_when_route_shifts(
     assert any("Location update" in m for m in notifier.sent)
     # Plan was upserted (new leave_at persisted)
     saved = store.get_plan(today_events[0].id)
-    assert saved is not None and saved.leave_at == new_leave
+    assert saved is not None and utc(saved.leave_at) == utc(new_leave)
 
 
 def test_poll_ha_alarm_fires_for_prep_and_leave_only(
@@ -2286,7 +2287,7 @@ def test_poll_location_replan_skips_leg_only_change(
     # No location update sent, and the stored plan is unchanged.
     assert not any("Location update" in m for m in notifier.sent)
     saved = store.get_plan(today_events[0].id)
-    assert saved is not None and saved.leave_at == old_leave
+    assert saved is not None and utc(saved.leave_at) == utc(old_leave)
 
 
 def test_poll_mta_fetch_cached_within_ttl(
@@ -2498,7 +2499,7 @@ def test_poll_dispatch_claims_current_payload_after_concurrent_update(
         current = other.get_pending_ping(plan.event.id, "leave")
         assert current is not None and current.id == snapshot[0].id
         if mutation == "refresh":
-            assert current.fire_at == snapshot[0].fire_at  # No timestamp CAS can detect this.
+            assert utc(current.fire_at) == utc(snapshot[0].fire_at)  # No timestamp CAS can detect this.
         else:
             assert current.fire_at <= snapshot[0].fire_at
         assert current.message != snapshot[0].message
@@ -2508,7 +2509,7 @@ def test_poll_dispatch_claims_current_payload_after_concurrent_update(
     with patch.object(store, "pending_pings", side_effect=read_then_update):
         _poll_at(minimal_config, store, plan, notifier, now)
     saved = other.get_plan(plan.event.id)
-    assert saved is not None and saved.leave_at == now - timedelta(minutes=10)
+    assert saved is not None and utc(saved.leave_at) == utc(now - timedelta(minutes=10))
     message = format_leave_ping(saved)
     assert notifier.sent == [message]
     with other._connect() as conn:
@@ -2556,7 +2557,7 @@ def test_poll_does_not_claim_same_id_postponed_after_due_snapshot(
     assert notifier.sent == []
     pending = other.pending_pings(now + timedelta(minutes=10))[0]
     assert pending is not None and pending.id == "leave"
-    assert pending.fire_at == now + timedelta(minutes=10)
+    assert utc(pending.fire_at) == utc(now + timedelta(minutes=10))
     assert not pending.fired and pending.fired_at is None and pending.send_attempts == 1
     _poll_at(minimal_config, store, changed, notifier, now + timedelta(minutes=9))
     assert notifier.sent == []
@@ -2747,7 +2748,7 @@ def test_poll_records_heartbeat(
     assert store.get_job_heartbeat("poll") is None
 
     _poll_at(minimal_config, store, Plan(event=today_events[0]), SpyNotifier(), now)
-    assert store.get_job_heartbeat("poll") == now
+    assert utc(store.get_job_heartbeat("poll")) == utc(now)
 
 
 def test_poll_does_not_retry_stale_leave_ping(
@@ -2834,3 +2835,38 @@ def test_poll_quiet_hours_leaves_unclaimed_for_later(
         "Quiet-hours suppression must NOT consume the ping; it should remain "
         "pending so a later poll outside the quiet window can claim it."
     )
+
+
+# ── DST fall-back (PEP 495) regressions ───────────────────────────────────────
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_morning_schedules_pings_in_fall_back_hour(minimal_config: Config, fold: int) -> None:
+    """Pings later in elapsed time must be scheduled even when their wall time is earlier.
+
+    At 01:45 EDT (fold=0), a prep at 01:30 EST is 45 minutes in the future,
+    yet same-zone ``>`` compares wall clocks and calls it past.
+    """
+    from datetime import UTC
+
+    now = datetime(2026, 11, 1, 1, 45, tzinfo=NYC_TZ, fold=fold)
+
+    def after(minutes: int) -> datetime:
+        return (now.astimezone(UTC) + timedelta(minutes=minutes)).astimezone(NYC_TZ)
+
+    event = Event(id="dst", calendar_id="test-cal", calendar_name="Test", title="Late show",
+                  start=after(120), end=after(180))
+    plan = Plan(event=event, leave_at=after(60), prep_at=after(45),
+                route=Route(legs=[], depart_at=after(60), arrive_at=after(110),
+                            total_duration_seconds=3000))
+    with patch("commutecompass.jobs.morning.CalendarClient") as calendar, patch(
+        "commutecompass.jobs.morning.plan_event", return_value=plan,
+    ), patch("commutecompass.jobs.morning.fetch_alerts", return_value=[]), patch(
+        "commutecompass.jobs.morning.build_notifier", return_value=MagicMock(),
+    ), patch("commutecompass.jobs.morning.now_nyc", return_value=now):
+        calendar.return_value.fetch_events.return_value = [event]
+        morning_run(minimal_config)
+    store = Store(minimal_config.paths.db_path)
+    for kind, expected in (("prep", plan.prep_at), ("leave", plan.leave_at)):
+        pending = store.get_pending_ping(event.id, kind)
+        assert pending is not None, f"{kind} ping dropped in fall-back hour"
+        assert utc(pending.fire_at) == utc(expected)
