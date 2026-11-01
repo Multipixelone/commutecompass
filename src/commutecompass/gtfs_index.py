@@ -93,8 +93,8 @@ FEED_URLS: tuple[tuple[FeedKind, str], ...] = (
     ("regular", REGULAR_URL),
 )
 
-# Version 1 could silently drop matched trips, making uniqueness unsafe.
-SCHEMA_VERSION = 2
+# Versions 1/2 could silently drop matched trips/short rows, making uniqueness unsafe.
+SCHEMA_VERSION = 3
 MAX_INDEX_AGE = timedelta(days=8)
 # Tolerate small clock skew between the refresh host and readers.
 _FUTURE_SKEW = timedelta(minutes=5)
@@ -308,7 +308,11 @@ class _Trip:
 def _open_csv(zf: zipfile.ZipFile, name: str) -> Iterator[dict[str, str]]:
     with zf.open(name) as raw:
         text: IO[str] = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
-        yield from csv.DictReader(text)
+        reader = csv.DictReader(text)
+        for row in reader:
+            if any(value is None for value in row.values()):
+                raise FeedError(f"{name} row ending at line {reader.line_num} is short")
+            yield row
 
 
 def _open_rows(zf: zipfile.ZipFile, name: str, columns: Sequence[str]) -> Iterator[list[str]]:
@@ -326,7 +330,10 @@ def _open_rows(zf: zipfile.ZipFile, name: str, columns: Sequence[str]) -> Iterat
         width = max(idx) + 1
         for row in reader:
             if len(row) < width:
-                continue
+                raise FeedError(
+                    f"{name} row ending at line {reader.line_num} is short: "
+                    f"expected at least {width} fields, got {len(row)}"
+                )
             yield [row[i] for i in idx]
 
 

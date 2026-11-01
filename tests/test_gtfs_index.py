@@ -235,6 +235,42 @@ def test_incomplete_rival_inventory_rejects_import_atomically(
         assert index.departures_near(PLATFORMS, ("A",), _nyc(2026, 10, 30, 8, 30))
 
 
+@pytest.mark.parametrize("table,row", [
+    ("stop_times.txt", "RIVAL_049301_A..N,A48N,08:30:00,08:30:00\n"),
+    ("trips.txt", "A,RIVAL_049301_A..N,Weekday,0\n"),
+    ("stops.txt", "OTHER,Other,40.0,-73.0,0\n"),
+    ("routes.txt", "OTHER,Other\n"),
+    ("calendar.txt", "Other,1,1,1,1,1,1,1,20261024\n"),
+    ("calendar_dates.txt", "Other,20261031\n"),
+    ("feed_info.txt", "MTA,20261101,20270331\n"),
+])
+def test_short_rows_reject_import_atomically(tmp_path: Path, table: str, row: str) -> None:
+    now = _nyc(2026, 10, 30, 8, 0)
+    archive = _build_zip(tmp_path / "feed.zip")
+    db = tmp_path / "gtfs.db"
+    import_feed(archive, db, feed_kind="regular", allowlist=[ENTRY], now=now)
+    original = db.read_bytes()
+    with zipfile.ZipFile(archive) as zf:
+        content = zf.read(table).decode()
+    if table == "stop_times.txt":
+        # The short 08:30 boarding row is the missing rival. Its valid later
+        # platform stop keeps the trip inventoried, but cannot replace it.
+        content += row + "RIVAL_049301_A..N,A48N,09:00:00,09:00:00,2\n"
+        content += "RIVAL_049301_A..N,A47N,09:02:00,09:02:00,3\n"
+        with zipfile.ZipFile(archive) as zf:
+            trips = zf.read("trips.txt").decode()
+        extra = {table: content, "trips.txt": trips + "A,RIVAL_049301_A..N,Weekday,X,0,A..N\n"}
+    else:
+        # feed_info reads only its first row; the other tables read all rows.
+        content = content.splitlines()[0] + "\n" + row if table == "feed_info.txt" else content + row
+        extra = {table: content}
+    bad = _build_zip(tmp_path / "short.zip", extra=extra)
+    with pytest.raises(FeedError, match=rf"{table} row ending at line .* is short"):
+        import_feed(bad, db, feed_kind="supplemented", allowlist=[ENTRY], now=now)
+    assert db.read_bytes() == original
+    assert not list(tmp_path.glob(".gtfs.db.*.tmp"))
+
+
 def test_import_filters_and_records_metadata(tmp_path: Path) -> None:
     now = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
     zip_path = _build_zip(tmp_path / "feed.zip")
@@ -420,7 +456,8 @@ def test_open_missing_and_corrupt(tmp_path: Path) -> None:
     assert GtfsIndex.open(empty) is None
 
 
-def test_open_rejects_old_incomplete_inventory_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema", ["1", "2"])
+def test_open_rejects_old_incomplete_inventory_schema(tmp_path: Path, schema: str) -> None:
     import sqlite3
 
     now = _nyc(2026, 10, 30, 8, 0)
@@ -428,7 +465,7 @@ def test_open_rejects_old_incomplete_inventory_schema(tmp_path: Path) -> None:
     import_feed(_build_zip(tmp_path / "feed.zip"), db,
                 feed_kind="regular", allowlist=[ENTRY], now=now)
     with sqlite3.connect(db) as conn:
-        conn.execute("UPDATE gtfs_meta SET value = '1' WHERE key = 'schema_version'")
+        conn.execute("UPDATE gtfs_meta SET value = ? WHERE key = 'schema_version'", (schema,))
     assert GtfsIndex.open(db, now=now) is None
 
 
@@ -467,8 +504,8 @@ def test_refresh_prefers_supplemented(tmp_path: Path) -> None:
     assert urls == ["https://rrgtfsfeeds.s3.amazonaws.com/gtfs_supplemented.zip"]
 
 
-@pytest.mark.parametrize("invalid_inventory", [False, True])
-def test_refresh_falls_back_to_regular(tmp_path: Path, invalid_inventory: bool) -> None:
+@pytest.mark.parametrize("failure", ["truncated", "invalid_inventory", "short_row"])
+def test_refresh_falls_back_to_regular(tmp_path: Path, failure: str) -> None:
     src = _build_zip(tmp_path / "src.zip")
     bad = _build_zip(tmp_path / "bad.zip", extra={
         "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
@@ -477,9 +514,19 @@ def test_refresh_falls_back_to_regular(tmp_path: Path, invalid_inventory: bool) 
         "WK_049300_A..N,A48N,08:34:00,08:34:00,3\n",
     })
 
+    short = _build_zip(tmp_path / "short.zip", extra={
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        "WK_049300_A..N,A48N,08:30:00,08:30:00\n"
+        "WK_049300_A..N,A48N,09:00:00,09:00:00,2\n",
+    })
+    payloads = {
+        "truncated": b"truncated", "invalid_inventory": bad.read_bytes(),
+        "short_row": short.read_bytes(),
+    }
+
     def fetch(url: str, dest: Path) -> None:
         if "supplemented" in url:
-            dest.write_bytes(bad.read_bytes() if invalid_inventory else b"truncated")
+            dest.write_bytes(payloads[failure])
         else:
             dest.write_bytes(src.read_bytes())
 
