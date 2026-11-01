@@ -36,6 +36,31 @@ def _json_dumps(obj: object) -> str:
     return json.dumps(obj, default=_json_serializer)
 
 
+def _utc_instants(obj: object) -> object:
+    """Recursively replace aware datetimes with their UTC instant."""
+    if isinstance(obj, datetime):
+        return obj.astimezone(UTC) if obj.utcoffset() is not None else obj
+    if isinstance(obj, dict):
+        return {key: _utc_instants(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_utc_instants(value) for value in obj]
+    return obj
+
+
+def _same_plan(a: Plan, b: Plan) -> bool:
+    """Compare plans field-by-field with datetimes compared as UTC instants.
+
+    Pydantic equality compares datetimes with ``==``.  Per PEP 495, an
+    inter-zone comparison involving an ambiguous local time (the NYC fall-back
+    hour) is always unequal, so a ``ZoneInfo`` plan never equals its own
+    fixed-offset JSON round-trip during that hour.  Same-zone comparisons have
+    the opposite flaw: they ignore ``fold`` and treat 01:30 EDT and 01:30 EST
+    as equal.  Normalising every datetime to UTC first avoids both problems;
+    the same instant written with different offsets still compares equal.
+    """
+    return _utc_instants(a.model_dump()) == _utc_instants(b.model_dump())
+
+
 def _json_loads(raw: str) -> dict[str, Any]:
     """Parse a JSON string."""
     loaded = json.loads(raw)
@@ -310,7 +335,7 @@ class Store:
             if row is None:
                 return False
             current = Plan.model_validate_json(row[0])
-            if (current != expected or current.error is not None or current.leave_at is None
+            if (not _same_plan(current, expected) or current.error is not None or current.leave_at is None
                     or current.event.start.astimezone(UTC) <= now.astimezone(UTC)
                     or minutes <= current.realtime_buffer_minutes):
                 return False
@@ -368,7 +393,7 @@ class Store:
             if row is None:
                 return False
             current = Plan.model_validate_json(row[0])
-            if (current != expected
+            if (not _same_plan(current, expected)
                     or current.event.start.astimezone(UTC) <= now.astimezone(UTC)
                     or updated.event.start.astimezone(UTC) <= now.astimezone(UTC)):
                 return False

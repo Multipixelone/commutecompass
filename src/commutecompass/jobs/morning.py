@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -155,7 +155,9 @@ def run(config: Config) -> None:
             continue
 
         # prep ping
-        if plan.prep_at and plan.prep_at > _now:
+        # Compare UTC instants: same-zone comparison ignores ``fold`` and would
+        # misorder times inside the DST fall-back hour (PEP 495).
+        if plan.prep_at and plan.prep_at.astimezone(UTC) > _now.astimezone(UTC):
             message = format_prep_ping(plan)
             ping = PingEntry(
                 id=str(uuid.uuid4()),
@@ -173,7 +175,7 @@ def run(config: Config) -> None:
             )
 
         # leave ping
-        if plan.leave_at > _now:
+        if plan.leave_at.astimezone(UTC) > _now.astimezone(UTC):
             message = format_leave_ping(plan)
             ping = PingEntry(
                 id=str(uuid.uuid4()),

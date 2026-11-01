@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta, timezone
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from instants import same_plan, utc
 
 from commutecompass.models import (
     CurrentLocation,
@@ -21,7 +22,8 @@ from commutecompass.models import (
     Route,
     TransitLeg,
 )
-from commutecompass.store import Store
+from commutecompass.store import Store, _same_plan
+from commutecompass.timeutil import NYC_TZ
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -135,7 +137,7 @@ def test_poll_reconciliation_rejects_non_upcoming_events_atomically(
     with store._connect() as conn:
         before = conn.execute("SELECT * FROM plans").fetchall()
     assert not store.reconcile_poll_replan(plan, updated, now)
-    assert store.get_plan(plan.event.id) == plan
+    assert same_plan(store.get_plan(plan.event.id), plan)
     with store._connect() as conn:
         assert conn.execute("SELECT * FROM plans").fetchall() == before
         assert conn.execute("SELECT * FROM pings").fetchall() == []
@@ -155,10 +157,10 @@ def test_poll_reconciliation_creates_urgent_alarms_for_upcoming_event(tmp_db_pat
         "error": "too_imminent",
     })
     assert store.reconcile_poll_replan(plan, updated, now)
-    assert store.get_plan(plan.event.id) == updated
+    assert same_plan(store.get_plan(plan.event.id), updated)
     pings = store.pending_pings(now)
     assert {ping.kind for ping in pings} == {"prep", "leave"}
-    assert all(ping.fire_at == now for ping in pings)
+    assert all(utc(ping.fire_at) == utc(now) for ping in pings)
 
 def test_store_init(tmp_db_path: Path) -> None:
     """Store can be instantiated."""
@@ -447,7 +449,7 @@ def test_schedule_ping_dedup_same_event_id_kind(tmp_db_path: Path) -> None:
     assert len(pending) == 1, "Expected exactly one pending ping after dedup"
     assert pending[0].id == "ping-second"
     assert pending[0].message == "Leave now (updated)"
-    assert pending[0].fire_at == updated
+    assert utc(pending[0].fire_at) == utc(updated)
 
 
 def test_schedule_ping_same_event_different_kinds_both_coexist(tmp_db_path: Path) -> None:
@@ -741,7 +743,7 @@ def test_route_selection_and_leave_buffer_persistence(
     assert legacy is not None and legacy.route is not None
     assert legacy.leave_buffer_minutes is None
     assert legacy.route.provider_route_index is None
-    assert legacy.leave_at == plan.leave_at
+    assert utc(legacy.leave_at) == utc(plan.leave_at)
     assert route_timing(legacy.route).duration_seconds == 3095
 
 
@@ -1004,8 +1006,8 @@ def test_claim_ping_entry_returns_current_payload_and_preserves_retry(tmp_db_pat
     claimed = store.claim_ping_entry(snapshot.id, now)
     assert claimed is not None
     assert claimed.message == "updated leave" and claimed.message != snapshot.message
-    assert claimed.fire_at == snapshot.fire_at
-    assert claimed.fired and claimed.fired_at == now and claimed.send_attempts == 1
+    assert utc(claimed.fire_at) == utc(snapshot.fire_at)
+    assert claimed.fired and utc(claimed.fired_at) == utc(now) and claimed.send_attempts == 1
     assert other.claim_ping_entry(ping.id, now) is None
     assert other.claim_ping(ping.id, now) is False
     assert store.release_ping(claimed.id)
@@ -1029,7 +1031,7 @@ def test_claim_ping_entry_due_filter_rechecks_postponed_row(tmp_db_path: Path) -
         conn.execute("UPDATE pings SET fire_at = ? WHERE id = ?", (future.isoformat(), ping.id))
     assert store.claim_ping_entry(snapshot.id, now, due_only=True) is None
     pending = other.pending_pings(future)[0]
-    assert pending is not None and pending.fire_at == future
+    assert pending is not None and utc(pending.fire_at) == utc(future)
     assert not pending.fired and pending.fired_at is None and pending.send_attempts == 1
     claimed = store.claim_ping_entry(snapshot.id, future, due_only=True)
     assert claimed is not None and claimed.send_attempts == 1
@@ -1356,3 +1358,86 @@ def test_get_pending_ping_missing_returns_none(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()
     assert store.get_pending_ping("nope", kind="prep") is None
+
+
+# ── DST fall-back (PEP 495) regressions ───────────────────────────────────────
+# 2026-11-01 01:00–02:00 happens twice in New York. Inside that hour, ``==``
+# between a ZoneInfo datetime and its fixed-offset JSON round-trip is always
+# False, and same-zone comparison ignores ``fold``. CAS must compare instants.
+
+def _nyc_after(now: datetime, minutes: int) -> datetime:
+    """Elapsed-time arithmetic (wall-clock ``+`` is wrong across the fold)."""
+    return (now.astimezone(UTC) + timedelta(minutes=minutes)).astimezone(NYC_TZ)
+
+
+def _ambiguous_plan(now: datetime) -> Plan:
+    start = _nyc_after(now, 25)
+    event = make_event()
+    event.start, event.end = start, _nyc_after(now, 90)
+    plan = make_plan(event)
+    plan.leave_at = _nyc_after(now, 10)
+    plan.prep_at = _nyc_after(now, 5)
+    return plan
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_same_plan_compares_instants_in_fall_back_hour(fold: int) -> None:
+    now = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=fold)
+    plan = _ambiguous_plan(now)
+    loaded = Plan.model_validate_json(plan.model_dump_json())
+    assert plan != loaded  # PEP 495: the cross-zone pitfall being guarded against
+    assert _same_plan(plan, loaded) and _same_plan(loaded, plan)
+    assert plan.leave_at is not None
+    other_fold = plan.model_copy(update={"leave_at": plan.leave_at.replace(fold=1 - plan.leave_at.fold)})
+    assert not _same_plan(plan, other_fold)
+    assert not _same_plan(loaded, other_fold)
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_realtime_buffer_cas_succeeds_in_fall_back_hour(tmp_db_path: Path, fold: int) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=fold)
+    plan = _ambiguous_plan(now)
+    store.upsert_plan(plan)
+    assert plan.leave_at is not None
+    store.schedule_ping(PingEntry(id="leave", event_id=plan.event.id, kind="leave",
+                                  fire_at=plan.leave_at, message="leave"))
+    assert store.increase_realtime_buffer(plan, 3, "late", now)
+    saved = store.get_plan(plan.event.id)
+    assert saved is not None and saved.realtime_buffer_minutes == 3
+    assert saved.leave_at is not None
+    assert saved.leave_at.astimezone(UTC) == plan.leave_at.astimezone(UTC) - timedelta(minutes=3)
+    pending = store.get_pending_ping(plan.event.id, "leave")
+    assert pending is not None
+    assert pending.fire_at.astimezone(UTC) == saved.leave_at.astimezone(UTC)
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_poll_reconciliation_cas_succeeds_in_fall_back_hour(tmp_db_path: Path, fold: int) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=fold)
+    plan = _ambiguous_plan(now)
+    store.upsert_plan(plan)
+    updated = plan.model_copy(update={"leave_at": _nyc_after(now, 15), "prep_at": _nyc_after(now, 8)})
+    assert store.reconcile_poll_replan(plan, updated, now)
+    saved = store.get_plan(plan.event.id)
+    assert saved is not None and _same_plan(saved, updated)
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_cas_rejects_same_wall_time_other_fold(tmp_db_path: Path, fold: int) -> None:
+    """01:35 EDT and 01:35 EST are different instants: the CAS must not match."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 11, 1, 1, 0, tzinfo=NYC_TZ, fold=0)
+    plan = _ambiguous_plan(now)
+    plan.leave_at = datetime(2026, 11, 1, 1, 35, tzinfo=NYC_TZ, fold=fold)
+    store.upsert_plan(plan)
+    stale = plan.model_copy(update={"leave_at": plan.leave_at.replace(fold=1 - fold)})
+    updated = stale.model_copy(update={"prep_at": _nyc_after(now, 2)})
+    assert not store.reconcile_poll_replan(stale, updated, now)
+    assert not store.increase_realtime_buffer(stale, 3, "late", now)
+    saved = store.get_plan(plan.event.id)
+    assert saved is not None and _same_plan(saved, plan)
