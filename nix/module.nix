@@ -359,7 +359,9 @@ in {
           Environment = serviceDefaults.serviceConfig.Environment ++ [
             "XDG_RUNTIME_DIR=${cfg.alarm.runtimeDir}"
           ];
-          # PipeWire is accessed over its user's runtime socket, not devices.
+          # ProtectHome=yes also hides /run/user, including PipeWire's socket.
+          # Keep homes read-only, but allow this user's runtime socket through.
+          ProtectHome = "read-only";
           ReadWritePaths = serviceDefaults.serviceConfig.ReadWritePaths ++ [ cfg.alarm.runtimeDir ];
         };
       }
