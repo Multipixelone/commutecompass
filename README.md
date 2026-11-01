@@ -219,7 +219,7 @@ Enable `[alarm].enabled = true` and configure `[home_assistant]` plus
 `prep_at - wake_lead_minutes` and `fallback_time` (default noon, NYC). With no
 commutes it is still noon. Once today's wake has passed, publishing targets
 tomorrow's logical day; the next future prep (including later today) is sent
-as HA's nap cap. Planning never replaces today's saved plans.
+minus the wake lead as HA's nap cap. Planning never replaces today's saved plans.
 
 ```console
 commutecompass alarm publish --dry-run
@@ -239,8 +239,12 @@ accepts `wake_at`, `next_prep_at` (ISO strings, or empty prep), and sanitized
 `next_event`; `script.commute_nap` accepts `minutes`; `script.commute_alarm_skip`
 skips the current next instant. `sensor.commute_next_alarm` exposes the earliest
 future unskipped wake/nap instant and `kind`/`event` attributes. Use timezone-aware
-ISO sensor values. HA's `input_button` stop/snooze states must be last-pressed
-timestamps. The daemon writes `idle|ringing|snoozed` and a heartbeat to HA.
+ISO sensor values. Persisted UTC text mirrors preserve wake/nap/skip/cap instants
+through DST folds and HA restarts; local datetime helpers are display/legacy only.
+Missing/unknown UTC helpers retain the last cached schedule; an explicit epoch-zero
+value clears it (and means no cap for prep). Provision the full HA layer before use.
+HA's `input_button` stop/snooze states must be last-pressed timestamps. The daemon
+writes `idle|ringing|snoozed`, a UTC heartbeat and a per-deadline playback acknowledgement.
 
 The desktop daemon caches the last known alarm, rings even if HA goes down,
 ignores alarms more than ten minutes stale at startup, and remembers completed
@@ -248,8 +252,9 @@ instants across restarts. It uses a case-insensitive PipeWire sink substring
 (default `analog`, deliberately not Snapcast Living Room), saves volume/mute,
 unmutes, ramps 30→100% over two minutes, loops a synthesized tone (or `sound`
 file), and restores audio on stop, fifteen-minute timeout or SIGTERM. Stop and
-snooze are HA-only; snooze is nine minutes, at most twice. There is no keyboard
-stop. Configure `sink` so it matches the intended output; a missing match is
+snooze buttons live in HA; keyboard/mouse activity on link also stops the alarm.
+Snooze is nine minutes, at most twice. Configure `sink` so it matches the intended
+output; a missing match is
 an audio error, never a fallback to another room.
 
 For NixOS set `services.commutecompass.alarm.enable = true`, choose the login
@@ -257,11 +262,25 @@ For NixOS set `services.commutecompass.alarm.enable = true`, choose the login
 (default `/run/user/1000`). `alarm.publishTime` defaults to `*:0/15`; tomorrow
 and poll replans also publish when enabled. The daemon restarts automatically.
 The runtime directory/session must exist (use a persistent login/user session).
+Activity-stop uses a dedicated `hypridle` monitor (included in the daemon PATH)
+and requires a running Wayland session with idle-notify support. It retries
+attachment after login or compositor exit; audio still works while unavailable. Set
+`alarm.wayland_display` if automatic socket discovery selects the wrong session;
+HA stop remains available without it. `alarm.stop_on_activity` defaults to true.
 
-The iPhone/HA layer is configured separately: Shortcut at 21:00 and charger
-connect deletes/recreates one Clock alarm labelled **CommuteCompass** and writes
-confirmation; the nap Shortcut calls the HA nap script. HA warns about a
-confirmation mismatch only at 23:30 and sends **one critical alert only if the
-desktop daemon is unhealthy** (heartbeat older than three minutes at alarm+1min).
-No repeating notifications. See the design for the full HA contract; Python does
-not install HA automations or iOS Shortcuts.
+The iPhone/HA layer is configured separately. The integration is maintained in
+the infra repository's `modules/iot/commutecompass-alarm.nix`; the legacy
+`examples/ha/commute_tomorrow_alarm.yaml` alone is **not** sufficient for it.
+
+On the iPhone, create a Shortcut to read `sensor.commute_next_alarm`, validate
+that the time is a future next occurrence, create and verify a Clock alarm
+labelled **CommuteCompass**, then delete older owned alarms and write
+`input_datetime.commute_alarm_confirmed`. Run it at 21:00, on charger connection,
+and after requesting a nap. Phone alarms only follow skip/off or schedule
+changes when this Shortcut runs; HA cannot remotely change Clock.
+
+HA warns about a confirmation mismatch only at 23:30 and sends **one critical
+alert** if the desktop daemon is offline or reports playback failure. No repeating
+notifications. A healthy audio process cannot detect unplugged physical speakers.
+See [`docs/alarm-verification.md`](./docs/alarm-verification.md) for activation
+and hardware checks. Keep a manual alarm until those checks pass.
