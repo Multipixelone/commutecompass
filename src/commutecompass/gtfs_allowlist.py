@@ -28,7 +28,7 @@ import tomllib
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 ALLOWLIST_RESOURCE = "gtfs_bridge_allowlist.toml"
 SCHEMA_VERSION = 1
@@ -200,7 +200,7 @@ def parse_allowlist(text: str) -> tuple[AllowlistEntry, ...]:
     return entries
 
 
-def load_allowlist(path: Optional[Path] = None) -> tuple[AllowlistEntry, ...]:
+def load_allowlist(path: Path | None = None) -> tuple[AllowlistEntry, ...]:
     """Load the allowlist from ``path`` or the bundled package resource."""
     try:
         if path is None:

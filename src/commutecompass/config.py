@@ -12,7 +12,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
 class Origin(BaseModel):
@@ -53,7 +52,7 @@ class PathsConfig(BaseModel):
     gtfs_db_path: str = ""
 
     @model_validator(mode="after")
-    def _default_gtfs_db_path(self) -> "PathsConfig":
+    def _default_gtfs_db_path(self) -> PathsConfig:
         if not self.gtfs_db_path:
             self.gtfs_db_path = str(Path(self.db_path).with_name("gtfs.db"))
         self.ensure_distinct_db_paths()

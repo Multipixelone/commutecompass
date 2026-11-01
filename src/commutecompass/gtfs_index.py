@@ -72,7 +72,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import IO, Literal, Optional
+from typing import IO, Literal, Self
 
 from commutecompass.gtfs_allowlist import (
     AllowlistEntry,
@@ -160,18 +160,18 @@ class StopInfo:
     stop_name: str
     stop_lat: float
     stop_lon: float
-    parent_station: Optional[str]
+    parent_station: str | None
     location_type: int
 
 
 @dataclass(frozen=True)
 class Departure:
     trip_id: str
-    rt_trip_id: Optional[str]
+    rt_trip_id: str | None
     route_id: str
     service_id: str
-    direction_id: Optional[int]
-    shape_id: Optional[str]
+    direction_id: int | None
+    shape_id: str | None
     stop_id: str
     stop_sequence: int
     service_date: date
@@ -189,7 +189,7 @@ class TripStop:
     stop_name: str
     stop_lat: float
     stop_lon: float
-    parent_station: Optional[str]
+    parent_station: str | None
 
 
 # ─────────── Pure helpers ───────────
@@ -217,7 +217,7 @@ def service_instant(service_date: date, offset_s: int) -> datetime:
     return noon - timedelta(hours=12) + timedelta(seconds=offset_s)
 
 
-def rt_trip_id(static_trip_id: str) -> Optional[str]:
+def rt_trip_id(static_trip_id: str) -> str | None:
     """NYCT RT trip_id: the static trip_id suffix after the first ``_``."""
     _, sep, suffix = static_trip_id.partition("_")
     return suffix if sep and suffix else None
@@ -301,8 +301,8 @@ CREATE INDEX gtfs_rt_trip_by_id ON gtfs_rt_trip (rt_trip_id);
 class _Trip:
     route_id: str
     service_id: str
-    direction_id: Optional[int]
-    shape_id: Optional[str]
+    direction_id: int | None
+    shape_id: str | None
 
 
 def _open_csv(zf: zipfile.ZipFile, name: str) -> Iterator[dict[str, str]]:
@@ -337,7 +337,7 @@ def _open_rows(zf: zipfile.ZipFile, name: str, columns: Sequence[str]) -> Iterat
             yield [row[i] for i in idx]
 
 
-def _opt_int(text: Optional[str]) -> Optional[int]:
+def _opt_int(text: str | None) -> int | None:
     text = (text or "").strip()
     return int(text) if text else None
 
@@ -377,9 +377,9 @@ def _check_stop(
     stop_id: str,
     entry: AllowlistEntry,
     *,
-    parent: Optional[str],
+    parent: str | None,
     location_type: int,
-) -> Optional[str]:
+) -> str | None:
     stop = stops.get(stop_id)
     if stop is None:
         return f"{stop_id}: missing from stops.txt"
@@ -419,7 +419,7 @@ def validate_allowlist_against_stops(
     if problems:
         raise AllowlistMismatchError("allowlist does not match stops.txt: " + "; ".join(problems))
 
-def _read_feed_info(zf: zipfile.ZipFile) -> Optional[str]:
+def _read_feed_info(zf: zipfile.ZipFile) -> str | None:
     if "feed_info.txt" not in zf.namelist():
         return None
     for row in _open_csv(zf, "feed_info.txt"):
@@ -481,9 +481,9 @@ def import_feed(
     db_path: Path,
     *,
     feed_kind: FeedKind,
-    allowlist: Optional[Sequence[AllowlistEntry]] = None,
+    allowlist: Sequence[AllowlistEntry] | None = None,
     source_url: str = "",
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> ImportStats:
     """Filtered import of ``zip_path`` into ``db_path`` (atomic replace)."""
     entries = tuple(allowlist) if allowlist is not None else load_allowlist()
@@ -691,10 +691,10 @@ def download(url: str, dest: Path) -> None:
 def refresh(
     db_path: Path,
     *,
-    allowlist: Optional[Sequence[AllowlistEntry]] = None,
-    fetch: Optional[Fetcher] = None,
-    tmp_dir: Optional[Path] = None,
-    now: Optional[datetime] = None,
+    allowlist: Sequence[AllowlistEntry] | None = None,
+    fetch: Fetcher | None = None,
+    tmp_dir: Path | None = None,
+    now: datetime | None = None,
     feeds: Sequence[tuple[FeedKind, str]] = FEED_URLS,
 ) -> ImportStats:
     """Download and import the supplemented feed, falling back to regular (D5).
@@ -746,15 +746,15 @@ class GtfsIndex:
         cls,
         path: Path | str,
         *,
-        now: Optional[datetime] = None,
+        now: datetime | None = None,
         max_age: timedelta = MAX_INDEX_AGE,
-    ) -> Optional["GtfsIndex"]:
+    ) -> GtfsIndex | None:
         """Open ``path`` or return ``None`` if missing, corrupt or stale."""
         p = Path(path)
         if not p.is_file():
             return None
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        conn: Optional[sqlite3.Connection] = None
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
             meta = conn.execute(
@@ -803,7 +803,7 @@ class GtfsIndex:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "GtfsIndex":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -926,7 +926,7 @@ class GtfsIndex:
             for r in rows
         ]
 
-    def stop(self, stop_id: str) -> Optional[StopInfo]:
+    def stop(self, stop_id: str) -> StopInfo | None:
         r = self._conn.execute(
             "SELECT stop_id, stop_name, stop_lat, stop_lon, parent_station, location_type"
             " FROM gtfs_stop WHERE stop_id = ?",

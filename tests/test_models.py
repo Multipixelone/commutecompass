@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -436,10 +436,10 @@ def test_alert_severity_literals() -> None:
 # ─────────── GTFS provenance ───────────
 
 def _provenance(**overrides: Any) -> GtfsProvenance:
-    fields: dict[str, Any] = dict(
-        source="gtfs_bridge", feed_kind="supplemented", feed_version="20261031",
-        feed_sha256="ab" * 32, validated_at=datetime(2026, 10, 31, 8, 30, tzinfo=timezone.utc),
-    )
+    fields: dict[str, Any] = {
+        "source": "gtfs_bridge", "feed_kind": "supplemented", "feed_version": "20261031",
+        "feed_sha256": "ab" * 32, "validated_at": datetime(2026, 10, 31, 8, 30, tzinfo=UTC),
+    }
     fields.update(overrides)
     return GtfsProvenance(**fields)
 

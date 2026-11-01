@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1654,7 +1654,6 @@ class TestGtfsRefresh:
 
     def _stats(self) -> Any:
         from datetime import date as date_cls
-        from datetime import timezone
 
         from commutecompass.gtfs_index import ImportStats
 
@@ -1664,7 +1663,7 @@ class TestGtfsRefresh:
             feed_sha256="0" * 64,
             coverage_start=date_cls(2026, 11, 1),
             coverage_end=date_cls(2027, 5, 15),
-            imported_at=datetime(2026, 11, 1, 8, 30, tzinfo=timezone.utc),
+            imported_at=datetime(2026, 11, 1, 8, 30, tzinfo=UTC),
             trips=10,
             stop_times=200,
             rejected_trips=0,

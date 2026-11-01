@@ -5,7 +5,6 @@ from __future__ import annotations
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -97,7 +96,7 @@ TRIPS: list[tuple[str, str, str, int, str, list[tuple[str, str]]]] = [
 ]
 
 
-def _build_zip(path: Path, *, stops: str = STOPS, extra: Optional[dict[str, str]] = None) -> Path:
+def _build_zip(path: Path, *, stops: str = STOPS, extra: dict[str, str] | None = None) -> Path:
     trips = ["route_id,trip_id,service_id,trip_headsign,direction_id,shape_id"]
     stop_times = ["trip_id,stop_id,arrival_time,departure_time,stop_sequence"]
     for trip_id, route, service, direction, shape, seq in TRIPS:

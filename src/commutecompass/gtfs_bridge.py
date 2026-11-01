@@ -12,10 +12,13 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from commutecompass.gtfs_allowlist import (
-    haversine_m, load_allowlist, normalize_line, normalize_name,
+    haversine_m,
+    load_allowlist,
+    normalize_line,
+    normalize_name,
 )
 from commutecompass.gtfs_index import GtfsIndex, rt_trip_id, service_instant
 from commutecompass.models import GtfsProvenance, TransitLeg
@@ -33,8 +36,8 @@ RejectionReason = Literal[
 
 @dataclass(frozen=True)
 class ValidationResult:
-    leg: Optional[TransitLeg] = None
-    reason: Optional[RejectionReason] = None
+    leg: TransitLeg | None = None
+    reason: RejectionReason | None = None
 
 
 def _dict(value: object) -> dict[str, Any]:
@@ -45,7 +48,7 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _timestamp(value: object) -> Optional[datetime]:
+def _timestamp(value: object) -> datetime | None:
     seconds = _dict(value).get("value")
     if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
             or not math.isfinite(seconds) or seconds <= 0):
@@ -68,7 +71,7 @@ def _coordinates_match(stop: object, lat: float, lon: float, tolerance_m: float)
 
 def validate_leg(
     leg: TransitLeg, payload_step: dict[str, Any], index: GtfsIndex,
-    *, now: Optional[datetime] = None,
+    *, now: datetime | None = None,
 ) -> ValidationResult:
     """Validate one fresh subway leg, or return its precise rejection reason.
 

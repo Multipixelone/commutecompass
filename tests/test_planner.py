@@ -474,15 +474,15 @@ def test_plan_event_reuses_cached_route_when_live_routing_down(
     store.get_cached_route.assert_called_once()
 
 
-_IDENTITY: dict[str, Any] = dict(
-    gtfs_trip_id="087600_N..S36R", gtfs_route_id="C", gtfs_start_date="20250512",
-    gtfs_start_time="13:40:00", gtfs_boarding_stop_id="A41N",
-    gtfs_boarding_stop_sequence=10, gtfs_direction_id=0,
-    gtfs_provenance=GtfsProvenance(
+_IDENTITY: dict[str, Any] = {
+    "gtfs_trip_id": "087600_N..S36R", "gtfs_route_id": "C", "gtfs_start_date": "20250512",
+    "gtfs_start_time": "13:40:00", "gtfs_boarding_stop_id": "A41N",
+    "gtfs_boarding_stop_sequence": 10, "gtfs_direction_id": 0,
+    "gtfs_provenance": GtfsProvenance(
         source="gtfs_bridge", feed_kind="supplemented", feed_version="test",
         feed_sha256="0" * 64, validated_at=datetime(2025, 5, 12, 8, tzinfo=NYC_TZ),
     ),
-)
+}
 
 
 def _with_identity(route: Route, **flags: bool) -> Route:

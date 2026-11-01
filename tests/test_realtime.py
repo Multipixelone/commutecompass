@@ -12,9 +12,19 @@ from google.transit import gtfs_realtime_pb2 as gtfs
 from commutecompass.config import RealtimeConfig
 from commutecompass.models import Event, GtfsProvenance, Plan, Route, TransitLeg
 from commutecompass.realtime import (
-    FetchResult, NyctTrip, Predictions, _accumulate, _cached_fetch, _feed_cache,
-    _fetch_predictions, _match_stop_ids, _nyct_trip, _route_matches, nyct_derived_delay,
-    nyct_trip_direction, realtime_delay,
+    FetchResult,
+    NyctTrip,
+    Predictions,
+    _accumulate,
+    _cached_fetch,
+    _feed_cache,
+    _fetch_predictions,
+    _match_stop_ids,
+    _nyct_trip,
+    _route_matches,
+    nyct_derived_delay,
+    nyct_trip_direction,
+    realtime_delay,
 )
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
@@ -667,10 +677,10 @@ def serialized(feed: Any) -> Any:
 
 
 def nyct_route(**overrides: Any) -> Route:
-    fields: dict[str, Any] = dict(
-        gtfs_trip_id=NYCT_TRIP, gtfs_start_time=None, gtfs_boarding_stop_id="R20S",
-        gtfs_direction_id=1,
-    )
+    fields: dict[str, Any] = {
+        "gtfs_trip_id": NYCT_TRIP, "gtfs_start_time": None, "gtfs_boarding_stop_id": "R20S",
+        "gtfs_direction_id": 1,
+    }
     fields.update(overrides)
     return make_route(**fields)
 

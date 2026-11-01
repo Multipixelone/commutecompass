@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from bridge_helpers import BOARDING, NOW, build_index, directions
+
 from commutecompass.gtfs_bridge import validate_leg
 from commutecompass.gtfs_index import GtfsIndex
 from commutecompass.models import Origin, ResolvedLocation

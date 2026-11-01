@@ -329,7 +329,7 @@ _NYCT_EXTENSION_DIRECTION = {1: "N", 3: "S"}  # EAST/WEST never match a platform
 _NYCT_DIRECTION_ID = {"N": 0, "S": 1}  # static trips.txt convention
 
 
-def nyct_trip_direction(trip_id: str) -> Optional[Literal["N", "S"]]:
+def nyct_trip_direction(trip_id: str) -> Literal["N", "S"] | None:
     """Return ``"N"``/``"S"`` from a NYCT RT trip_id shape, or None if unparseable."""
     match = _NYCT_SHAPE.match(trip_id)
     if match is None:
@@ -389,7 +389,7 @@ def _nyct_same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
     return pred.stop_id == leg.gtfs_boarding_stop_id
 
 
-def nyct_derived_delay(pred: Prediction, leg: TransitLeg) -> Optional[int]:
+def nyct_derived_delay(pred: Prediction, leg: TransitLeg) -> int | None:
     """Boarding delay in UTC seconds for a matched, assigned NYCT trip, else None.
 
     The leg's ``depart_at`` is the bridge-validated static departure. Arrival-only
@@ -404,7 +404,7 @@ def nyct_derived_delay(pred: Prediction, leg: TransitLeg) -> Optional[int]:
     observed = pred.departure
     if observed is None:
         return None
-    delay = int(round(observed.timestamp() - leg.depart_at.timestamp()))
+    delay = round(observed.timestamp() - leg.depart_at.timestamp())
     if pred.delay is not None and pred.delay != delay:
         return None
     return delay
@@ -448,7 +448,7 @@ def _decode_nyct_descriptor(data: bytes, into: dict[str, Any]) -> None:
             raise ValueError("truncated field")
 
 
-def _nyct_trip(trip: Any) -> Optional[NyctTrip]:
+def _nyct_trip(trip: Any) -> NyctTrip | None:
     """Decode extension 1001 from a TripDescriptor's unknown fields, if present."""
     if _UnknownFieldSet is None:  # pragma: no cover - protobuf < 4.21
         return NyctTrip(malformed=True)

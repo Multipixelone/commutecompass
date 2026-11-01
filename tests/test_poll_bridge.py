@@ -6,12 +6,19 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
-
 from bridge_helpers import BOARDING, build_index, directions
+from google.transit import gtfs_realtime_pb2 as gtfs
+
 from commutecompass.config import (
-    CalendarSpec, Config, MtaConfig, OpencodeGoConfig, Origin, PathsConfig,
-    PrepConfig, RealtimeConfig, SchedulingConfig,
+    CalendarSpec,
+    Config,
+    MtaConfig,
+    OpencodeGoConfig,
+    Origin,
+    PathsConfig,
+    PrepConfig,
+    RealtimeConfig,
+    SchedulingConfig,
 )
 from commutecompass.format import format_prep_ping
 from commutecompass.gtfs_index import GtfsIndex
@@ -47,7 +54,7 @@ def nyct_feed(*, opposite: bool = False) -> Any:
     """Actual protobuf presence bits: only departure.time, no sequence/delay/direction."""
     feed = gtfs.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
-    feed.header.incrementality = 0
+    feed.header.incrementality = gtfs.FeedHeader.FULL_DATASET
     feed.header.timestamp = int(POLL.timestamp())
     entity = feed.entity.add()
     entity.id = "assigned-A"

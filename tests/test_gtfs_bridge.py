@@ -8,8 +8,8 @@ from typing import Any, get_args
 from unittest.mock import patch
 
 import pytest
-
 from bridge_helpers import BOARDING, DAY, NOW, TRIP, build_index, open_index, transit_step
+
 from commutecompass.gtfs_allowlist import load_allowlist
 from commutecompass.gtfs_bridge import RejectionReason, validate_leg
 from commutecompass.gtfs_index import FeedError, GtfsIndex, service_instant
