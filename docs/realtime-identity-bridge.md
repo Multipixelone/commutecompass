@@ -288,8 +288,9 @@ count as `unmatched`, not as 0-minute `observed`.
   `stop_times.txt`. It keeps only allowlisted platforms and their trips: the
   full stop sequence for each matched trip, which the `num_stops` check needs.
   Reject the entire import if a matched trip has repeated stop IDs/sequences or
-  malformed times: silently dropping a rival could manufacture uniqueness.
-  Schema v2 rejects older indexes with potentially incomplete inventories.
+  malformed times, and reject truncated required-data CSV rows: silently
+  dropping a rival could manufacture uniqueness. Schema v3 rejects older
+  indexes with potentially incomplete inventories.
 - It writes into new tables (`gtfs_feed`, `gtfs_trip`, `gtfs_stop_time`,
   `gtfs_service`) in a separate `gtfs.db` (D2),
   inside one transaction, then atomically replaces the index file.
