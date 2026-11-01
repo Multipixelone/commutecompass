@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from commutecompass.config import Config
 from commutecompass.geocode import GeocodeResult
 from commutecompass.llm import OpencodeGoClient
-from commutecompass.models import Event, Origin, Plan, ZoneInfo
+from commutecompass.models import Event, Origin, Plan, Route, ZoneInfo
 from commutecompass.timeutil import now_nyc
 from commutecompass.venues import VenueRegistry
 
@@ -108,6 +108,23 @@ def effective_origin(
     )
 
 
+# Validated boarding identity is only meaningful for the live Directions trip
+# the bridge matched. Cached and estimated routes must never carry it.
+_GTFS_IDENTITY_FIELDS = (
+    "gtfs_trip_id", "gtfs_route_id", "gtfs_start_date", "gtfs_start_time",
+    "gtfs_boarding_stop_id", "gtfs_boarding_stop_sequence", "gtfs_direction_id",
+    "gtfs_provenance",
+)
+
+
+def strip_gtfs_identity(route: Route) -> Route:
+    """Return a copy of ``route`` whose legs carry no GTFS identity or provenance."""
+    cleared = dict.fromkeys(_GTFS_IDENTITY_FIELDS)
+    return route.model_copy(update={
+        "legs": [leg.model_copy(update=cleared) for leg in route.legs],
+    })
+
+
 def plan_event(
     event: Event,
     config: Config,
@@ -172,6 +189,7 @@ def plan_event(
         arrival_time=event.start,
         mode=mode,
         api_key=config.google_maps_api_key,
+        gtfs_db_path=config.paths.gtfs_db_path,
     )
     if route is not None:
         store.cache_route(cache_key, resolved.value, mode, route)
@@ -183,6 +201,8 @@ def plan_event(
             route = estimate_route(route_origin, resolved, event.start, mode)
     if route is None:
         return Plan(event=event, error="no_route")
+    if route.from_cache or route.approximate:
+        route = strip_gtfs_identity(route)
 
     # Step 3: compute timings.  Add a weather buffer when precipitation is
     # expected around the event so the alarm fires earlier on a rainy/snowy day.

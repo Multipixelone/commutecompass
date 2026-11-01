@@ -206,6 +206,12 @@ in {
       };
     };
 
+    gtfsRefreshTime = lib.mkOption {
+      type = lib.types.str;
+      default = "*-*-* 04:30:00 America/New_York";
+      description = "systemd OnCalendar expression for the daily static GTFS refresh, before the morning digest.";
+    };
+
     morningTime = lib.mkOption {
       type = lib.types.str;
       default = "06:00:00";
@@ -344,6 +350,7 @@ in {
       "z ${cfg.dataDir}      0750 ${cfg.user} ${cfg.group} -"
     ];
 
+    systemd.services."commutecompass-gtfs-refresh" = mkPlainService "gtfs-refresh" "commutecompass static GTFS refresh";
     systemd.services."commutecompass-morning"  = mkService      "morning"  "commutecompass morning digest";
     systemd.services."commutecompass-poll"     = mkService      "poll"     "commutecompass poll tick";
     systemd.services."commutecompass-tomorrow" = mkPlainService "tomorrow" "commutecompass tomorrow-alarm push";
@@ -374,6 +381,14 @@ in {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnCalendar = cfg.alarm.publishTime;
+        Persistent = true;
+      };
+    };
+    systemd.timers."commutecompass-gtfs-refresh" = {
+      description = "Daily static GTFS refresh timer";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.gtfsRefreshTime;
         Persistent = true;
       };
     };

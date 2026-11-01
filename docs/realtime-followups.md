@@ -27,6 +27,11 @@ Relevant contracts live in [AGENTS.md](../AGENTS.md),
 
 ## P1 — Bridge ordinary Directions journeys to trusted GTFS identity
 
+**Status (2026-11-01): stage 1 implemented.** Subway-only, for the allowlisted
+platforms (Utica Av A/C, W 4 St A/C, 47-50 Sts-Rockefeller Ctr B/D/F/M). See
+[realtime-identity-bridge.md](realtime-identity-bridge.md). Buses (stage 2) and
+LIRR (stage 3) remain open. The text below is the original proposal.
+
 **Current gap:** the ordinary Google Directions parser supplies boarding times,
 stop names, and line information, but does not independently validate GTFS trip,
 route, service date, direction, platform stop, and boarding stop sequence.

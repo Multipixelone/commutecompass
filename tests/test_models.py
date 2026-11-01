@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
 
 from commutecompass.models import (
     Alert,
     CalendarSpec,
     Config,
     Event,
+    GtfsProvenance,
     MtaConfig,
     OpencodeGoConfig,
     Origin,
@@ -428,3 +433,51 @@ def test_alert_severity_literals() -> None:
             severity=sev,
         )
         assert alert.severity == sev
+# ─────────── GTFS provenance ───────────
+
+def _provenance(**overrides: Any) -> GtfsProvenance:
+    fields: dict[str, Any] = dict(
+        source="gtfs_bridge", feed_kind="supplemented", feed_version="20261031",
+        feed_sha256="ab" * 32, validated_at=datetime(2026, 10, 31, 8, 30, tzinfo=timezone.utc),
+    )
+    fields.update(overrides)
+    return GtfsProvenance(**fields)
+
+
+def _bridge_leg() -> TransitLeg:
+    depart = datetime(2026, 10, 31, 14, 36, tzinfo=timezone(timedelta(hours=-4)))
+    return TransitLeg(
+        mode="TRANSIT", system="MTA Subway", line="Q",
+        depart_at=depart, arrive_at=depart + timedelta(minutes=20),
+        duration_seconds=1200, summary="Q", scheduled_departure_valid=True,
+        gtfs_trip_id="087600_N..S36R", gtfs_route_id="Q", gtfs_start_date="20261031",
+        gtfs_boarding_stop_id="R20S", gtfs_boarding_stop_sequence=10, gtfs_direction_id=1,
+        gtfs_provenance=_provenance(),
+    )
+
+
+def test_gtfs_provenance_round_trips_through_json() -> None:
+    leg = _bridge_leg()
+    loaded = TransitLeg.model_validate_json(leg.model_dump_json())
+    assert loaded == leg
+    assert loaded.gtfs_provenance == _provenance()
+    assert loaded.gtfs_provenance is not None
+    assert loaded.gtfs_provenance.validated_at.utcoffset() == timedelta(0)
+
+
+def test_legacy_leg_json_without_provenance_loads_none() -> None:
+    raw = _bridge_leg().model_dump(mode="json")
+    del raw["gtfs_provenance"]
+    loaded = TransitLeg.model_validate(raw)
+    assert loaded.gtfs_provenance is None
+    assert loaded.gtfs_trip_id == "087600_N..S36R"
+
+
+@pytest.mark.parametrize("override", [
+    {"validated_at": datetime(2026, 10, 31, 8, 30)},  # naive
+    {"source": "directions"},
+    {"feed_kind": "other"},
+])
+def test_gtfs_provenance_rejects_invalid_fields(override: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        _provenance(**override)

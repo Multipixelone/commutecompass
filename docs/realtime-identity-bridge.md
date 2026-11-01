@@ -77,7 +77,8 @@ Serialization: add one optional nested model to `TransitLeg`:
 ```
 gtfs_provenance: Optional[GtfsProvenance] = None
 class GtfsProvenance(BaseModel):
-    source: Literal["static_gtfs_bridge_v1"]
+    source: Literal["gtfs_bridge"]
+    feed_kind: Literal["supplemented", "regular"]  # which static feed was imported
     feed_version: str        # feed_info.feed_version of the imported static feed
     feed_sha256: str         # hash of the downloaded zip
     validated_at: datetime   # tz-aware, UTC
@@ -163,6 +164,11 @@ max_coord_distance_m = 150
   - Spring-forward: nominal times in the 02:00 gap resolve to a real instant
     via the anchor. If Google's epoch disagrees, there is no match. That fails
     closed.
+  - Bound candidate service dates using the requested platforms/routes' actual
+    minimum and maximum departure offsets, then check exact UTC anchors and
+    active service. Include next-day service before civil midnight at
+    spring-forward and offsets beyond 48 hours. Retain every candidate through
+    ambiguity checking.
 - **Feed choice.** Use `gtfs_supplemented.zip`. It carries the 7-day
   service-change pick, for example `L0S8`, which is active on 2026-10-31. The
   regular `gtfs_subway.zip` had `feed_start_date=20261101` on 2026-10-31, so
@@ -248,16 +254,18 @@ derives them across trips.
     after the uniqueness check.
 - **Delay.** `delay = departure.time − validated scheduled departure`.
   - Compute it in UTC seconds; never in wall-clock time.
-  - Take `departure.time` from the update; use `arrival.time` only for
-    "transit" stops whose two values are equal. That covers NYCT's
-    transit-time convention.
+  - Require `departure.time` from the update. Arrival-only updates remain
+    unmatched: the persisted identity has no static arrival/departure equality
+    proof, so arrival cannot safely stand in for departure at a dwell stop.
   - The `_compute` timestamp cross-check becomes an identity once the delay is
     derived. Correctness therefore depends on the trip join, not on that
     check.
   - Negative delays clamp to 0 (existing behaviour).
 - **Scope.** Gate this with a `system == "MTA Subway"` and provenance
-  `source` check, and keep it inside `realtime.py`. Feeds that do supply
-  `delay` continue to use the existing path.
+  `source` check, and keep it inside `realtime.py`. NYCT direction and
+  extension checks are authoritative even when standard sequence/direction/delay
+  fields are supplied; explicit delay must agree with the derived departure
+  delay. Non-NYCT feeds continue to use the existing generic path.
 
 The open safety question: a derived delay is a measurement only while the
 train is being tracked. Before assignment, NYCT predictions are the schedule
@@ -279,9 +287,17 @@ count as `unmatched`, not as 0-minute `observed`.
 - It downloads `gtfs_supplemented.zip`, verifies its sha256, and streams
   `stop_times.txt`. It keeps only allowlisted platforms and their trips: the
   full stop sequence for each matched trip, which the `num_stops` check needs.
+  Reject the entire import if a matched trip has repeated stop IDs/sequences or
+  malformed times, and reject truncated required-data CSV rows: silently
+  dropping a rival could manufacture uniqueness. Schema v3 rejects older
+  indexes with potentially incomplete inventories.
 - It writes into new tables (`gtfs_feed`, `gtfs_trip`, `gtfs_stop_time`,
   `gtfs_service`) in a separate `gtfs.db` (D2),
-  inside one transaction, and then swaps the active `feed_version`.
+  inside one transaction, then atomically replaces the index file.
+  Configuration and refresh entry reject state/index path collisions, including
+  normalized paths, existing symlink aliases and hardlinks, before refresh side
+  effects. If the state database is named `gtfs.db`, choose a different index
+  filename explicitly.
 - No new dependencies are needed.
 - **Failure behaviour.** A refresh failure keeps the previous import. The
   bridge then produces nothing for dates outside `feed_start_date..end_date`,

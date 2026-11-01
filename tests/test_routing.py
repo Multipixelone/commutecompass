@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from commutecompass.config import RealtimeConfig
-from commutecompass.models import Origin, ResolvedLocation, Route
+from commutecompass.models import GtfsProvenance, Origin, ResolvedLocation, Route
 from commutecompass.realtime import FetchResult, Predictions, _accumulate, realtime_delay
 from commutecompass.routing import (
     _parse_route,
@@ -636,6 +636,10 @@ def _add_boarding_identity(route: Route, boarding: datetime) -> None:
     transit.gtfs_boarding_stop_id = "A41N"
     transit.gtfs_boarding_stop_sequence = 10
     transit.gtfs_direction_id = 0
+    transit.gtfs_provenance = GtfsProvenance(
+        source="gtfs_bridge", feed_kind="supplemented", feed_version="test",
+        feed_sha256="0" * 64, validated_at=boarding,
+    )
 
 
 def test_nested_boarding_time_drives_realtime(directions_sample_data: dict[str, Any]) -> None:

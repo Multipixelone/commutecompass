@@ -10,7 +10,8 @@ from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
 
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
@@ -47,6 +48,41 @@ class PathsConfig(BaseModel):
     venues_file: str
     db_path: str
     oauth_token_path: str
+    # Static GTFS identity-bridge index written by `gtfs-refresh` (kept separate
+    # from the state DB).  Defaults to `gtfs.db` next to `db_path`.
+    gtfs_db_path: str = ""
+
+    @model_validator(mode="after")
+    def _default_gtfs_db_path(self) -> "PathsConfig":
+        if not self.gtfs_db_path:
+            self.gtfs_db_path = str(Path(self.db_path).with_name("gtfs.db"))
+        self.ensure_distinct_db_paths()
+        return self
+
+    def ensure_distinct_db_paths(self) -> None:
+        """Reject aliases of the state DB before a GTFS refresh can replace it.
+
+        Resolve even missing targets to catch relative paths, ``..`` and
+        symlinked parents; samefile also catches existing hardlinks.  Reusable
+        at command entry because model fields and filesystem aliases can change
+        after initial validation.  This is not a filesystem race protection.
+        """
+        state_db = Path(self.db_path)
+        gtfs_db = Path(self.gtfs_db_path)
+        try:
+            collision = state_db.resolve() == gtfs_db.resolve()
+            if not collision:
+                try:
+                    collision = state_db.samefile(gtfs_db)
+                except FileNotFoundError:
+                    pass  # New databases need not exist yet.
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"cannot verify paths.db_path and paths.gtfs_db_path: {exc}") from exc
+        if collision:
+            raise ValueError(
+                "paths.gtfs_db_path must be separate from paths.db_path "
+                "(both refer to the same database)"
+            )
 
 
 class OpencodeGoConfig(BaseModel):

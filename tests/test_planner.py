@@ -26,6 +26,7 @@ from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import (
     CurrentLocation,
     Event,
+    GtfsProvenance,
     ResolvedLocation,
     Route,
     TransitLeg,
@@ -36,6 +37,7 @@ from commutecompass.planner import (
     get_effective_mode,
     plan_event,
 )
+from commutecompass.realtime import RealtimeDelay
 from commutecompass.routing import _parse_route, route_timing
 from commutecompass.timeutil import NYC_TZ
 from commutecompass.venues import VenueRegistry
@@ -470,6 +472,91 @@ def test_plan_event_reuses_cached_route_when_live_routing_down(
     assert route_timing(result.route).arrive_at is None
     assert result.leave_at is not None
     store.get_cached_route.assert_called_once()
+
+
+_IDENTITY: dict[str, Any] = dict(
+    gtfs_trip_id="087600_N..S36R", gtfs_route_id="C", gtfs_start_date="20250512",
+    gtfs_start_time="13:40:00", gtfs_boarding_stop_id="A41N",
+    gtfs_boarding_stop_sequence=10, gtfs_direction_id=0,
+    gtfs_provenance=GtfsProvenance(
+        source="gtfs_bridge", feed_kind="supplemented", feed_version="test",
+        feed_sha256="0" * 64, validated_at=datetime(2025, 5, 12, 8, tzinfo=NYC_TZ),
+    ),
+)
+
+
+def _with_identity(route: Route, **flags: bool) -> Route:
+    legs = [leg.model_copy(update=_IDENTITY) if leg.mode == "TRANSIT" else leg
+            for leg in route.legs]
+    return route.model_copy(update={"legs": legs, **flags})
+
+
+def _assert_no_identity(route: Route) -> None:
+    for leg in route.legs:
+        for name in _IDENTITY:
+            assert getattr(leg, name) is None, name
+
+
+@pytest.mark.parametrize("source", ["cache", "estimate"])
+def test_plan_event_strips_gtfs_identity_from_fallback_routes(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+    source: str,
+) -> None:
+    """Fallback routes never carry identity into realtime matching or the store."""
+    store = MagicMock()
+    identity_route = _with_identity(mock_route)
+    store.get_cached_route.return_value = identity_route if source == "cache" else None
+    estimated = _with_identity(mock_route, approximate=True)
+    seen: list[Route] = []
+
+    def capture(route: Route, *args: Any, **kwargs: Any) -> Any:
+        seen.append(route)
+        return RealtimeDelay(0, None)
+
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=None), \
+         patch("commutecompass.routing.estimate_route", return_value=estimated), \
+         patch("commutecompass.realtime.realtime_delay", side_effect=capture), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        result = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert result.route is not None and result.route.approximate is True
+    assert result.route.from_cache is (source == "cache")
+    _assert_no_identity(result.route)
+    assert len(seen) == 1
+    _assert_no_identity(seen[0])
+    # Non-identity leg data survives the strip.
+    assert [leg.line for leg in result.route.legs] == [leg.line for leg in mock_route.legs]
+    # The caller's object is not mutated.
+    assert identity_route.legs[1].gtfs_provenance is not None
+
+
+def test_plan_event_keeps_gtfs_identity_on_live_route(
+    event: Event,
+    config: Config,
+    resolved_location: ResolvedLocation,
+    mock_route: Route,
+    nyc_now: datetime,
+) -> None:
+    store = MagicMock()
+    live = _with_identity(mock_route)
+    with patch("commutecompass.resolver.resolve", return_value=resolved_location), \
+         patch("commutecompass.routing.plan_route", return_value=live), \
+         patch("commutecompass.realtime.realtime_delay", return_value=RealtimeDelay(0, None)), \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        result = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), store, MagicMock(spec=OpencodeGoClient)
+        )
+
+    assert result.route is not None
+    assert result.route.legs[1].gtfs_trip_id == _IDENTITY["gtfs_trip_id"]
+    assert result.route.legs[1].gtfs_provenance == _IDENTITY["gtfs_provenance"]
 
 
 def test_plan_event_falls_back_to_distance_estimate(

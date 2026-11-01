@@ -6,8 +6,13 @@ identity or a smaller observation. Equality compares destination kind/value/
 coordinates, route departure/arrival/duration, and the ordered legs' mode,
 system, line, headsign, departure/arrival/duration and boarding/alighting stop
 names. Provider payload, GTFS metadata, timing-trust flags and display summaries
-are not journey identity. No GTFS identity is inferred or copied to Directions.
-Ordinary Directions routes remain unmatched for realtime observation.
+are not journey identity. GTFS identity is never copied between plans. The only
+producer is the static-schedule bridge (`gtfs_bridge.validate_leg`, called from
+routing on the first transit leg of an allowlisted subway journey). It sets the
+identity fields plus `gtfs_provenance` only when exactly one static stop event
+matches within ±30 s. Everything else, including cached/estimated routes and any
+bridge failure, stays unmatched for realtime observation and gets zero automatic
+padding.
 
 Only the missing padding delta is subtracted, in UTC; newly computed weather
 and travel timing remain intact. The persisted prep-to-leave interval is kept

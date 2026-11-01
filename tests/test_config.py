@@ -913,3 +913,100 @@ class TestAlarmConfig:
     def test_alarm_keys_allowlisted(self) -> None:
         assert "alarm.fallback_time" in CONFIG_SET_ALLOWLIST
         assert "alarm.wake_lead_minutes" in CONFIG_SET_ALLOWLIST
+
+
+class TestGtfsDbPath:
+    def test_defaults_next_to_db_path(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
+        _apply_env(required_env)
+        cfg = load_config(minimal_toml)
+        assert cfg.paths.gtfs_db_path == str(
+            Path(cfg.paths.db_path).with_name("gtfs.db")
+        )
+
+    def test_explicit_override(
+        self, minimal_toml: Path, required_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _apply_env(required_env)
+        text = minimal_toml.read_text().replace(
+            "[paths]\n", f'[paths]\ngtfs_db_path = "{tmp_path / "x.db"}"\n', 1
+        )
+        minimal_toml.write_text(text)
+        cfg = load_config(minimal_toml)
+        assert cfg.paths.gtfs_db_path == str(tmp_path / "x.db")
+
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_loader_rejects_state_db_collision(
+        self, minimal_toml: Path, required_env: dict[str, str], tmp_path: Path, explicit: bool
+    ) -> None:
+        from pydantic import ValidationError
+
+        _apply_env(required_env)
+        state_db = tmp_path / "gtfs.db"
+        text = minimal_toml.read_text().replace(
+            'db_path = "/var/lib/commutecompass/state.db"', f'db_path = "{state_db}"'
+        )
+        if explicit:
+            text = text.replace("[paths]\n", f'[paths]\ngtfs_db_path = "{state_db}"\n')
+        minimal_toml.write_text(text)
+        with pytest.raises(ValidationError, match="gtfs_db_path must be separate from paths.db_path"):
+            load_config(minimal_toml)
+        assert not state_db.exists()
+
+    @pytest.mark.parametrize(
+        "alias", ["relative", "dotdot", "symlink", "parent_symlink", "symlink_dotdot", "hardlink"]
+    )
+    def test_rejects_aliases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str
+    ) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import PathsConfig
+
+        monkeypatch.chdir(tmp_path)
+        state_db = tmp_path / "state.db"
+        state_db.write_bytes(b"state database")
+        gtfs_db = tmp_path / "alias.db"
+        if alias == "relative":
+            gtfs_db = Path("state.db")
+        elif alias == "dotdot":
+            (tmp_path / "child").mkdir()
+            gtfs_db = tmp_path / "child" / ".." / "state.db"
+        elif alias == "symlink":
+            gtfs_db.symlink_to(state_db)
+        elif alias == "parent_symlink":
+            (tmp_path / "link").symlink_to(tmp_path, target_is_directory=True)
+            gtfs_db = tmp_path / "link" / "state.db"
+        elif alias == "symlink_dotdot":
+            # Resolve symlinks before '..', not just lexical normalization.
+            (tmp_path / "nested" / "child").mkdir(parents=True)
+            (tmp_path / "link").symlink_to(tmp_path / "nested" / "child")
+            state_db = tmp_path / "nested" / "state.db"
+            state_db.write_bytes(b"state database")
+            gtfs_db = tmp_path / "link" / ".." / "state.db"
+        else:
+            gtfs_db.hardlink_to(state_db)
+        with pytest.raises(ValidationError, match="gtfs_db_path must be separate"):
+            PathsConfig(
+                venues_file="venues.yaml", oauth_token_path="token.json",
+                db_path=str(state_db), gtfs_db_path=str(gtfs_db),
+            )
+        assert state_db.read_bytes() == b"state database"
+
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_accepts_distinct_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+    ) -> None:
+        from commutecompass.config import PathsConfig
+
+        monkeypatch.chdir(tmp_path)
+        state_db = tmp_path / "state.db"
+        gtfs_db = tmp_path / "index.db"
+        if existing:
+            state_db.write_bytes(b"same bytes, different inode")
+            gtfs_db.write_bytes(state_db.read_bytes())
+        cfg = PathsConfig(
+            venues_file="venues.yaml", oauth_token_path="token.json",
+            db_path=str(state_db), gtfs_db_path="index.db",
+        )
+        assert cfg.gtfs_db_path == "index.db"
+        cfg.ensure_distinct_db_paths()

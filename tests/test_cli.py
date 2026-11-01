@@ -110,6 +110,7 @@ class TestMainHelp:
             "adjust",
             "config",
             "realtime",
+            "gtfs-refresh",
         ]:
             assert cmd in result.output
 
@@ -1584,3 +1585,142 @@ class TestAlarmCLI:
         cfg = _fake_config(tmp_path)
         with mock.patch("commutecompass.config.load_config", return_value=cfg):
             assert runner.invoke(cli, ["alarm", "skip"]).exit_code == 78
+
+
+# ─────────── gtfs-refresh ─────────────────────────────────────────────────────
+
+
+class TestGtfsRefresh:
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_config_collision_preserves_state_db(
+        self, runner: CliRunner, minimal_toml: Path, required_env: dict[str, str],
+        tmp_path: Path, explicit: bool,
+    ) -> None:
+        from commutecompass.cli import EXIT_CONFIG
+
+        state_db = tmp_path / "gtfs.db"
+        state_db.write_bytes(b"original plans database")
+        text = minimal_toml.read_text().replace(
+            'db_path = "/var/lib/commutecompass/state.db"', f'db_path = "{state_db}"'
+        )
+        if explicit:
+            text = text.replace("[paths]\n", f'[paths]\ngtfs_db_path = "{state_db}"\n')
+        minimal_toml.write_text(text)
+        before = set(tmp_path.iterdir())
+        with (
+            mock.patch.dict("os.environ", required_env),
+            mock.patch("commutecompass.gtfs_index.refresh") as refresh,
+            mock.patch("commutecompass.cli._run_with_job_lock") as lock,
+        ):
+            result = runner.invoke(cli, ["--config", str(minimal_toml), "gtfs-refresh"])
+        assert result.exit_code == EXIT_CONFIG, result.output
+        assert "gtfs_db_path must be separate" in result.output
+        refresh.assert_not_called()
+        lock.assert_not_called()
+        assert state_db.read_bytes() == b"original plans database"
+        assert set(tmp_path.iterdir()) == before
+
+    @pytest.mark.parametrize("mutation", ["config", "symlink", "hardlink"])
+    def test_entry_guard_rechecks_mutated_paths(
+        self, runner: CliRunner, tmp_path: Path, mutation: str
+    ) -> None:
+        from commutecompass.cli import EXIT_CONFIG
+
+        cfg = _fake_config(tmp_path)
+        state_db = Path(cfg.paths.db_path)
+        state_db.write_bytes(b"original plans database")
+        gtfs_db = Path(cfg.paths.gtfs_db_path)
+        if mutation == "config":
+            cfg.paths.gtfs_db_path = str(state_db)
+        elif mutation == "symlink":
+            gtfs_db.symlink_to(state_db)
+        else:
+            gtfs_db.hardlink_to(state_db)
+        before = set(tmp_path.iterdir())
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh") as refresh,
+            mock.patch("commutecompass.gtfs_allowlist.load_allowlist") as allowlist,
+            mock.patch("commutecompass.cli._run_with_job_lock") as lock,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == EXIT_CONFIG, result.output
+        assert "gtfs_db_path must be separate" in result.output
+        refresh.assert_not_called()
+        allowlist.assert_not_called()
+        lock.assert_not_called()
+        assert state_db.read_bytes() == b"original plans database"
+        assert set(tmp_path.iterdir()) == before
+
+    def _stats(self) -> Any:
+        from datetime import date as date_cls
+        from datetime import timezone
+
+        from commutecompass.gtfs_index import ImportStats
+
+        return ImportStats(
+            feed_kind="regular",
+            feed_version="v1",
+            feed_sha256="0" * 64,
+            coverage_start=date_cls(2026, 11, 1),
+            coverage_end=date_cls(2027, 5, 15),
+            imported_at=datetime(2026, 11, 1, 8, 30, tzinfo=timezone.utc),
+            trips=10,
+            stop_times=200,
+            rejected_trips=0,
+        )
+
+    def test_success_writes_default_gtfs_db_next_to_state_db(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _fake_config(tmp_path)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh", return_value=self._stats()) as m,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == 0, result.output
+        assert m.call_args.args[0] == tmp_path / "gtfs.db"
+        assert "regular feed v1" in result.output
+        assert "2026-11-01..2027-05-15" in result.output
+
+    @pytest.mark.parametrize(("config_error", "code"), [(False, 75), (True, 78)])
+    def test_failure_exit_codes(
+        self, runner: CliRunner, tmp_path: Path, config_error: bool, code: int
+    ) -> None:
+        from commutecompass.gtfs_index import GtfsRefreshError
+
+        cfg = _fake_config(tmp_path)
+        err = GtfsRefreshError("both feeds failed", config_error=config_error)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh", side_effect=err),
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == code
+        assert "both feeds failed" in result.output
+
+    def test_invalid_vendored_allowlist_is_config_error(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.gtfs_allowlist import AllowlistError
+
+        cfg = _fake_config(tmp_path)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch(
+                "commutecompass.gtfs_allowlist.load_allowlist",
+                side_effect=AllowlistError("bad"),
+            ),
+            mock.patch("commutecompass.gtfs_index.refresh") as m,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == 78
+        m.assert_not_called()
+
+    def test_skill_script_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "skills" / "commutecompass"
+        script = root / "scripts" / "gtfs-refresh.sh"
+        assert script.is_file()
+        assert "commutecompass-skill gtfs-refresh" in script.read_text()
+        assert "scripts/gtfs-refresh.sh" in (root / "SKILL.md").read_text()

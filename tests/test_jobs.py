@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from instants import same_plan, utc
 
+from commutecompass import timeutil
 from commutecompass.config import (
     CalendarSpec,
     Config,
@@ -25,6 +27,7 @@ from commutecompass.jobs.poll import run as poll_run
 from commutecompass.models import (
     Alert,
     Event,
+    GtfsProvenance,
     PingEntry,
     Plan,
     Route,
@@ -37,6 +40,31 @@ from commutecompass.timeutil import NYC_TZ, now_nyc
 
 # ─────────── Fixtures ──────────────────────────────────────────────────────────
 
+@pytest.fixture
+def set_logical_day_clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], datetime]:
+    """Keep store day selection on the same clock as the injected poll instant."""
+    def set_clock(reference: datetime) -> datetime:
+        monkeypatch.setattr(timeutil, "now_nyc", lambda: reference)
+        return reference
+
+    return set_clock
+
+
+def test_poll_logical_day_clock_overrides_pre_0200_wall_clock(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+    set_logical_day_clock: Callable[[datetime], datetime],
+) -> None:
+    """A daytime poll fixture must not query yesterday when the host is before 02:00."""
+    now = datetime(2026, 5, 12, 12, tzinfo=NYC_TZ)
+    plan = refresh_fixture(store, now)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now.replace(hour=1, minute=30))
+    # Reproduce the mismatch: the real logical-day calculation excludes this plan.
+    assert store.today_plans() == []
+
+    assert set_logical_day_clock(now) == now
+    assert [entry.event.id for entry in store.today_plans()] == [plan.event.id]
+
+
 def refresh_fixture(store: Store, now: datetime, *, leave_minutes: int = 30) -> Plan:
     """Persist a morning-style plan with independently validated GTFS identity."""
     boarding = now + timedelta(minutes=leave_minutes + 5)
@@ -47,6 +75,10 @@ def refresh_fixture(store: Store, now: datetime, *, leave_minutes: int = 30) -> 
         gtfs_trip_id="trip", gtfs_route_id="Q", gtfs_start_date=now.strftime("%Y%m%d"),
         gtfs_start_time="07:00:00", gtfs_direction_id=0,
         gtfs_boarding_stop_id="R20N", gtfs_boarding_stop_sequence=10,
+        gtfs_provenance=GtfsProvenance(
+            source="gtfs_bridge", feed_kind="supplemented", feed_version="test",
+            feed_sha256="0" * 64, validated_at=now,
+        ),
     )
     event = Event(id="refresh", calendar_id="cal", calendar_name="Test", title="Class",
                   start=boarding + timedelta(minutes=40), end=boarding + timedelta(hours=2))
@@ -259,8 +291,9 @@ def test_poll_refresh_keeps_safety_padding_on_non_actionable_observations(
 @pytest.mark.parametrize("send_ok", [True, False])
 def test_poll_replan_cannot_rollback_refresh_or_recreate_prep(
     minimal_config: Config, store: Store, source: str, send_ok: bool,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
-    now = now_nyc().replace(hour=7, minute=30, second=0, microsecond=0)
+    now = set_logical_day_clock(datetime(2026, 5, 12, 7, 30, tzinfo=NYC_TZ))
     minimal_config.realtime.enabled = True
     minimal_config.home_assistant.enabled = source == "ha"
     plan = refresh_fixture(store, now, leave_minutes=25)
@@ -303,12 +336,13 @@ def test_poll_replan_cannot_rollback_refresh_or_recreate_prep(
 @pytest.mark.parametrize("source", ["alert", "ha"])
 def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
     minimal_config: Config, store: Store, source: str,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
     import json
 
     from commutecompass.routing import _parse_route
 
-    now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
+    now = set_logical_day_clock(datetime(2026, 5, 12, 12, tzinfo=NYC_TZ))
     minimal_config.realtime.enabled = True
     minimal_config.home_assistant.enabled = source == "ha"
     plan = refresh_fixture(store, now, leave_minutes=25)
@@ -367,8 +401,9 @@ def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
 @pytest.mark.parametrize("source", ["alert", "ha"])
 def test_poll_discards_replan_when_refresh_commits_during_network(
     minimal_config: Config, store: Store, source: str,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
-    now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
+    now = set_logical_day_clock(datetime(2026, 5, 12, 12, tzinfo=NYC_TZ))
     minimal_config.home_assistant.enabled = source == "ha"
     plan = refresh_fixture(store, now, leave_minutes=25)
     changed = plan.model_copy(deep=True)
@@ -400,8 +435,9 @@ def test_poll_discards_replan_when_refresh_commits_during_network(
 @pytest.mark.parametrize("case", ["finished", "equal", "elapsed_during_fetch"])
 def test_poll_replan_does_not_create_alarms_for_non_upcoming_event(
     minimal_config: Config, store: Store, source: str, case: str,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
-    now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
+    now = set_logical_day_clock(datetime(2026, 5, 12, 12, tzinfo=NYC_TZ))
     live_now = now
     minimal_config.home_assistant.enabled = source == "ha"
     plan = refresh_fixture(store, now, leave_minutes=10)

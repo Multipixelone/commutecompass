@@ -3,6 +3,8 @@
 Planning fails open (zero padding on unknown/error); alarm adjustment eligibility
 fails closed. A measured delay requires independently validated GTFS boarding
 identity AND a departure's explicit delay/time agreeing with the planned schedule.
+For NYCT feeds (no delay/stop_sequence), the delay is derived only for the exact
+bridge-validated, assigned trip (see the NYCT adapter section).
 Directions alone does not supply that identity. Nearest absolute departures,
 fuzzy station names and headsigns must never establish a measured delay.
 Bundled stop names can support informational departures, not alarm adjustment.
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,6 +30,13 @@ from commutecompass.gtfs_rt import fetch_feed_message
 from commutecompass.models import Route, TransitLeg
 from commutecompass.retry import retry
 from commutecompass.timeutil import NYC_TZ
+
+try:  # protobuf ships with gtfs-realtime-bindings; this API exists since 4.21.
+    from google.protobuf.unknown_fields import (  # type: ignore[import-untyped]
+        UnknownFieldSet as _UnknownFieldSet,
+    )
+except ImportError:  # pragma: no cover - fail closed: extension unreadable
+    _UnknownFieldSet = None
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +89,24 @@ class Prediction:
     fresh: bool
     arrival_delay: int | None = None
     trip_delay: int | None = None
+    # Decoded NYCT TripDescriptor extension; None when the trip carries none.
+    nyct: NyctTrip | None = None
+
+
+@dataclass(frozen=True)
+class NyctTrip:
+    """``NyctTripDescriptor`` (TripDescriptor extension 1001), decoded by hand.
+
+    ``nyct-subway.proto`` is not among our dependencies, so the extension
+    arrives as an unknown field and is decoded from its wire bytes.
+    ``is_assigned`` uses the proto2 default (False) when absent.
+    ``direction`` is the raw enum (1 NORTH, 2 EAST, 3 SOUTH, 4 WEST) or None.
+    ``malformed`` marks undecodable bytes; such trips never match.
+    """
+
+    is_assigned: bool = False
+    direction: int | None = None
+    malformed: bool = False
 
 
 Predictions = dict[str, list[Prediction]]
@@ -145,6 +173,10 @@ def _compute(
     # Only the first boarding leg is actionable by leaving earlier; downstream
     # delays are unavoidable and belong to the (deferred) reschedule case.
     leg = transit_legs[0]
+    # Cached/estimated routes never carry trusted identity (planner strips it);
+    # refuse them here too rather than relying on a stale start_date.
+    if route.from_cache or route.approximate:
+        return RealtimeDelay(0, None, "unmatched", "cached or estimated route has no boarding identity")
     if not leg.scheduled_departure_valid:
         return RealtimeDelay(0, None, "unmatched", "boarding schedule is untrusted")
     system = leg.system
@@ -192,7 +224,14 @@ def _compute(
                 departures.append(pred.departure)
             # Exact trip instance + directional platform/sequence context is
             # required. Names, nearest departures and headsigns prove nothing.
-            if _same_boarding(pred, leg):
+            # NYCT identity checks are authoritative even when the producer
+            # also supplies standard fields. Never let the generic matcher
+            # override a shape/platform/extension direction veto.
+            matches = (
+                _nyct_same_boarding(pred, leg)
+                if _is_nyct_prediction(pred, system) else _same_boarding(pred, leg)
+            )
+            if matches:
                 candidates.append(pred)
 
     # ZoneInfo equality/hash/order ignore fold when tzinfo is shared.
@@ -215,24 +254,46 @@ def _compute(
         if pred.trip_relationship == 0 and pred.stop_relationship == 1:  # SKIPPED
             return RealtimeDelay(0, None, "skipped", "matched boarding stop is skipped", **common)
         return RealtimeDelay(0, None, "unmatched", "non-scheduled or NO_DATA update", **common)
-    if pred.departure is None or pred.delay is None:
-        return RealtimeDelay(0, None, "unmatched", "departure time and explicit delay required", **common)
-    # Explicit delay provides a scheduled timestamp, not a nearest-event guess.
-    # Delay is elapsed seconds, not wall-clock arithmetic across DST changes.
-    if (pred.departure.astimezone(UTC) - timedelta(seconds=pred.delay)
-            != leg.depart_at.astimezone(UTC)):
-        return RealtimeDelay(0, None, "unmatched", "scheduled boarding timestamp differs", **common)
-    delay_minutes = round(max(0, pred.delay) / 60.0)
+    # D4: an unassigned NYCT trip's prediction is just the schedule.
+    if pred.nyct is not None and (pred.nyct.malformed or not pred.nyct.is_assigned):
+        return RealtimeDelay(0, None, "unmatched", "NYCT trip is not assigned to a train", **common)
+    # Generic feeds require an explicit delay. NYCT always requires assigned
+    # departure evidence, cross-checking any explicit delay against the schedule.
+    if not _is_nyct_prediction(pred, system):
+        if pred.departure is None or pred.delay is None:
+            return RealtimeDelay(0, None, "unmatched", "departure time and explicit delay required", **common)
+        # Explicit delay provides a scheduled timestamp, not a nearest-event guess.
+        # Delay is elapsed seconds, not wall-clock arithmetic across DST changes.
+        if (pred.departure.astimezone(UTC) - timedelta(seconds=pred.delay)
+                != leg.depart_at.astimezone(UTC)):
+            return RealtimeDelay(0, None, "unmatched", "scheduled boarding timestamp differs", **common)
+        delay_seconds = pred.delay
+    else:
+        derived = nyct_derived_delay(pred, leg)
+        if derived is None:
+            return RealtimeDelay(
+                0, None, "unmatched", "NYCT boarding time unavailable or inconsistent", **common
+            )
+        delay_seconds = derived
+    delay_minutes = round(max(0, delay_seconds) / 60.0)
     if delay_minutes == 0 or delay_minutes < config.min_delay_minutes:
         return RealtimeDelay(
-            0, None, "observed", f"measured departure delay {pred.delay} sec; no padding", **common
+            0, None, "observed", f"measured departure delay {delay_seconds} sec; no padding", **common
         )
     delay_minutes = min(delay_minutes, config.max_buffer_minutes)
     return RealtimeDelay(delay_minutes, f"{leg.line} running ~{delay_minutes} min late", "observed", **common)
 
 
+def _has_bridge_provenance(leg: TransitLeg) -> bool:
+    """True only for identity produced by the static GTFS bridge."""
+    provenance = leg.gtfs_provenance
+    return provenance is not None and provenance.source == "gtfs_bridge"
+
+
 def _same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
     """Require independently validated identity; no name/headsign inference."""
+    if not _has_bridge_provenance(leg):
+        return False
     if not (
         leg.gtfs_trip_id and leg.gtfs_route_id and leg.gtfs_start_date
         and leg.gtfs_boarding_stop_id and leg.gtfs_boarding_stop_sequence is not None
@@ -252,6 +313,159 @@ def _same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
         pred.stop_id == leg.gtfs_boarding_stop_id
         and pred.stop_sequence == leg.gtfs_boarding_stop_sequence
     )
+
+
+# ── NYCT adapter (design §6) ──────────────────────────────────────────────────
+#
+# NYCT subway feeds omit stop_sequence and delay, and their direction_id is
+# unreliable (the L feed sends 0 for southbound trips). For a bridge-validated
+# leg only, direction comes from the trip_id shape and the platform suffix
+# (cross-checked with extension 1001 when present), and delay is derived from
+# the exact trip's departure time against the validated static schedule.
+
+# ``087600_N..S36R`` / ``064200_GS.N01R``: origin time, route, dots, direction.
+_NYCT_SHAPE = re.compile(r"^[0-9]{6}_[0-9A-Z]{1,2}\.{1,2}([NS])")
+_NYCT_EXTENSION_DIRECTION = {1: "N", 3: "S"}  # EAST/WEST never match a platform
+_NYCT_DIRECTION_ID = {"N": 0, "S": 1}  # static trips.txt convention
+
+
+def nyct_trip_direction(trip_id: str) -> Optional[Literal["N", "S"]]:
+    """Return ``"N"``/``"S"`` from a NYCT RT trip_id shape, or None if unparseable."""
+    match = _NYCT_SHAPE.match(trip_id)
+    if match is None:
+        return None
+    return "N" if match.group(1) == "N" else "S"
+
+
+def _is_nyct_prediction(pred: Prediction, system: str) -> bool:
+    return system == "MTA Subway" and (
+        pred.nyct is not None or nyct_trip_direction(pred.trip_id) is not None
+    )
+
+
+def _nyct_direction_agrees(pred: Prediction, leg: TransitLeg) -> bool:
+    """Shape, platform suffix, extension (if present) and leg must all agree.
+
+    ``TripDescriptor.direction_id`` is deliberately never consulted.
+    """
+    shape = nyct_trip_direction(pred.trip_id)
+    if shape is None or leg.gtfs_direction_id != _NYCT_DIRECTION_ID[shape]:
+        return False
+    if pred.stop_id and pred.stop_id[-1] != shape:
+        return False
+    if pred.nyct is not None:
+        if pred.nyct.malformed:
+            return False
+        if pred.nyct.direction is not None and (
+            _NYCT_EXTENSION_DIRECTION.get(pred.nyct.direction) != shape
+        ):
+            return False
+    return True
+
+
+def _nyct_same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
+    """Authoritative trip/date/route/platform match for all NYCT observations."""
+    if leg.system != "MTA Subway" or not _has_bridge_provenance(leg):
+        return False
+    if not (
+        leg.gtfs_trip_id and leg.gtfs_route_id and leg.gtfs_start_date
+        and leg.gtfs_boarding_stop_id and leg.gtfs_boarding_stop_sequence is not None
+        and leg.gtfs_direction_id is not None
+    ):
+        return False
+    if (
+        pred.trip_id != leg.gtfs_trip_id or pred.route_id != leg.gtfs_route_id
+        or pred.start_date != leg.gtfs_start_date
+        or (leg.gtfs_start_time is not None and pred.start_time != leg.gtfs_start_time)
+    ):
+        return False
+    if not _nyct_direction_agrees(pred, leg):
+        return False
+    # Trip-level cancellation has no boarding event to compare.
+    if pred.trip_relationship == 3 and not pred.stop_id:
+        return True
+    if pred.stop_sequence is not None and pred.stop_sequence != leg.gtfs_boarding_stop_sequence:
+        return False
+    return pred.stop_id == leg.gtfs_boarding_stop_id
+
+
+def nyct_derived_delay(pred: Prediction, leg: TransitLeg) -> Optional[int]:
+    """Boarding delay in UTC seconds for a matched, assigned NYCT trip, else None.
+
+    The leg's ``depart_at`` is the bridge-validated static departure. Arrival-only
+    predictions are ineligible: no static arrival/departure equality is persisted.
+    None for an unassigned or extension-less trip (D4), no predicted departure,
+    or a producer delay that contradicts the derived value.
+    """
+    if not _nyct_same_boarding(pred, leg):
+        return None
+    if pred.nyct is None or pred.nyct.malformed or not pred.nyct.is_assigned:
+        return None
+    observed = pred.departure
+    if observed is None:
+        return None
+    delay = int(round(observed.timestamp() - leg.depart_at.timestamp()))
+    if pred.delay is not None and pred.delay != delay:
+        return None
+    return delay
+
+
+def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        if pos >= len(data) or shift > 63:
+            raise ValueError("truncated varint")
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
+
+def _decode_nyct_descriptor(data: bytes, into: dict[str, Any]) -> None:
+    """Merge NyctTripDescriptor wire bytes into ``into`` (last scalar wins)."""
+    pos = 0
+    while pos < len(data):
+        key, pos = _read_varint(data, pos)
+        number, wire = key >> 3, key & 7
+        if wire == 0:
+            value, pos = _read_varint(data, pos)
+            if number == 2:
+                into["is_assigned"] = bool(value)
+            elif number == 3:
+                into["direction"] = value
+        elif wire == 2:
+            length, pos = _read_varint(data, pos)
+            pos += length
+        elif wire == 1:
+            pos += 8
+        elif wire == 5:
+            pos += 4
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+        if pos > len(data):
+            raise ValueError("truncated field")
+
+
+def _nyct_trip(trip: Any) -> Optional[NyctTrip]:
+    """Decode extension 1001 from a TripDescriptor's unknown fields, if present."""
+    if _UnknownFieldSet is None:  # pragma: no cover - protobuf < 4.21
+        return NyctTrip(malformed=True)
+    fields: dict[str, Any] = {}
+    present = False
+    try:
+        for unknown in _UnknownFieldSet(trip):
+            if unknown.field_number != 1001:
+                continue
+            present = True
+            if unknown.wire_type != 2:
+                raise ValueError("extension 1001 is not length-delimited")
+            _decode_nyct_descriptor(bytes(unknown.data), fields)
+    except ValueError as exc:
+        logger.debug("malformed NYCT trip descriptor: %s", exc)
+        return NyctTrip(malformed=True)
+    return NyctTrip(**fields) if present else None
 
 
 # ── stop-name → stop_id matching ──────────────────────────────────────────────
@@ -435,6 +649,7 @@ def _accumulate(feed: Any, preds: Predictions, system: str, *, now: datetime | N
             continue
         tu = entity.trip_update
         update_ts = tu.timestamp if tu.HasField("timestamp") else None
+        nyct = _nyct_trip(tu.trip) if system == "MTA Subway" else None
         if tu.trip.schedule_relationship == 3 and not tu.stop_time_update:
             # Cancellation can be trip-level with no stop updates. Retain it;
             # only exact independently supplied trip/service identity can use it.
@@ -443,7 +658,7 @@ def _accumulate(feed: Any, preds: Predictions, system: str, *, now: datetime | N
                 tu.trip.direction_id if tu.trip.HasField("direction_id") else None,
                 None, None, None, None, 3, 0, header_ts, update_ts,
                 full and _fresh(header_ts, update_ts, observed_at),
-                trip_delay=tu.delay if tu.HasField("delay") else None,
+                trip_delay=tu.delay if tu.HasField("delay") else None, nyct=nyct,
             ))
         for stu in tu.stop_time_update:
             stop_id = stu.stop_id
@@ -464,7 +679,7 @@ def _accumulate(feed: Any, preds: Predictions, system: str, *, now: datetime | N
                 header_ts, update_ts, full and _fresh(header_ts, update_ts, observed_at),
                 arrival_delay=(stu.arrival.delay if stu.HasField("arrival")
                                and stu.arrival.HasField("delay") else None),
-                trip_delay=tu.delay if tu.HasField("delay") else None,
+                trip_delay=tu.delay if tu.HasField("delay") else None, nyct=nyct,
             ))
     return full and _fresh(header_ts, None, observed_at)
 
