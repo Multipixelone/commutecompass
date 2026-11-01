@@ -203,3 +203,27 @@ location = "200 Example St, New York, NY 10001"
 [[mode_overrides]]
 location_contains = "200 Example St"
 mode = "bicycling"
+
+# ── Wake & nap alarm (HA owns nap caps and final next-alarm selection) ──────────
+[alarm]
+enabled = false
+fallback_time = "12:00"          # HH:MM NYC; latest morning wake, even without events
+wake_lead_minutes = 0
+publish_script = "script.commute_publish_alarm"
+nap_script = "script.commute_nap"
+skip_script = "script.commute_alarm_skip"
+next_alarm_entity = "sensor.commute_next_alarm"
+enabled_entity = "input_boolean.commute_alarm_enabled"
+stop_button = "input_button.commute_alarm_stop"
+snooze_button = "input_button.commute_alarm_snooze"
+state_entity = "input_select.commute_alarm_state"
+heartbeat_entity = "input_datetime.commute_alarm_heartbeat"
+sink = "analog"                  # PipeWire sink name/description substring (not Living Room)
+sound = ""                       # empty = synthesized tone, otherwise a sound file path
+ramp_start_percent = 30
+ramp_seconds = 120
+max_ring_minutes = 15
+snooze_minutes = 9
+max_snoozes = 2
+poll_seconds = 30
+cache_path = ""                  # empty = <db dir>/alarm-cache.json

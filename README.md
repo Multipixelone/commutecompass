@@ -211,3 +211,57 @@ Drop [`examples/ha/commute_tomorrow_alarm.yaml`](./examples/ha/commute_tomorrow_
 nix flake check
 nix build .#packages.x86_64-linux.default
 ```
+
+## Wake & nap alarm
+
+Enable `[alarm].enabled = true` and configure `[home_assistant]` plus
+`HOME_ASSISTANT_TOKEN`. Morning wake is the earlier of the first commute's
+`prep_at - wake_lead_minutes` and `fallback_time` (default noon, NYC). With no
+commutes it is still noon. Once today's wake has passed, publishing targets
+tomorrow's logical day; the next future prep (including later today) is sent
+as HA's nap cap. Planning never replaces today's saved plans.
+
+```console
+commutecompass alarm publish --dry-run
+commutecompass alarm publish
+commutecompass alarm status --json
+commutecompass alarm nap 30
+commutecompass alarm nap --until 15:30
+commutecompass alarm skip
+commutecompass alarm on     # or off: HA master switch
+commutecompass alarm daemon
+```
+
+HA owns nap capping/warnings, skip auto-reset, and the final next-alarm
+selection. Provision the helpers, scripts and template sensor described in
+[`docs/alarm-design.md`](docs/alarm-design.md): `script.commute_publish_alarm`
+accepts `wake_at`, `next_prep_at` (ISO strings, or empty prep), and sanitized
+`next_event`; `script.commute_nap` accepts `minutes`; `script.commute_alarm_skip`
+skips the current next instant. `sensor.commute_next_alarm` exposes the earliest
+future unskipped wake/nap instant and `kind`/`event` attributes. Use timezone-aware
+ISO sensor values. HA's `input_button` stop/snooze states must be last-pressed
+timestamps. The daemon writes `idle|ringing|snoozed` and a heartbeat to HA.
+
+The desktop daemon caches the last known alarm, rings even if HA goes down,
+ignores alarms more than ten minutes stale at startup, and remembers completed
+instants across restarts. It uses a case-insensitive PipeWire sink substring
+(default `analog`, deliberately not Snapcast Living Room), saves volume/mute,
+unmutes, ramps 30→100% over two minutes, loops a synthesized tone (or `sound`
+file), and restores audio on stop, fifteen-minute timeout or SIGTERM. Stop and
+snooze are HA-only; snooze is nine minutes, at most twice. There is no keyboard
+stop. Configure `sink` so it matches the intended output; a missing match is
+an audio error, never a fallback to another room.
+
+For NixOS set `services.commutecompass.alarm.enable = true`, choose the login
+`user`/`group` owning PipeWire, and set `alarm.runtimeDir` to its runtime directory
+(default `/run/user/1000`). `alarm.publishTime` defaults to `*:0/15`; tomorrow
+and poll replans also publish when enabled. The daemon restarts automatically.
+The runtime directory/session must exist (use a persistent login/user session).
+
+The iPhone/HA layer is configured separately: Shortcut at 21:00 and charger
+connect deletes/recreates one Clock alarm labelled **CommuteCompass** and writes
+confirmation; the nap Shortcut calls the HA nap script. HA warns about a
+confirmation mismatch only at 23:30 and sends **one critical alert only if the
+desktop daemon is unhealthy** (heartbeat older than three minutes at alarm+1min).
+No repeating notifications. See the design for the full HA contract; Python does
+not install HA automations or iOS Shortcuts.
