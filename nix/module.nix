@@ -351,7 +351,7 @@ in {
     systemd.services."commutecompass-alarm" = lib.mkIf cfg.alarm.enable (
       lib.recursiveUpdate (mkPlainService "alarm daemon" "commutecompass PipeWire alarm daemon") {
         wantedBy = [ "multi-user.target" ];
-        path = [ pkgs.pipewire pkgs.wireplumber ];
+        path = [ pkgs.pipewire pkgs.wireplumber pkgs.hypridle ];
         serviceConfig = {
           Type = "simple";
           Restart = "always";

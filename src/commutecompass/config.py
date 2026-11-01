@@ -256,11 +256,25 @@ class AlarmConfig(BaseModel):
     nap_script: str = "script.commute_nap"
     skip_script: str = "script.commute_alarm_skip"
     next_alarm_entity: str = "sensor.commute_next_alarm"
+    wake_utc_entity: str = "input_text.commute_wake_utc"
+    nap_utc_entity: str = "input_text.commute_nap_utc"
+    skipped_utc_entity: str = "input_text.commute_alarm_skipped_utc"
+    next_prep_utc_entity: str = "input_text.commute_next_prep_utc"
+    handled_entity: str = "input_text.commute_alarm_handled_at"
+    wake_entity: str = "input_datetime.commute_wake_at"
+    nap_entity: str = "input_datetime.commute_nap_at"
+    skipped_entity: str = "input_datetime.commute_alarm_skipped_at"
+    next_prep_entity: str = "input_datetime.commute_next_prep_at"
+    audio_failed_entity: str = "input_boolean.commute_alarm_audio_failed"
+    stop_on_activity: bool = True
+    # Empty uses WAYLAND_DISPLAY, then socket discovery in XDG_RUNTIME_DIR.
+    wayland_display: str = ""
     enabled_entity: str = "input_boolean.commute_alarm_enabled"
     stop_button: str = "input_button.commute_alarm_stop"
     snooze_button: str = "input_button.commute_alarm_snooze"
     state_entity: str = "input_select.commute_alarm_state"
     heartbeat_entity: str = "input_datetime.commute_alarm_heartbeat"
+    heartbeat_utc_entity: str = "input_text.commute_alarm_heartbeat_utc"
     # Case-insensitive substring of the PipeWire sink description/name.
     sink: str = "analog"
     # Path to a sound file; empty = synthesized tone.

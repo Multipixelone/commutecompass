@@ -31,6 +31,7 @@ import signal
 import struct
 import subprocess
 import time as _time
+import tempfile
 import wave
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -68,9 +69,19 @@ class Inputs:
     ha_ok: bool
     next_alarm: Optional[datetime] = None
     kind: str = ""
-    enabled: bool = True
+    # None means unavailable: preserve the last known master switch.
+    enabled: Optional[bool] = None
     stop_pressed_at: Optional[datetime] = None
     snooze_pressed_at: Optional[datetime] = None
+    wake_at: Optional[datetime] = None
+    nap_at: Optional[datetime] = None
+    skipped_at: Optional[datetime] = None
+    # Known helpers (including explicit cleared states) distinguish cancelled
+    # schedules from the future-only sensor simply moving past its deadline.
+    wake_known: bool = False
+    nap_known: bool = False
+    prep_threshold: Optional[datetime] = None
+    prep_known: bool = False
 
 
 class HAUnavailable(Exception):
@@ -113,18 +124,52 @@ def fetch_states(base_url: str, token: str, *, timeout: float = 5.0) -> dict[str
     return out
 
 
+def _helper_time(
+    states: dict[str, dict[str, Any]], utc_entity: str,
+) -> tuple[Optional[datetime], bool]:
+    """UTC authority: (instant, known), with epoch zero an explicit clear.
+
+    Missing, unavailable, malformed or offset-free text is unknown, never a
+    cancellation. Legacy local helpers and the future-only sensor cannot
+    replace this authority (especially during NYC's repeated DST hour).
+    """
+    raw = states.get(utc_entity, {}).get("state")
+    if not isinstance(raw, str):
+        return None, False
+    try:
+        instant = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None, False
+    if instant.tzinfo is None:
+        return None, False
+    instant = instant.astimezone(UTC)
+    return (None if instant.timestamp() == 0 else instant), True
+
+
 def inputs_from_states(states: dict[str, dict[str, Any]], cfg: "AlarmConfig") -> Inputs:
     """Map the raw HA state dump onto :class:`Inputs`."""
     nxt = states.get(cfg.next_alarm_entity, {})
     attrs = nxt.get("attributes") if isinstance(nxt.get("attributes"), dict) else {}
     kind = attrs.get("kind") if isinstance(attrs, dict) else ""
     enabled_state = states.get(cfg.enabled_entity, {}).get("state")
+    # Publisher already subtracts wake_lead_minutes: this helper is HA's
+    # effective hard cap, not the raw prep time. Never subtract the lead twice.
+    threshold, prep_known = _helper_time(states, cfg.next_prep_utc_entity)
+    wake, wake_known = _helper_time(states, cfg.wake_utc_entity)
+    nap, nap_known = _helper_time(states, cfg.nap_utc_entity)
+    skipped, _ = _helper_time(states, cfg.skipped_utc_entity)
     return Inputs(
         ha_ok=True,
         next_alarm=parse_ha_datetime(nxt.get("state")),
         kind=kind if isinstance(kind, str) else "",
-        # Missing master switch entity ≠ "off": only an explicit "off" disables.
-        enabled=enabled_state != "off",
+        enabled={"on": True, "off": False}.get(str(enabled_state)),
+        wake_at=wake,
+        nap_at=nap,
+        skipped_at=skipped,
+        wake_known=wake_known,
+        nap_known=nap_known,
+        prep_threshold=threshold,
+        prep_known=prep_known,
         stop_pressed_at=parse_ha_datetime(states.get(cfg.stop_button, {}).get("state")),
         snooze_pressed_at=parse_ha_datetime(states.get(cfg.snooze_button, {}).get("state")),
     )
@@ -152,6 +197,10 @@ class HAReader:
 @dataclass(frozen=True)
 class DaemonState:
     mode: Mode = "idle"
+    enabled: bool = True
+    active_kind: str = ""
+    audio_failed: bool = False
+    prep_threshold: Optional[datetime] = None
     # Latest known alarm instant (from HA, or the cache while HA is down).
     pending: Optional[datetime] = None
     pending_kind: str = ""
@@ -178,7 +227,7 @@ def _mark_done(state: DaemonState, instant: datetime) -> DaemonState:
 
 
 class AlarmCache:
-    """Local JSON persistence for ``pending`` + ``done`` (atomic replace)."""
+    """Atomic schedule, enabled latch, consumed instants and snooze persistence."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -195,7 +244,27 @@ class AlarmCache:
             return DaemonState()
         pending = parse_ha_datetime(raw.get("pending"))
         done = raw.get("done")
+        mode = raw.get("mode")
+        active = parse_ha_datetime(raw.get("active"))
+        snooze_until = parse_ha_datetime(raw.get("snooze_until"))
+        ring_started = parse_ha_datetime(raw.get("ring_started"))
+        restored_mode: Mode = "idle"
+        if active is not None:
+            if mode == "snoozed" and snooze_until is not None:
+                restored_mode = "snoozed"
+            elif mode == "ringing" and ring_started is not None:
+                restored_mode = "ringing"
+        snoozes = raw.get("snoozes", 0)
         return DaemonState(
+            mode=restored_mode,
+            enabled=raw.get("enabled", True) is not False,
+            active=active if restored_mode != "idle" else None,
+            active_kind=str(raw.get("active_kind") or ""),
+            ring_started=ring_started,
+            snooze_until=snooze_until,
+            snoozes=max(0, snoozes) if isinstance(snoozes, int) else 0,
+            audio_failed=raw.get("audio_failed") is True,
+            prep_threshold=parse_ha_datetime(raw.get("prep_threshold")),
             pending=pending,
             pending_kind=str(raw.get("pending_kind") or ""),
             done=tuple(str(d) for d in done)[-_DONE_MAX:] if isinstance(done, list) else (),
@@ -206,6 +275,15 @@ class AlarmCache:
             "pending": state.pending.isoformat() if state.pending else None,
             "pending_kind": state.pending_kind,
             "done": list(state.done),
+            "mode": state.mode,
+            "enabled": state.enabled,
+            "active": state.active.isoformat() if state.active else None,
+            "active_kind": state.active_kind,
+            "ring_started": state.ring_started.isoformat() if state.ring_started else None,
+            "snooze_until": state.snooze_until.isoformat() if state.snooze_until else None,
+            "snoozes": state.snoozes,
+            "audio_failed": state.audio_failed,
+            "prep_threshold": state.prep_threshold.isoformat() if state.prep_threshold else None,
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,75 +342,125 @@ def _le(a: datetime, b: datetime) -> bool:
     return a.astimezone(UTC) <= b.astimezone(UTC)
 
 
+def _cancelled(
+    instant: datetime, kind: str, inputs: Inputs, *, preserve_rollover: bool = False,
+) -> bool:
+    """Backing helpers, not the future-only sensor, authoritatively cancel."""
+    if not inputs.ha_ok:
+        return False
+    if inputs.skipped_at is not None and _key(instant) == _key(inputs.skipped_at):
+        return True
+    known = inputs.nap_known if kind == "nap" else inputs.wake_known
+    helper = inputs.nap_at if kind == "nap" else inputs.wake_at
+    if preserve_rollover and kind == "wake" and helper is not None:
+        # Publishing tomorrow is housekeeping, not cancellation of today's due
+        # or active alarm. Same-day reschedules and clears remain explicit.
+        if to_nyc(helper).date() > to_nyc(instant).date():
+            return False
+    return known and (helper is None or _key(helper) != _key(instant))
+
+
+def _idle(state: DaemonState) -> DaemonState:
+    return replace(state, mode="idle", active=None, active_kind="", ring_started=None,
+                   snooze_until=None, snoozes=0)
+
+
 def step(
     state: DaemonState, now: datetime, inputs: Inputs, settings: Settings
 ) -> tuple[DaemonState, list[Action]]:
-    """Advance the state machine by one poll."""
+    """Advance one poll; HA's future-only sensor is a hint, helpers are authority."""
     actions: list[Action] = []
-
-    # Master switch off (only trusted when HA answered).
-    if inputs.ha_ok and not inputs.enabled:
+    if inputs.ha_ok:
+        if inputs.enabled is not None:
+            state = replace(state, enabled=inputs.enabled)
+        if inputs.prep_known:
+            state = replace(state, prep_threshold=inputs.prep_threshold)
+    if not state.enabled:
         if state.mode == "ringing":
             actions.append(StopRing("disabled"))
         if state.mode != "idle":
             actions.append(PublishState("idle"))
-        return replace(state, mode="idle", active=None, ring_started=None,
-                       snooze_until=None, snoozes=0, pending=None, pending_kind=""), actions
+        return replace(_idle(state), pending=None, pending_kind=""), actions
 
-    # ── Ringing / snoozed: buttons + timeouts ────────────────────────────────
+    # Explicit skips, clears and reschedules cancel active as well as pending.
+    if state.active is not None and _cancelled(state.active, state.active_kind, inputs, preserve_rollover=True):
+        if state.mode == "ringing":
+            actions.append(StopRing("cancelled"))
+        if state.mode != "idle":
+            actions.append(PublishState("idle"))
+        state = _idle(state)
+    if state.pending is not None and _cancelled(
+        state.pending, state.pending_kind, inputs,
+        preserve_rollover=_le(state.pending, now) and (
+            now.astimezone(UTC) - state.pending.astimezone(UTC) <= settings.stale_limit
+        ),
+    ):
+        state = _mark_done(state, state.pending)
+        state = replace(state, pending=None, pending_kind="")
+
     if state.mode == "ringing":
         if _after(inputs.stop_pressed_at, state.ring_started):
             actions += [StopRing("stop"), PublishState("idle")]
-            state = replace(state, mode="idle", active=None, ring_started=None, snoozes=0)
+            state = _idle(state)
         elif _after(inputs.snooze_pressed_at, state.ring_started) and state.snoozes < settings.max_snoozes:
-            actions += [StopRing("snooze"), PublishState("snoozed")]
-            state = replace(state, mode="snoozed",
-                            snooze_until=(now.astimezone(UTC) + settings.snooze).astimezone(now.tzinfo),
-                            snoozes=state.snoozes + 1)
-        elif state.ring_started is not None and (
+            deadline = (now.astimezone(UTC) + settings.snooze).astimezone(now.tzinfo)
+            if state.prep_threshold is not None and _le(state.prep_threshold, deadline):
+                deadline = state.prep_threshold
+            # At/past prep threshold, snooze must not silence an actionable alarm.
+            if not _le(deadline, now):
+                actions += [StopRing("snooze"), PublishState("snoozed")]
+                state = replace(state, mode="snoozed", snooze_until=deadline,
+                                snoozes=state.snoozes + 1)
+        if state.mode == "ringing" and state.ring_started is not None and (
             now.astimezone(UTC) - state.ring_started.astimezone(UTC) >= settings.max_ring
         ):
             actions += [StopRing("timeout"), PublishState("idle")]
-            state = replace(state, mode="idle", active=None, ring_started=None, snoozes=0)
+            state = _idle(state)
     elif state.mode == "snoozed":
         if _after(inputs.stop_pressed_at, state.ring_started):
             actions.append(PublishState("idle"))
-            state = replace(state, mode="idle", active=None, ring_started=None,
-                            snooze_until=None, snoozes=0)
-        elif state.snooze_until is not None and _le(state.snooze_until, now):
-            assert state.active is not None
-            actions += [StartRing(state.active, state.pending_kind or "snooze"), PublishState("ringing")]
-            state = replace(state, mode="ringing", ring_started=now, snooze_until=None)
+            state = _idle(state)
+        else:
+            snooze_deadline = state.snooze_until
+            if state.prep_threshold is not None and snooze_deadline is not None and _le(state.prep_threshold, snooze_deadline):
+                snooze_deadline = state.prep_threshold
+                state = replace(state, snooze_until=snooze_deadline)
+            if snooze_deadline is not None and _le(snooze_deadline, now):
+                active = state.active
+                assert active is not None
+                if now.astimezone(UTC) - snooze_deadline.astimezone(UTC) > settings.stale_limit:
+                    state = _idle(state)
+                    actions.append(PublishState("idle"))
+                else:
+                    actions += [StartRing(active, state.active_kind), PublishState("ringing")]
+                    state = replace(state, mode="ringing", ring_started=now, snooze_until=None)
 
-    # ── Track the next alarm instant ─────────────────────────────────────────
-    candidate = inputs.next_alarm
-    due: Optional[datetime] = None
-    due_kind = ""
-    # A remembered instant that has now come due takes priority: HA's sensor
-    # only shows FUTURE alarms, so it may already have moved past it.
-    if state.pending is not None and _le(state.pending, now) and not state.is_done(state.pending):
-        due, due_kind = state.pending, state.pending_kind
-    elif candidate is not None and _le(candidate, now) and not state.is_done(candidate):
-        due, due_kind = candidate, inputs.kind
+    # Recover an elapsed instant on startup even when the sensor says unknown
+    # or has selected tomorrow. Backing helpers retain the elapsed wake/nap.
+    candidates: list[tuple[datetime, str]] = []
+    if state.pending is not None:
+        candidates.append((state.pending, state.pending_kind))
+    if inputs.ha_ok:
+        for instant, kind, known in ((inputs.wake_at, "wake", inputs.wake_known),
+                                     (inputs.nap_at, "nap", inputs.nap_known)):
+            if known and instant is not None and not _cancelled(instant, kind, inputs):
+                candidates.append((instant, kind))
+    candidates = [(t, k) for t, k in candidates if not state.is_done(t)]
+    due = sorted(((t, k) for t, k in candidates if _le(t, now)), key=lambda pair: _key(pair[0]))
+    future = sorted(((t, k) for t, k in candidates if not _le(t, now)), key=lambda pair: _key(pair[0]))
 
-    if candidate is not None and not _le(candidate, now):
-        state = replace(state, pending=candidate, pending_kind=inputs.kind)
-    elif inputs.ha_ok and candidate is None and (state.pending is None or not _le(state.pending, now)):
-        # Upcoming alarm withdrawn (skipped / cleared nap).
-        state = replace(state, pending=None, pending_kind="")
-
-    if due is not None:
-        state = _mark_done(state, due)
-        if now.astimezone(UTC) - due.astimezone(UTC) > settings.stale_limit:
-            logger.warning("alarm daemon: skipping stale alarm %s (now %s)", due.isoformat(), now.isoformat())
+    # The sensor cannot add/withdraw alarms: only UTC helpers supply new
+    # deadlines. Unknown authority preserves existing cached candidates.
+    pending, kind = future[0] if future else (None, "")
+    state = replace(state, pending=pending, pending_kind=kind)
+    for instant, kind in due:
+        state = _mark_done(state, instant)
+        if now.astimezone(UTC) - instant.astimezone(UTC) > settings.stale_limit:
+            logger.warning("alarm daemon: skipping stale alarm %s", instant.isoformat())
         elif state.mode == "idle":
-            actions += [StartRing(due, due_kind), PublishState("ringing")]
-            state = replace(state, mode="ringing", active=due, ring_started=now, snoozes=0)
-        # else: already ringing/snoozed for an earlier instant → absorb this one.
-
-    if state.pending is not None and state.is_done(state.pending):
-        state = replace(state, pending=None, pending_kind="")
-
+            actions += [StartRing(instant, kind), PublishState("ringing")]
+            state = replace(state, mode="ringing", active=instant, active_kind=kind,
+                            ring_started=now, snoozes=0)
     return state, actions
 
 
@@ -418,6 +546,7 @@ class PipeWirePlayer:
         self._saved: Optional[tuple[float, bool]] = None
         self._proc: Optional["subprocess.Popen[bytes]"] = None
         self._volume: Optional[float] = None
+        self._spawned_at = 0.0
 
     def _run(self, args: list[str]) -> "subprocess.CompletedProcess[str]":
         result = self._runner(args)
@@ -444,6 +573,12 @@ class PipeWirePlayer:
             args += ["--target", self._node[1]]
         args.append(str(self._sound))
         self._proc = self._popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._spawned_at = _time.monotonic()
+        try:
+            rc = self._proc.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            return
+        raise RuntimeError(f"pw-play exited immediately ({rc})")
 
     def start(self) -> None:
         self.stop()
@@ -451,10 +586,14 @@ class PipeWirePlayer:
         target = self._target()
         # Refuse to change audio without a restorable snapshot.
         self._saved = parse_wpctl_volume(self._run(["wpctl", "get-volume", target]).stdout or "")
-        self._run(["wpctl", "set-volume", target, f"{self._initial_volume:.2f}"])
-        self._volume = self._initial_volume
-        self._run(["wpctl", "set-mute", target, "0"])
-        self._spawn()
+        try:
+            self._run(["wpctl", "set-volume", target, f"{self._initial_volume:.2f}"])
+            self._volume = self._initial_volume
+            self._run(["wpctl", "set-mute", target, "0"])
+            self._spawn()
+        except Exception:
+            self.stop()
+            raise
 
     def tick(self, volume: float) -> None:
         if self._proc is None:
@@ -463,13 +602,17 @@ class PipeWirePlayer:
         if v != self._volume:
             self._run(["wpctl", "set-volume", self._target(), f"{v:.2f}"])
             self._volume = v
-        if self._proc.poll() is not None:
+        rc = self._proc.poll()
+        if rc is not None:
+            if rc != 0 or _time.monotonic() - self._spawned_at < 0.25:
+                raise RuntimeError(f"pw-play failed/ended prematurely ({rc})")
             self._spawn()
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
         if proc is not None:
-            proc.terminate()
+            if proc.poll() is None:
+                proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
@@ -477,8 +620,10 @@ class PipeWirePlayer:
         if self._saved is not None:
             vol, muted = self._saved
             target = self._target()
-            self._run(["wpctl", "set-volume", target, f"{vol:.2f}"])
-            self._run(["wpctl", "set-mute", target, "1" if muted else "0"])
+            try:
+                self._run(["wpctl", "set-volume", target, f"{vol:.2f}"])
+            finally:
+                self._run(["wpctl", "set-mute", target, "1" if muted else "0"])
             self._saved = None
 
 
@@ -520,6 +665,95 @@ def default_cache_path(config: "Config") -> Path:
     return Path(config.paths.db_path).parent / "alarm-cache.json"
 
 
+class ActivityMonitor:
+    """Dedicated hypridle listener. Its temporary config only targets our PID.
+
+    The monitor is terminated and reaped before removing its config, so no
+    listener remains that could signal a subsequently recycled PID.
+    """
+
+    def __init__(
+        self, display: str = "", *,
+        popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+    ) -> None:
+        self.display = display
+        self._popen = popen
+        self._proc: Optional[subprocess.Popen[bytes]] = None
+        self._directory: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._socket: Optional[Path] = None
+        self._retry_at = 0.0
+        self._backoff = 5.0
+
+    def tick(self) -> None:
+        if self._proc is not None:
+            if self._proc.poll() is None and self._socket is not None and self._socket.is_socket():
+                return
+            logger.warning("alarm daemon: activity monitor disconnected; retrying with backoff")
+            self.stop()
+            self._retry_at = _time.monotonic() + self._backoff
+        if _time.monotonic() >= self._retry_at:
+            self.start()
+
+    def start(self) -> None:
+        try:
+            if shutil.which("hypridle") is None:
+                raise RuntimeError("hypridle not on PATH")
+            env = dict(os.environ)
+            display = self.display or env.get("WAYLAND_DISPLAY", "")
+            runtime = env.get("XDG_RUNTIME_DIR", "")
+            candidate = Path(display) if Path(display).is_absolute() else Path(runtime) / display
+            if not self.display and display and not candidate.is_socket():
+                display = ""  # stale inherited display: rediscover after compositor restart
+            if not display:
+                runtime = env.get("XDG_RUNTIME_DIR", "")
+                if runtime:
+                    sockets = sorted(p for p in Path(runtime).glob("wayland-*") if p.is_socket())
+                    if sockets:
+                        display = sockets[0].name
+            if not display:
+                raise RuntimeError("no Wayland display/socket found")
+            socket = Path(display)
+            if not socket.is_absolute():
+                socket = Path(env.get("XDG_RUNTIME_DIR", "/nonexistent")) / display
+            if not socket.is_socket():
+                raise RuntimeError(f"Wayland socket unavailable: {socket}")
+            self._socket = socket
+            env["WAYLAND_DISPLAY"] = display
+            self._directory = tempfile.TemporaryDirectory(prefix="commute-alarm-activity-")
+            config = Path(self._directory.name) / "hypridle.conf"
+            config.write_text(
+                "general {\n    ignore_dbus_inhibit = true\n    ignore_systemd_inhibit = true\n"
+                "    ignore_wayland_inhibit = true\n}\n"
+                "listener {\n    timeout = 1\n"
+                f"    on-resume = kill -USR1 {os.getpid()}\n}}\n"
+            )
+            self._proc = self._popen(["hypridle", "-c", str(config)], env=env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if self._proc.poll() is not None:
+                raise RuntimeError("hypridle exited during startup")
+            self._backoff = 5.0
+        except Exception as exc:  # noqa: BLE001 — activity is optional, audio isn't
+            logger.warning("alarm daemon: activity monitor unavailable: %s", exc)
+            self.stop()
+            self._retry_at = _time.monotonic() + self._backoff
+            self._backoff = min(60.0, self._backoff * 2)
+
+    def stop(self) -> None:
+        proc, self._proc = self._proc, None
+        self._socket = None
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+        if self._directory is not None:
+            self._directory.cleanup()
+            self._directory = None
+
+
 @dataclass
 class AlarmDaemon:
     reader: Callable[[], Inputs]
@@ -532,31 +766,55 @@ class AlarmDaemon:
     # Side-effect callbacks to HA (best-effort, return success).
     publish_state: Callable[[Mode], bool] = lambda _m: True
     heartbeat: Callable[[datetime], bool] = lambda _t: True
+    publish_audio_failed: Callable[[bool], bool] = lambda _f: True
+    publish_handled: Callable[[datetime], bool] = lambda _t: True
+    activity_monitor: Optional["ActivityMonitor"] = None
     clock: Callable[[], datetime] = now_nyc
     sleep: Callable[[float], None] = _time.sleep
     state: DaemonState = field(default_factory=DaemonState)
     _running: bool = True
     _last_heartbeat: Optional[datetime] = None
     _audio_healthy: bool = True
+    _audio_reported: Optional[bool] = None
+    _activity_pressed: Optional[datetime] = None
+    _resume_audio: bool = False
+    _handled_pending: Optional[datetime] = None
+    _published_mode: Optional[Mode] = None
 
     def __post_init__(self) -> None:
         self.state = self.cache.load()
+        self._audio_healthy = not self.state.audio_failed
+        self._resume_audio = self.state.mode == "ringing" and not self.state.audio_failed
+        # Do not clear HA's failure latch merely because a process restarted.
+        self._audio_reported = False if self._audio_healthy else None
 
     def run_once(self) -> float:
         """One poll; returns seconds to sleep before the next."""
         now = self.clock()
         inputs = self.reader()
+        if self._activity_pressed is not None:
+            inputs = replace(inputs, stop_pressed_at=self._activity_pressed)
+            self._activity_pressed = None
+        if self.activity_monitor is not None:
+            self.activity_monitor.tick()
         before = self.state
         self.state, actions = step(self.state, now, inputs, self.settings)
-        # Persist the claim before starting audio, so an abrupt restart cannot
-        # ring the same instant again.
-        if (before.pending, before.pending_kind, before.done) != (
-            self.state.pending, self.state.pending_kind, self.state.done
-        ):
+        # Persist before playback so a restart can resume the same bounded
+        # ring/snooze window rather than consume or extend it.
+        if self._resume_audio:
+            self._resume_audio = False
+            if (
+                self.state.mode == "ringing" and self.state.active is not None
+                and not any(isinstance(action, StartRing) for action in actions)
+            ):
+                actions.insert(0, StartRing(self.state.active, self.state.active_kind))
+        if before != self.state:
             self.cache.save(self.state)
         for action in actions:
             self._apply(action)
-        if self.state.mode == "ringing" and self.state.ring_started is not None:
+        if inputs.ha_ok:
+            self._reconcile_mode()
+        if self._audio_healthy and self.state.mode == "ringing" and self.state.ring_started is not None:
             try:
                 elapsed = now.astimezone(UTC) - self.state.ring_started.astimezone(UTC)
                 self.player.tick(ramp_fraction(elapsed, self.ramp_start_percent, self.ramp_seconds))
@@ -564,9 +822,20 @@ class AlarmDaemon:
                 self._audio_healthy = False
                 logger.error("alarm daemon: audio tick failed: %s", exc)
                 self._stop_audio()
+        if self.state.active != self._handled_pending or not self._audio_healthy:
+            self._handled_pending = None
+        if inputs.ha_ok and self._handled_pending is not None:
+            if self.publish_handled(self._handled_pending):
+                self._handled_pending = None
+        self.state = replace(self.state, audio_failed=not self._audio_healthy)
+        if self.state != before:
+            self.cache.save(self.state)
+        if inputs.ha_ok and self._audio_reported != self.state.audio_failed:
+            if self.publish_audio_failed(self.state.audio_failed):
+                self._audio_reported = self.state.audio_failed
         if inputs.ha_ok and self._audio_healthy and (
             self._last_heartbeat is None
-            or (now - self._last_heartbeat).total_seconds() >= self.poll_seconds
+            or (now.astimezone(UTC) - self._last_heartbeat.astimezone(UTC)).total_seconds() >= self.poll_seconds
         ):
             if self.heartbeat(now):
                 self._last_heartbeat = now
@@ -578,6 +847,10 @@ class AlarmDaemon:
             try:
                 self.player.start()
                 self._audio_healthy = True
+                # A successful start may clear a failure left by an earlier
+                # process even if this cache did not contain that failure.
+                self._audio_reported = None
+                self._handled_pending = action.instant
             except Exception as exc:  # noqa: BLE001 — keep polling; HA fallback alerts
                 self._audio_healthy = False
                 logger.error("alarm daemon: audio start failed: %s", exc)
@@ -585,9 +858,16 @@ class AlarmDaemon:
         elif isinstance(action, StopRing):
             logger.info("alarm daemon: stopping (%s)", action.reason)
             self._stop_audio()
+        # PublishState actions are coalesced to the final current mode below;
+        # failed writes stay dirty and are retried on subsequent healthy polls.
+
+    def _reconcile_mode(self) -> None:
+        if self._published_mode == self.state.mode:
+            return
+        if self.publish_state(self.state.mode):
+            self._published_mode = self.state.mode
         else:
-            if not self.publish_state(action.mode):
-                logger.warning("alarm daemon: failed to publish state %s", action.mode)
+            logger.warning("alarm daemon: failed to publish state %s", self.state.mode)
 
     def _stop_audio(self) -> None:
         try:
@@ -595,11 +875,18 @@ class AlarmDaemon:
         except Exception as exc:  # noqa: BLE001
             logger.error("alarm daemon: audio stop failed: %s", exc)
 
+    def activity(self, *_: object) -> None:
+        """SIGUSR1 is process-local and never persisted as a button timestamp."""
+        if self.state.mode in ("ringing", "snoozed"):
+            self._activity_pressed = self.clock()
+
     def request_stop(self, *_: object) -> None:
         self._running = False
 
     def run_forever(self) -> None:
         try:
+            if self.activity_monitor is not None:
+                self.activity_monitor.start()
             while self._running:
                 delay = self.run_once()
                 # Sleep in short slices so SIGTERM is honoured promptly.
@@ -609,9 +896,12 @@ class AlarmDaemon:
                     self.sleep(chunk)
                     remaining -= chunk
         finally:
+            if self.activity_monitor is not None:
+                self.activity_monitor.stop()
             self._stop_audio()
-            if self.state.mode != "idle":
-                self.publish_state("idle")
+            # Process shutdown is not alarm completion. HA nap cleanup must
+            # continue seeing the recoverable cached ringing/snoozed mode.
+            self._reconcile_mode()
 
 
 def build_daemon(config: "Config") -> AlarmDaemon:
@@ -632,8 +922,22 @@ def build_daemon(config: "Config") -> AlarmDaemon:
                             {"entity_id": cfg.state_entity, "option": mode})
 
     def heartbeat(now: datetime) -> bool:
-        return call_service(base_url, token, "input_datetime", "set_datetime",
-                            {"entity_id": cfg.heartbeat_entity, "timestamp": now.timestamp()})
+        # HA evaluates liveness using the unambiguous UTC text helper. Keep the
+        # legacy local datetime for compatibility, but never let it mask a
+        # failed authoritative heartbeat write.
+        utc_ok = call_service(base_url, token, "input_text", "set_value",
+                              {"entity_id": cfg.heartbeat_utc_entity, "value": _key(now)})
+        call_service(base_url, token, "input_datetime", "set_datetime",
+                     {"entity_id": cfg.heartbeat_entity, "timestamp": now.timestamp()})
+        return utc_ok
+
+    def publish_audio_failed(failed: bool) -> bool:
+        return call_service(base_url, token, "input_boolean", "turn_on" if failed else "turn_off",
+                            {"entity_id": cfg.audio_failed_entity})
+
+    def publish_handled(instant: datetime) -> bool:
+        return call_service(base_url, token, "input_text", "set_value",
+                            {"entity_id": cfg.handled_entity, "value": _key(instant)})
 
     return AlarmDaemon(
         reader=HAReader(base_url, token, cfg).read,
@@ -645,6 +949,9 @@ def build_daemon(config: "Config") -> AlarmDaemon:
         poll_seconds=float(cfg.poll_seconds),
         publish_state=publish_state,
         heartbeat=heartbeat,
+        publish_audio_failed=publish_audio_failed,
+        publish_handled=publish_handled,
+        activity_monitor=ActivityMonitor(cfg.wayland_display) if cfg.stop_on_activity else None,
     )
 
 
@@ -658,5 +965,5 @@ def run_daemon(config: "Config") -> None:
 
     signal.signal(signal.SIGTERM, _handler)
     signal.signal(signal.SIGINT, _handler)
-    daemon.publish_state("idle")
+    signal.signal(signal.SIGUSR1, daemon.activity)
     daemon.run_forever()
