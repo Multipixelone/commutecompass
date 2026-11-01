@@ -440,7 +440,7 @@ def plan(ctx: click.Context, selector: str, here: bool, from_address: str | None
     from commutecompass.models import Origin
     from commutecompass.planner import plan_event
     from commutecompass.store import Store
-    from commutecompass.timeutil import now_nyc
+    from commutecompass.timeutil import logical_day_bounds_nyc, now_nyc
     from commutecompass.venues import VenueRegistry
 
     if here and from_address is not None:
@@ -496,16 +496,17 @@ def plan(ctx: click.Context, selector: str, here: bool, from_address: str | None
     existing = store.get_plan(event_id)
     if existing is None:
         click.echo(f"No plan found for event {event_id}. Trying to fetch from calendar...")
-        now = now_nyc()
+        day_start, day_end = logical_day_bounds_nyc(now_nyc())
         events = cal_client.fetch_events(
             [CalendarSpec(id=cal.id, name=cal.name, enabled=cal.enabled) for cal in cfg.calendars],
-            now,
-            now,
+            day_start,
+            day_end,
         )
-        if not events:
+        matched_event = next((event for event in events if event.id == event_id), None)
+        if matched_event is None:
             click.echo(f"Event {event_id} not found in today's calendars.")
             sys.exit(EXIT_NOT_FOUND)
-        event = events[0]
+        event = matched_event
     else:
         event = existing.event
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -323,7 +324,126 @@ class TestInitDb:
 # ─────────── plan command ──────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def unsaved_plan_context(tmp_path: Path) -> Iterator[dict[str, Any]]:
+    """Exercise the real selector and SQLite store, but no external services."""
+    from commutecompass.config import CalendarSpec
+    from commutecompass.geocode import GeocodeResult
+
+    cfg = _fake_config(tmp_path)
+    cfg.calendars = [CalendarSpec(id="primary", name="Primary")]
+    store = Store(Path(cfg.paths.db_path))
+    store.init_schema()
+    now = datetime(2026, 5, 12, 9, tzinfo=NYC_TZ)
+    event = Event(
+        id="unsaved-event-id",
+        calendar_id="primary",
+        calendar_name="Primary",
+        title="Requested event",
+        start=now + timedelta(hours=2),
+        end=now + timedelta(hours=3),
+        location_raw="Lincoln Center",
+    )
+    with (
+        mock.patch("commutecompass.config.load_config", return_value=cfg),
+        mock.patch("commutecompass.store.Store", return_value=store),
+        mock.patch("commutecompass.timeutil.now_nyc", return_value=now) as clock,
+        mock.patch("commutecompass.calendar_client.CalendarClient") as calendar,
+        mock.patch("commutecompass.venues.VenueRegistry.load"),
+        mock.patch("commutecompass.llm.OpencodeGoClient"),
+        mock.patch(
+            "commutecompass.planner.plan_event",
+            return_value=Plan(event=event, leave_at=now, prep_at=now - timedelta(minutes=20)),
+        ) as plan,
+        mock.patch(
+            "commutecompass.geocode.geocode",
+            return_value=GeocodeResult(formatted_address="Preview origin", lat=40.7, lon=-74.0),
+        ),
+        mock.patch.object(store, "upsert_plan", wraps=store.upsert_plan) as save,
+    ):
+        fetch = calendar.return_value.fetch_events
+        fetch.return_value = [event]
+        yield {
+            "cfg": cfg, "store": store, "event": event, "clock": clock,
+            "fetch": fetch, "plan": plan, "save": save,
+        }
+
+
 class TestPlanCommand:
+    @pytest.mark.parametrize(
+        ("reference", "start", "end"),
+        [
+            ("2026-05-12T09:00:00-04:00", "2026-05-12T02:00:00-04:00",
+             "2026-05-13T01:59:59.999999-04:00"),
+            ("2026-05-12T01:30:00-04:00", "2026-05-11T02:00:00-04:00",
+             "2026-05-12T01:59:59.999999-04:00"),
+            ("2026-11-01T01:30:00-05:00", "2026-10-31T02:00:00-04:00",
+             "2026-11-01T01:59:59.999999-04:00"),
+            ("2026-11-01T03:00:00-05:00", "2026-11-01T02:00:00-05:00",
+             "2026-11-02T01:59:59.999999-05:00"),
+        ],
+    )
+    def test_unsaved_plan_fetches_logical_day(
+        self, runner: CliRunner, unsaved_plan_context: dict[str, Any],
+        reference: str, start: str, end: str,
+    ) -> None:
+        ctx = unsaved_plan_context
+        ctx["clock"].return_value = datetime.fromisoformat(reference).astimezone(NYC_TZ)
+        result = runner.invoke(cli, ["plan", ctx["event"].id])
+        assert result.exit_code == 0, result.output
+        calendars, fetched_start, fetched_end = ctx["fetch"].call_args.args
+        assert [calendar.model_dump() for calendar in calendars] == [
+            calendar.model_dump() for calendar in ctx["cfg"].calendars
+        ]
+        assert fetched_start.isoformat() == start
+        assert fetched_end.isoformat() == end
+        assert fetched_start.astimezone(UTC) < fetched_end.astimezone(UTC)
+        assert fetched_start.tzinfo == fetched_end.tzinfo == NYC_TZ
+
+    def test_unsaved_plan_selects_exact_id_not_first_event(
+        self, runner: CliRunner, unsaved_plan_context: dict[str, Any],
+    ) -> None:
+        ctx = unsaved_plan_context
+        event = ctx["event"]
+        other = event.model_copy(update={"id": event.id + "-other"})
+        ctx["fetch"].return_value = [other, event]
+        result = runner.invoke(cli, ["plan", event.id])
+        assert result.exit_code == 0, result.output
+        assert ctx["plan"].call_args.kwargs["event"] == event
+        ctx["save"].assert_called_once()
+        assert ctx["store"].get_plan(event.id) is not None
+        assert ctx["store"].get_plan(other.id) is None
+
+    @pytest.mark.parametrize("has_other_event", [False, True])
+    def test_unsaved_plan_missing_id_never_plans_unrelated_event(
+        self, runner: CliRunner, unsaved_plan_context: dict[str, Any], has_other_event: bool,
+    ) -> None:
+        from commutecompass.cli import EXIT_NOT_FOUND
+
+        ctx = unsaved_plan_context
+        event = ctx["event"]
+        other = event.model_copy(update={"id": event.id + "-other"})
+        ctx["fetch"].return_value = [other] if has_other_event else []
+        result = runner.invoke(cli, ["plan", event.id])
+        assert result.exit_code == EXIT_NOT_FOUND, result.output
+        assert event.id in result.output
+        ctx["plan"].assert_not_called()
+        ctx["save"].assert_not_called()
+
+    def test_unsaved_plan_from_preview_does_not_persist(
+        self, runner: CliRunner, unsaved_plan_context: dict[str, Any],
+    ) -> None:
+        ctx = unsaved_plan_context
+        event = ctx["event"]
+        result = runner.invoke(cli, ["plan", event.id, "--from", "Preview origin"])
+        assert result.exit_code == 0, result.output
+        assert "preview — not saved" in result.output
+        ctx["fetch"].assert_called_once()
+        assert ctx["plan"].call_args.kwargs["event"] == event
+        assert ctx["plan"].call_args.kwargs["origin_override"].address == "Preview origin"
+        ctx["save"].assert_not_called()
+        assert ctx["store"].get_plan(event.id) is None
+
     def test_plan_requires_event_id(
         self, runner: CliRunner, minimal_toml: Path, env_block: None
     ) -> None:
