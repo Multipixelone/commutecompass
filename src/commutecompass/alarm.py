@@ -158,6 +158,7 @@ def _default_provider(
     config: "Config",
     planned: Mapping[date, "list[Plan]"],
     store: Optional["Store"],
+    now: datetime,
 ) -> PlansProvider:
     """Plans provider: explicit ``planned`` → stored plans (once morning ran) → fresh plan."""
 
@@ -166,6 +167,12 @@ def _default_provider(
         if key in planned:
             return list(planned[key])
         _, day_end = logical_day_bounds_nyc(day_start)
+        # When this day's latest possible wake has passed, no event can make
+        # it future again. Only stored plans are needed for today's nap cap;
+        # don't refetch yesterday/today just to choose tomorrow.
+        fallback = fallback_for_day(day_start, config.alarm.fallback_clock())
+        if fallback.astimezone(UTC) <= now.astimezone(UTC):
+            return store.today_plans() if store is not None else []
         if store is not None:
             ran = store.get_job_heartbeat("morning")
             if ran is not None and to_nyc(ran) >= day_start:
@@ -219,7 +226,7 @@ def publish(
 
         store = Store(config.paths.db_path)
         store.init_schema()
-    provider = plans_for_day or _default_provider(config, planned or {}, store)
+    provider = plans_for_day or _default_provider(config, planned or {}, store, _now)
     result = compute_wake(config, _now, provider)
     logger.info(
         "alarm: wake_at=%s (%s) next_prep_at=%s",

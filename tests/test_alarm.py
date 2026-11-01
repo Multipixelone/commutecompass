@@ -271,5 +271,6 @@ def test_publish_uses_planned_mapping(tmp_path: Path) -> None:
             planned={date(2026, 10, 16): [_plan(prep)]},
         )
     assert result.wake_at == prep
-    # Today (Oct 15) had no morning run recorded → fetched once; tomorrow came from mapping.
-    assert pw.call_count == 1
+    # Today's fallback has passed → use stored plans for nap cap; tomorrow
+    # comes from the mapping, so neither day needs a calendar fetch.
+    assert pw.call_count == 0

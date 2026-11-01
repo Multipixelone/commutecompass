@@ -445,7 +445,10 @@ def run(
                 "Earliest prep changed (%s -> %s); re-publishing wake alarm",
                 earliest_prep_before, earliest_prep_after,
             )
-            publish_safe(config, store=_store)
+            from commutecompass.timeutil import logical_day_bounds_nyc
+
+            day_start, _ = logical_day_bounds_nyc(_now_fn())
+            publish_safe(config, store=_store, planned={day_start.date(): _store.today_plans()})
 
     # ── Phase 6: heartbeat ────────────────────────────────────────────────────
     # Record that poll completed, and ping the external dead-man's-switch (if
