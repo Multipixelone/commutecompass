@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
 class Origin(BaseModel):
@@ -239,6 +240,54 @@ class MonitoringConfig(BaseModel):
         return v
 
 
+class AlarmConfig(BaseModel):
+    """Wake & nap alarm — see docs/alarm-design.md.
+
+    commutecompass publishes the computed wake time to HA; HA owns nap logic
+    and the final "next alarm" selection; ``alarm daemon`` rings link's
+    speakers.  Entity/script ids are HA ids (``domain.object_id``).
+    """
+
+    enabled: bool = False
+    # HH:MM NYC wall-clock time on the target logical day.
+    fallback_time: str = "12:00"
+    wake_lead_minutes: int = Field(default=0, ge=0, le=24 * 60)
+    publish_script: str = "script.commute_publish_alarm"
+    nap_script: str = "script.commute_nap"
+    skip_script: str = "script.commute_alarm_skip"
+    next_alarm_entity: str = "sensor.commute_next_alarm"
+    enabled_entity: str = "input_boolean.commute_alarm_enabled"
+    stop_button: str = "input_button.commute_alarm_stop"
+    snooze_button: str = "input_button.commute_alarm_snooze"
+    state_entity: str = "input_select.commute_alarm_state"
+    heartbeat_entity: str = "input_datetime.commute_alarm_heartbeat"
+    # Case-insensitive substring of the PipeWire sink description/name.
+    sink: str = "analog"
+    # Path to a sound file; empty = synthesized tone.
+    sound: str = ""
+    ramp_start_percent: int = Field(default=30, ge=0, le=100)
+    ramp_seconds: int = Field(default=120, ge=0, le=3600)
+    max_ring_minutes: int = Field(default=15, ge=1, le=240)
+    snooze_minutes: int = Field(default=9, ge=1, le=240)
+    max_snoozes: int = Field(default=2, ge=0, le=20)
+    poll_seconds: int = Field(default=30, ge=1, le=3600)
+    # Empty = <db dir>/alarm-cache.json
+    cache_path: str = ""
+
+    @field_validator("fallback_time")
+    @classmethod
+    def _validate_fallback_time(cls, v: str) -> str:
+        try:
+            parsed = datetime.strptime(v, "%H:%M").time()
+        except ValueError as exc:
+            raise ValueError(f"alarm.fallback_time must be HH:MM, got {v!r}") from exc
+        return parsed.strftime("%H:%M")
+
+    def fallback_clock(self) -> dt_time:
+        """Return ``fallback_time`` as a naive ``time`` (NYC wall clock)."""
+        return datetime.strptime(self.fallback_time, "%H:%M").time()
+
+
 class Config(BaseModel):
     origin: Origin
     calendars: list[CalendarSpec]
@@ -254,6 +303,7 @@ class Config(BaseModel):
     monitoring: MonitoringConfig = MonitoringConfig()
     weather: WeatherConfig = WeatherConfig()
     realtime: RealtimeConfig = RealtimeConfig()
+    alarm: AlarmConfig = AlarmConfig()
     # Loaded from env, not TOML:
     google_maps_api_key: str = ""
     google_oauth_client_secret_json: str = ""
@@ -446,6 +496,9 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     # Real-time departure buffer — safe to toggle / tune from chat.
     "realtime.enabled": _coerce_bool,
     "realtime.max_buffer_minutes": _coerce_int,
+    # Wake alarm tuning — safe to tweak from chat ("wake me 15 min earlier").
+    "alarm.fallback_time": _coerce_hhmm,
+    "alarm.wake_lead_minutes": _coerce_int,
 }
 
 
