@@ -16,6 +16,7 @@ from commutecompass.realtime import (
     _fetch_predictions, _match_stop_ids, _nyct_trip, _route_matches, nyct_derived_delay,
     nyct_trip_direction, realtime_delay,
 )
+from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
 
 SCHED = datetime(2026, 5, 8, 8, tzinfo=NYC_TZ)
