@@ -247,6 +247,20 @@ in {
       '';
     };
 
+    alarm = {
+      enable = lib.mkEnableOption "PipeWire wake and nap alarm daemon and publish timer";
+      runtimeDir = lib.mkOption {
+        type = lib.types.str;
+        default = "/run/user/1000";
+        description = "XDG_RUNTIME_DIR of the user owning the PipeWire session; set user to that login user.";
+      };
+      publishTime = lib.mkOption {
+        type = lib.types.str;
+        default = "*:0/15";
+        description = "OnCalendar schedule for alarm publish (system timezone).";
+      };
+    };
+
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
@@ -333,6 +347,34 @@ in {
     systemd.services."commutecompass-morning"  = mkService      "morning"  "commutecompass morning digest";
     systemd.services."commutecompass-poll"     = mkService      "poll"     "commutecompass poll tick";
     systemd.services."commutecompass-tomorrow" = mkPlainService "tomorrow" "commutecompass tomorrow-alarm push";
+
+    systemd.services."commutecompass-alarm" = lib.mkIf cfg.alarm.enable (
+      lib.recursiveUpdate (mkPlainService "alarm daemon" "commutecompass PipeWire alarm daemon") {
+        wantedBy = [ "multi-user.target" ];
+        path = [ pkgs.pipewire pkgs.wireplumber ];
+        serviceConfig = {
+          Type = "simple";
+          Restart = "always";
+          RestartSec = "5s";
+          Environment = serviceDefaults.serviceConfig.Environment ++ [
+            "XDG_RUNTIME_DIR=${cfg.alarm.runtimeDir}"
+          ];
+          # PipeWire is accessed over its user's runtime socket, not devices.
+          ReadWritePaths = serviceDefaults.serviceConfig.ReadWritePaths ++ [ cfg.alarm.runtimeDir ];
+        };
+      }
+    );
+    systemd.services."commutecompass-alarm-publish" = lib.mkIf cfg.alarm.enable (
+      mkPlainService "alarm publish" "commutecompass publish wake alarm"
+    );
+    systemd.timers."commutecompass-alarm-publish" = lib.mkIf cfg.alarm.enable {
+      description = "Publish commutecompass wake alarm periodically";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.alarm.publishTime;
+        Persistent = true;
+      };
+    };
 
     systemd.timers."commutecompass-morning" = {
       description = "Daily morning digest timer";
