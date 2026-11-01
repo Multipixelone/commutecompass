@@ -20,6 +20,8 @@ intentionally read-only via the skill and must be changed by editing
 | `home_assistant.max_age_minutes`          | int (min)   | Max acceptable age of an HA location reading    |
 | `realtime.enabled`                        | bool        | Toggle real-time GTFS-RT departure delay buffer |
 | `realtime.max_buffer_minutes`             | int (min)   | Cap on minutes a live delay can add to leave time |
+| `alarm.fallback_time`                     | "HH:MM"     | Latest wake time (NYC); used when no events      |
+| `alarm.wake_lead_minutes`                 | int (min)   | Wake this many minutes before the first prep     |
 
 ## How to revert
 

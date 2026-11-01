@@ -883,3 +883,35 @@ class TestExpandedAllowlist:
         assert update_config_field(p, "home_assistant.alarm.enabled", "true") is True
         body = p.read_text()
         assert "enabled = true" in body
+
+# ─────────── [alarm] section ───────────────────────────────────────────────────
+
+class TestAlarmConfig:
+    def test_defaults(self) -> None:
+        from commutecompass.config import AlarmConfig
+
+        a = AlarmConfig()
+        assert a.enabled is False
+        assert a.fallback_time == "12:00"
+        assert a.wake_lead_minutes == 0
+        assert a.sink == "analog"
+        assert a.snooze_minutes == 9
+        assert a.max_snoozes == 2
+        assert a.max_ring_minutes == 15
+        assert a.poll_seconds == 30
+        assert a.publish_script == "script.commute_publish_alarm"
+
+    def test_fallback_time_validated(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import AlarmConfig
+
+        assert AlarmConfig(fallback_time="9:05").fallback_time == "09:05"
+        with pytest.raises(ValidationError):
+            AlarmConfig(fallback_time="noon")
+        with pytest.raises(ValidationError):
+            AlarmConfig(fallback_time="25:00")
+
+    def test_alarm_keys_allowlisted(self) -> None:
+        assert "alarm.fallback_time" in CONFIG_SET_ALLOWLIST
+        assert "alarm.wake_lead_minutes" in CONFIG_SET_ALLOWLIST
