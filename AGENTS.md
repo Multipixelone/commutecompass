@@ -19,6 +19,11 @@ Primary code lives in `src/commutecompass/`, tests in `tests/`, deployment in `n
 1. **Never commit secrets**
    - Do not commit `.env`, OAuth client JSON files, tokens, or credential dumps.
    - If a secret appears in git changes, stop and remove it from staged files.
+   - Never put personal origin values (home address or coordinates) in this
+     public repository or public `infra`, including examples and documentation.
+     See `../infra/AGENTS.md`, “CommuteCompass privacy boundary (authoritative)”,
+     for the explicit private-config/Nix-store plaintext allowance and the
+     separate requirement to keep API keys/tokens encrypted in `tokens.age`.
 
 2. **Keep changes scoped and reversible**
    - Prefer minimal targeted diffs over broad refactors.
