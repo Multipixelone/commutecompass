@@ -12,8 +12,9 @@ from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-unty
 from commutecompass.config import RealtimeConfig
 from commutecompass.models import Event, GtfsProvenance, Plan, Route, TransitLeg
 from commutecompass.realtime import (
-    FetchResult, Predictions, _accumulate, _cached_fetch, _feed_cache,
-    _fetch_predictions, _match_stop_ids, _route_matches, realtime_delay,
+    FetchResult, NyctTrip, Predictions, _accumulate, _cached_fetch, _feed_cache,
+    _fetch_predictions, _match_stop_ids, _nyct_trip, _route_matches, nyct_derived_delay,
+    nyct_trip_direction, realtime_delay,
 )
 from commutecompass.timeutil import NYC_TZ
 from commutecompass.store import Store
@@ -588,3 +589,238 @@ def test_cache_insertion_after_fetch_system_key_and_expiry() -> None:
         assert len(calls) == 3
     finally:
         _feed_cache.clear()
+
+
+# ── NYCT adapter (design §6) ──────────────────────────────────────────────────
+
+NYCT_TRIP = "087600_N..S36R"
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte, value = value & 0x7F, value >> 7
+        out.append(byte | 0x80 if value else byte)
+        if not value:
+            return bytes(out)
+
+
+def nyct_extension(*, assigned: bool | None = True, direction: int | None = None) -> bytes:
+    """Wire bytes of TripDescriptor field 1001 (NyctTripDescriptor)."""
+    body = b"\x0a" + _varint(len(b"train")) + b"train"  # train_id, ignored
+    if assigned is not None:
+        body += b"\x10" + _varint(int(assigned))
+    if direction is not None:
+        body += b"\x18" + _varint(direction)
+    return _varint(1001 << 3 | 2) + _varint(len(body)) + body
+
+
+def nyct_entity(
+    feed: Any, *, trip: str = NYCT_TRIP, stop: str = "R20S", late: int = 360,
+    departure: bool = True, arrival: bool = False, extension: bytes | None = None,
+    direction_id: int | None = 0,
+) -> None:
+    """Append a production-shaped NYCT trip update: no stop_sequence, no delay."""
+    entity = feed.entity.add()
+    entity.id = trip
+    tu = entity.trip_update
+    trip_descriptor = gtfs.TripDescriptor(trip_id=trip, route_id="Q", start_date="20260508",
+                                          start_time="07:30:46")
+    if direction_id is not None:  # untrustworthy: the L feed sends 0 for S trips
+        trip_descriptor.direction_id = direction_id
+    raw = trip_descriptor.SerializeToString()
+    if extension is None:
+        extension = nyct_extension(direction=3 if trip.split(".")[-1].startswith("S") else None)
+    tu.trip.CopyFrom(gtfs.TripDescriptor.FromString(raw + extension))
+    tu.timestamp = int(NOW.timestamp())
+    stu = tu.stop_time_update.add()
+    stu.stop_id = stop
+    at = int((SCHED + timedelta(seconds=late)).timestamp())
+    if departure:
+        stu.departure.time = at
+    if arrival:
+        stu.arrival.time = at
+
+
+def nyct_feed(**entity: Any) -> Any:
+    feed = gtfs.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = int(NOW.timestamp())
+    nyct_entity(feed, **entity)
+    return feed
+
+
+def serialized(feed: Any) -> Any:
+    return gtfs.FeedMessage.FromString(feed.SerializeToString())
+
+
+def nyct_route(**overrides: Any) -> Route:
+    fields: dict[str, Any] = dict(
+        gtfs_trip_id=NYCT_TRIP, gtfs_start_time=None, gtfs_boarding_stop_id="R20S",
+        gtfs_direction_id=1,
+    )
+    fields.update(overrides)
+    return make_route(**fields)
+
+
+def nyct_observe(feed: Any, route: Route | None = None) -> Any:
+    return observe(serialized(feed), route or nyct_route())
+
+
+@pytest.mark.parametrize("trip,expected", [
+    ("087600_N..S36R", "S"), ("087600_N..N36R", "N"), ("064200_GS.N01R", "N"),
+    ("123456_L..S", "S"), ("A", None), ("087600_N..X36R", None), ("87600_N..S", None),
+])
+def test_nyct_direction_from_trip_shape(trip: str, expected: str | None) -> None:
+    assert nyct_trip_direction(trip) == expected
+
+
+def test_nyct_extension_decoded_from_unknown_fields() -> None:
+    def decode(extension: bytes) -> NyctTrip | None:
+        raw = gtfs.TripDescriptor(trip_id=NYCT_TRIP).SerializeToString() + extension
+        return _nyct_trip(gtfs.TripDescriptor.FromString(raw))
+
+    assert decode(b"") is None
+    assert decode(nyct_extension(direction=3)) == NyctTrip(is_assigned=True, direction=3)
+    assert decode(nyct_extension(assigned=None)) == NyctTrip(is_assigned=False)
+    assert decode(nyct_extension(assigned=False, direction=1)) == NyctTrip(False, 1)
+    # Valid outer framing, but the inner field key has no value.
+    assert decode(_varint(1001 << 3 | 2) + b"\x01\x10") == NyctTrip(malformed=True)
+    assert decode(_varint(1001 << 3) + _varint(1)) == NyctTrip(malformed=True)
+
+
+def test_nyct_same_trip_late_derives_delay_in_utc() -> None:
+    feed = nyct_feed(late=360, direction_id=0)  # feed direction_id is wrong; ignored
+    prediction = result_for(serialized(feed)).predictions["R20S"][0]
+    assert prediction.stop_sequence is None and prediction.delay is None
+    assert prediction.direction_id == 0
+    assert prediction.nyct == NyctTrip(is_assigned=True, direction=3)
+    assert nyct_derived_delay(prediction, nyct_route().legs[0]) == 360
+    result = nyct_observe(feed)
+    assert (result.minutes, result.status) == (6, "observed")
+    assert result.reason == "Q running ~6 min late"
+
+
+def test_nyct_without_extension_direction_uses_shape_and_platform() -> None:
+    result = nyct_observe(nyct_feed(extension=nyct_extension(direction=None)))
+    assert (result.minutes, result.status) == (6, "observed")
+
+
+def test_nyct_on_time_is_observed_zero_and_early_clamps() -> None:
+    assert nyct_observe(nyct_feed(late=0))[:3] == (0, None, "observed")
+    assert nyct_observe(nyct_feed(late=-120))[:3] == (0, None, "observed")
+
+
+def test_nyct_requires_bridge_provenance() -> None:
+    assert nyct_observe(nyct_feed(), nyct_route(gtfs_provenance=None)).status == "unmatched"
+
+
+def test_nyct_only_opposite_direction_late_is_unmatched() -> None:
+    # Same platform complex, northbound trip of the same service, running late.
+    feed = nyct_feed(trip="087600_N..N36R", stop="R20N", late=600)
+    result = nyct_observe(feed)
+    assert (result.minutes, result.status) == (0, "unmatched")
+    # Even a leg claiming that trip id cannot cross platforms or directions.
+    crossed = nyct_route(gtfs_trip_id="087600_N..N36R")
+    assert nyct_observe(nyct_feed(trip="087600_N..N36R", stop="R20S"), crossed).status == "unmatched"
+    assert nyct_observe(feed, crossed.model_copy(update={"legs": [
+        crossed.legs[0].model_copy(update={"gtfs_boarding_stop_id": "R20N"})
+    ]})).status == "unmatched"  # leg direction_id 1 contradicts the N shape
+
+
+def test_nyct_opposite_direction_late_does_not_pollute_on_time_match() -> None:
+    feed = nyct_feed(late=0)
+    nyct_entity(feed, trip="088000_N..N36R", stop="R20N", late=900)
+    assert nyct_observe(feed)[:3] == (0, None, "observed")
+
+
+@pytest.mark.parametrize("assigned", [False, None])
+def test_nyct_unassigned_trip_is_unmatched(assigned: bool | None) -> None:
+    feed = nyct_feed(extension=nyct_extension(assigned=assigned, direction=3))
+    result = nyct_observe(feed)
+    assert (result.minutes, result.status) == (0, "unmatched")
+    assert result.detail == "NYCT trip is not assigned to a train"
+
+
+def test_nyct_missing_extension_is_unmatched() -> None:
+    assert nyct_observe(nyct_feed(extension=b"")).status == "unmatched"
+
+
+@pytest.mark.parametrize("direction", [1, 2, 4])
+def test_nyct_extension_direction_disagreement_rejects(direction: int) -> None:
+    result = nyct_observe(nyct_feed(extension=nyct_extension(direction=direction)))
+    assert (result.minutes, result.status) == (0, "unmatched")
+
+
+def test_nyct_platform_suffix_disagreeing_with_shape_rejects() -> None:
+    route = nyct_route(gtfs_boarding_stop_id="R20N")
+    assert nyct_observe(nyct_feed(stop="R20N"), route).status == "unmatched"
+
+
+def test_nyct_missing_departure_time_falls_back_to_arrival_only() -> None:
+    no_times = nyct_feed(departure=False)
+    result = nyct_observe(no_times)
+    assert (result.minutes, result.status) == (0, "unmatched")
+    arrival_only = nyct_feed(departure=False, arrival=True, late=420)
+    assert nyct_observe(arrival_only)[:3] == (7, "Q running ~7 min late", "observed")
+
+
+def test_nyct_trip_or_date_mismatch_never_matches() -> None:
+    other_trip = nyct_feed(trip="087700_N..S36R")
+    assert nyct_observe(other_trip).status == "unmatched"
+    feed = nyct_feed()
+    feed.entity[0].trip_update.trip.start_date = "20260509"
+    assert nyct_observe(feed).status == "unmatched"
+
+
+def test_nyct_contradicting_sequence_or_explicit_delay_rejects() -> None:
+    feed = nyct_feed()
+    feed.entity[0].trip_update.stop_time_update[0].stop_sequence = 11
+    assert nyct_observe(feed).status == "unmatched"
+    feed = nyct_feed()
+    feed.entity[0].trip_update.stop_time_update[0].departure.delay = 60
+    assert nyct_observe(feed).status == "unmatched"
+
+
+def test_nyct_duplicate_boarding_updates_reject() -> None:
+    feed = nyct_feed()
+    feed.entity[0].trip_update.stop_time_update.add().CopyFrom(
+        feed.entity[0].trip_update.stop_time_update[0])
+    assert nyct_observe(feed).status == "unmatched"
+
+
+def test_nyct_cancel_skip_and_stale_semantics_unchanged() -> None:
+    cancelled = nyct_feed()
+    cancelled.entity[0].trip_update.trip.schedule_relationship = 3
+    assert nyct_observe(cancelled).status == "cancelled"
+    trip_level = nyct_feed()
+    trip_level.entity[0].trip_update.trip.schedule_relationship = 3
+    trip_level.entity[0].trip_update.ClearField("stop_time_update")
+    assert nyct_observe(trip_level).status == "cancelled"
+    skipped = nyct_feed()
+    skipped.entity[0].trip_update.stop_time_update[0].schedule_relationship = 1
+    assert nyct_observe(skipped).status == "skipped"
+    stale = nyct_feed()
+    stale.entity[0].trip_update.timestamp = int((NOW - timedelta(minutes=10)).timestamp())
+    assert nyct_observe(stale).status == "unavailable"
+
+
+def test_nyct_partial_feed_failure_is_reported() -> None:
+    result = result_for(serialized(nyct_feed()))
+    result.failures = 1
+    delay = realtime_delay(nyct_route(), SCHED, RealtimeConfig(enabled=True),
+                           fetcher=lambda urls, system: result, clock=lambda: NOW)
+    assert (delay.minutes, delay.status, delay.feed_failed) == (6, "observed", True)
+
+
+def test_non_subway_feeds_ignore_nyct_adapter() -> None:
+    route = make_route(system="LIRR", line="Babylon", departure_stop="Atlantic Terminal",
+                       gtfs_trip_id=NYCT_TRIP, gtfs_start_time=None,
+                       gtfs_boarding_stop_id="R20S", gtfs_direction_id=1)
+    predictions: Predictions = {}
+    usable = _accumulate(serialized(nyct_feed()), predictions, "LIRR", now=NOW)
+    assert predictions["R20S"][0].nyct is None
+    delay = realtime_delay(route, SCHED, RealtimeConfig(enabled=True),
+                           fetcher=lambda urls, system: FetchResult(predictions, usable_feeds=int(usable)),
+                           clock=lambda: NOW)
+    assert delay.status == "unmatched"
