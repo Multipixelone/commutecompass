@@ -41,6 +41,7 @@ to stdout; relay that stdout back to the user.
 | "is my train running late?" / "any real-time delays on my commute?"      | `scripts/realtime.sh`                             |
 | "send me today's digest again" / "force-run morning"                     | `scripts/morning.sh`                              |
 | "run a poll cycle now" / "check alerts now"                              | `scripts/poll.sh`                                 |
+| "refresh the subway schedule" / "rebuild the GTFS index"                 | `scripts/gtfs-refresh.sh`                         |
 | "what time will my alarm be tomorrow?" / "preview tomorrow's wake time"  | `scripts/tomorrow.sh` (dry-run; no HA push)       |
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
 | "what's my prep buffer set to?" / "show me my config"                    | `scripts/config-show.sh`                          |
@@ -176,6 +177,9 @@ purpose.
 - `digest-preview`, `where`, `plan-event` (without `--from`), `config-show`,
   `mta-alerts`, and `realtime` are pure reads — invoke freely. `plan-event --from <addr>`
   is also a read (preview only; never saves).
+- `gtfs-refresh` downloads the static subway GTFS (~20 MB) and rebuilds
+  `gtfs.db`; it runs daily before `morning` via systemd. Only run it on demand
+  when the user asks; the previous index is kept if it fails.
 - `adjust` only shifts `prep_at`. The `leave_at` is governed by the route schedule (or duration-based
   fallback) and scheduling buffers and can't be moved without a replan. If the user wants to leave
   earlier/later, that requires a different change (calendar edit or route
@@ -205,5 +209,5 @@ failure modes without parsing log output:
 | 64   | Usage / bad arguments (Click already uses 2; we use 64 for `config set` rejects). |
 | 65   | Subject not found (no plan / event / location row).        |
 | 66   | Data could not be resolved (no current location, no route, prep/leave missing). |
-| 75   | Transient failure: job lock held by another process; retry next cycle. |
-| 78   | Config error (missing env var, malformed TOML).            |
+| 75   | Transient failure: job lock held by another process, or an external API/feed is down (e.g. `gtfs-refresh` could fetch neither the supplemented nor the regular subway GTFS); retry next cycle. |
+| 78   | Config error (missing env var, malformed TOML; for `gtfs-refresh`, the vendored stop allowlist does not match the feed — needs a reviewed allowlist change, do not retry). |

@@ -1067,6 +1067,45 @@ def undo(ctx: click.Context, selector: Optional[str]) -> None:
     )
 
 
+@cli.command(name="gtfs-refresh")
+@click.pass_context
+def gtfs_refresh(ctx: click.Context) -> None:
+    """Download the static subway GTFS and rebuild the identity-bridge index.
+
+    Tries the supplemented feed first and falls back to the regular subway
+    feed.  The index (``paths.gtfs_db_path``) is swapped atomically; on any
+    failure the previous index is kept.  Exits 75 when neither feed could be
+    fetched/imported, 78 when the vendored allowlist does not match the feed.
+    """
+    from commutecompass.gtfs_allowlist import AllowlistError, load_allowlist
+    from commutecompass.gtfs_index import GtfsRefreshError, refresh
+
+    config_path: Path = ctx.obj["config_path"]
+    cfg = _load_config(config_path)
+    gtfs_db = Path(cfg.paths.gtfs_db_path)
+
+    try:
+        allowlist = load_allowlist()
+    except AllowlistError as exc:
+        click.echo(f"Error: invalid GTFS bridge allowlist: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
+
+    def _run() -> None:
+        try:
+            stats = refresh(gtfs_db, allowlist=allowlist)
+        except GtfsRefreshError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(EXIT_CONFIG if exc.config_error else EXIT_TRANSIENT)
+        click.echo(
+            f"GTFS index refreshed from {stats.feed_kind} feed {stats.feed_version} "
+            f"(covers {stats.coverage_start.isoformat()}..{stats.coverage_end.isoformat()}): "
+            f"{stats.trips} trips, {stats.stop_times} stop times, "
+            f"{stats.rejected_trips} rejected → {gtfs_db}"
+        )
+
+    _run_with_job_lock(cfg, "gtfs-refresh", _run)
+
+
 @cli.command(name="mta-alerts")
 @click.pass_context
 def mta_alerts(ctx: click.Context) -> None:

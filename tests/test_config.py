@@ -915,3 +915,23 @@ class TestAlarmConfig:
     def test_alarm_keys_allowlisted(self) -> None:
         assert "alarm.fallback_time" in CONFIG_SET_ALLOWLIST
         assert "alarm.wake_lead_minutes" in CONFIG_SET_ALLOWLIST
+
+
+class TestGtfsDbPath:
+    def test_defaults_next_to_db_path(self, minimal_toml: Path, required_env: dict[str, str]) -> None:
+        _apply_env(required_env)
+        cfg = load_config(minimal_toml)
+        assert cfg.paths.gtfs_db_path == str(
+            Path(cfg.paths.db_path).with_name("gtfs.db")
+        )
+
+    def test_explicit_override(
+        self, minimal_toml: Path, required_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        _apply_env(required_env)
+        text = minimal_toml.read_text().replace(
+            "[paths]\n", f'[paths]\ngtfs_db_path = "{tmp_path / "x.db"}"\n', 1
+        )
+        minimal_toml.write_text(text)
+        cfg = load_config(minimal_toml)
+        assert cfg.paths.gtfs_db_path == str(tmp_path / "x.db")

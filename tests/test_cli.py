@@ -111,6 +111,7 @@ class TestMainHelp:
             "adjust",
             "config",
             "realtime",
+            "gtfs-refresh",
         ]:
             assert cmd in result.output
 
@@ -1470,3 +1471,81 @@ class TestPlanFromOption:
             )
         assert result.exit_code == EXIT_USAGE
         assert "mutually exclusive" in result.output.lower()
+
+
+# ─────────── gtfs-refresh ─────────────────────────────────────────────────────
+
+
+class TestGtfsRefresh:
+    def _stats(self) -> Any:
+        from datetime import date as date_cls
+        from datetime import timezone
+
+        from commutecompass.gtfs_index import ImportStats
+
+        return ImportStats(
+            feed_kind="regular",
+            feed_version="v1",
+            feed_sha256="0" * 64,
+            coverage_start=date_cls(2026, 11, 1),
+            coverage_end=date_cls(2027, 5, 15),
+            imported_at=datetime(2026, 11, 1, 8, 30, tzinfo=timezone.utc),
+            trips=10,
+            stop_times=200,
+            rejected_trips=0,
+        )
+
+    def test_success_writes_default_gtfs_db_next_to_state_db(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _fake_config(tmp_path)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh", return_value=self._stats()) as m,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == 0, result.output
+        assert m.call_args.args[0] == tmp_path / "gtfs.db"
+        assert "regular feed v1" in result.output
+        assert "2026-11-01..2027-05-15" in result.output
+
+    @pytest.mark.parametrize(("config_error", "code"), [(False, 75), (True, 78)])
+    def test_failure_exit_codes(
+        self, runner: CliRunner, tmp_path: Path, config_error: bool, code: int
+    ) -> None:
+        from commutecompass.gtfs_index import GtfsRefreshError
+
+        cfg = _fake_config(tmp_path)
+        err = GtfsRefreshError("both feeds failed", config_error=config_error)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch("commutecompass.gtfs_index.refresh", side_effect=err),
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == code
+        assert "both feeds failed" in result.output
+
+    def test_invalid_vendored_allowlist_is_config_error(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        from commutecompass.gtfs_allowlist import AllowlistError
+
+        cfg = _fake_config(tmp_path)
+        with (
+            mock.patch("commutecompass.config.load_config", return_value=cfg),
+            mock.patch(
+                "commutecompass.gtfs_allowlist.load_allowlist",
+                side_effect=AllowlistError("bad"),
+            ),
+            mock.patch("commutecompass.gtfs_index.refresh") as m,
+        ):
+            result = runner.invoke(cli, ["gtfs-refresh"])
+        assert result.exit_code == 78
+        m.assert_not_called()
+
+    def test_skill_script_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "skills" / "commutecompass"
+        script = root / "scripts" / "gtfs-refresh.sh"
+        assert script.is_file()
+        assert "commutecompass-skill gtfs-refresh" in script.read_text()
+        assert "scripts/gtfs-refresh.sh" in (root / "SKILL.md").read_text()

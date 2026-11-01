@@ -65,6 +65,9 @@ poll_staleness_minutes = 15
 venues_file = "/etc/commutecompass/known_venues.yaml"
 db_path = "/var/lib/commutecompass/state.db"
 oauth_token_path = "/var/lib/commutecompass/google_token.json"
+# Static GTFS index written by `commutecompass gtfs-refresh` (identity bridge).
+# Optional; defaults to gtfs.db next to db_path.
+# gtfs_db_path = "/var/lib/commutecompass/gtfs.db"
 
 [opencode_go]
 endpoint = "https://opencode-go.example/v1/chat/completions"

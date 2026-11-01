@@ -11,7 +11,7 @@ from pathlib import Path
 import tomllib
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ─────────── Config models (mirrors models.py for loader use) ───────────
@@ -49,6 +49,15 @@ class PathsConfig(BaseModel):
     venues_file: str
     db_path: str
     oauth_token_path: str
+    # Static GTFS identity-bridge index written by `gtfs-refresh` (kept separate
+    # from the state DB).  Defaults to `gtfs.db` next to `db_path`.
+    gtfs_db_path: str = ""
+
+    @model_validator(mode="after")
+    def _default_gtfs_db_path(self) -> "PathsConfig":
+        if not self.gtfs_db_path:
+            self.gtfs_db_path = str(Path(self.db_path).with_name("gtfs.db"))
+        return self
 
 
 class OpencodeGoConfig(BaseModel):
