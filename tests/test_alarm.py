@@ -11,6 +11,7 @@ import pytest
 
 from commutecompass.alarm import (
     AlarmConfigError,
+    AlarmError,
     build_payload,
     compute_wake,
     publish,
@@ -111,11 +112,11 @@ def test_no_events_uses_fallback(tmp_path: Path) -> None:
     assert r.next_event == ""
 
 
-def test_errored_plans_ignored(tmp_path: Path) -> None:
+def test_errored_plans_fail_closed(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     plans = [_plan(_nyc(2026, 10, 15, 7, 0), error="location_unresolved")]
-    r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): plans}))
-    assert r.source == "fallback"
+    with pytest.raises(AlarmError, match="incomplete planning"):
+        compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): plans}))
 
 
 def test_custom_fallback_time(tmp_path: Path) -> None:
@@ -129,7 +130,7 @@ def test_wake_lead_subtracted(tmp_path: Path) -> None:
     prep = _nyc(2026, 10, 15, 9, 0)
     r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [_plan(prep)]}))
     assert r.wake_at == _nyc(2026, 10, 15, 8, 15)
-    assert r.next_prep_at == prep
+    assert r.next_prep_at == _nyc(2026, 10, 15, 8, 15)
 
 
 def test_earliest_of_multiple_events(tmp_path: Path) -> None:
@@ -150,11 +151,14 @@ def test_passed_wake_rolls_to_tomorrow(tmp_path: Path) -> None:
     assert prov.calls == [date(2026, 10, 15), date(2026, 10, 16)]
 
 
-def test_tomorrow_not_planned_when_today_future(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
-    prov = _provider({})
-    compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), prov)
-    assert prov.calls == [date(2026, 10, 15)]
+def test_tomorrow_planned_even_when_today_wake_future(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=30)
+    prep = _nyc(2026, 10, 16, 8)
+    prov = _provider({date(2026, 10, 16): [_plan(prep)]})
+    result = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), prov)
+    assert result.wake_at == _nyc(2026, 10, 15, 12)
+    assert result.next_prep_at == _nyc(2026, 10, 16, 7, 30)
+    assert prov.calls == [date(2026, 10, 15), date(2026, 10, 16)]
 
 
 def test_after_midnight_belongs_to_previous_logical_day(tmp_path: Path) -> None:
@@ -271,6 +275,169 @@ def test_publish_uses_planned_mapping(tmp_path: Path) -> None:
             planned={date(2026, 10, 16): [_plan(prep)]},
         )
     assert result.wake_at == prep
-    # Today's fallback has passed → use stored plans for nap cap; tomorrow
-    # comes from the mapping, so neither day needs a calendar fetch.
-    assert pw.call_count == 0
+    # Today is still fetched for the nap cap; tomorrow comes from the mapping.
+    assert pw.call_count == 1
+
+
+@pytest.mark.parametrize("hour", [5, 20, 23])
+def test_publish_next_future_wake_at_any_hour(tmp_path: Path, hour: int) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=30)
+    today = _plan(_nyc(2026, 10, 15, 8))
+    tomorrow = _plan(_nyc(2026, 10, 16, 7), "Tomorrow")
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+        result, ok = publish(
+            cfg, now=_nyc(2026, 10, 15, hour),
+            planned={date(2026, 10, 15): [today], date(2026, 10, 16): [tomorrow]},
+        )
+    assert ok
+    expected = _nyc(2026, 10, 15, 7, 30) if hour == 5 else _nyc(2026, 10, 16, 6, 30)
+    assert result.wake_at == expected
+    assert cs.call_args.kwargs["data"]["wake_at"] == expected.isoformat()
+
+
+@pytest.mark.parametrize("bad_day", [15, 16])
+def test_partial_planning_never_posts_fallback(tmp_path: Path, bad_day: int) -> None:
+    cfg = _config(tmp_path)
+    plans = [_plan(_nyc(2026, 10, bad_day, 21), error="no_route")]
+    with patch("commutecompass.ha_client.call_service") as cs:
+        with pytest.raises(AlarmError, match="incomplete planning"):
+            publish(
+                cfg, now=_nyc(2026, 10, 15, 20),
+                plans_for_day=_provider({date(2026, 10, bad_day): plans}),
+            )
+    cs.assert_not_called()
+
+
+def test_calendar_failure_is_not_empty_day(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    with patch("commutecompass.jobs.tomorrow.plan_window", return_value=None), patch(
+        "commutecompass.ha_client.call_service"
+    ) as cs:
+        with pytest.raises(AlarmError, match="calendar fetch failed"):
+            publish(cfg, now=_nyc(2026, 10, 15, 20))
+    cs.assert_not_called()
+
+
+def test_no_future_wake_preserves_ha(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=180)
+    with patch("commutecompass.ha_client.call_service") as cs:
+        with pytest.raises(AlarmError, match="no future wake"):
+            publish(
+                cfg, now=_nyc(2026, 10, 16, 1, 30),
+                plans_for_day=_provider({date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 3))]}),
+            )
+    cs.assert_not_called()
+
+
+def test_future_prep_cap_can_be_already_due(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=45)
+    result = compute_wake(
+        cfg, _nyc(2026, 10, 15, 8, 30),
+        _provider({date(2026, 10, 15): [_plan(_nyc(2026, 10, 15, 9))]}),
+    )
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.next_prep_at == _nyc(2026, 10, 15, 8, 15)
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_publish_heartbeat_only_on_success(tmp_path: Path, ok: bool) -> None:
+    from commutecompass.store import Store
+
+    cfg = _config(tmp_path)
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    now = _nyc(2026, 10, 15, 20)
+    with patch("commutecompass.ha_client.call_service", return_value=ok):
+        publish(cfg, now=now, store=store, plans_for_day=_provider({}))
+    assert store.get_job_heartbeat("alarm_publish") == (now if ok else None)
+
+
+@pytest.mark.parametrize("elapsed_minutes", [None, 14, 15])
+def test_poll_publishes_periodically(tmp_path: Path, elapsed_minutes: int | None) -> None:
+    from unittest.mock import Mock
+
+    from commutecompass.jobs.poll import run
+    from commutecompass.store import Store
+
+    cfg = _config(tmp_path)
+    cfg.home_assistant.enabled = False
+    now = _nyc(2026, 10, 15, 20)
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    if elapsed_minutes is not None:
+        store.record_job_success("alarm_publish", now - timedelta(minutes=elapsed_minutes))
+    with patch("commutecompass.alarm.publish_safe") as pub:
+        run(
+            cfg, store=store, notifier=Mock(), plan_event_fn=Mock(),
+            fetch_alerts_fn=lambda **_: [], now_fn=lambda: now,
+        )
+    if elapsed_minutes == 14:
+        pub.assert_not_called()
+    else:
+        pub.assert_called_once_with(cfg, store=store, now=now)
+
+
+@pytest.mark.parametrize("hour", [8, 20])
+def test_historical_too_imminent_keeps_first_wake_elapsed(tmp_path: Path, hour: int) -> None:
+    cfg = _config(tmp_path)
+    historical = _plan(_nyc(2026, 10, 15, 7), error="too_imminent")
+    later = _plan(_nyc(2026, 10, 15, 10), "Later today")
+    tomorrow = _plan(_nyc(2026, 10, 16, 8), "Tomorrow")
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+        result, ok = publish(
+            cfg, now=_nyc(2026, 10, 15, hour),
+            plans_for_day=_provider({
+                date(2026, 10, 15): [historical, later],
+                date(2026, 10, 16): [tomorrow],
+            }),
+        )
+    assert ok
+    assert result.wake_at == tomorrow.prep_at
+    assert result.next_prep_at == (later.prep_at if hour == 8 else tomorrow.prep_at)
+    cs.assert_called_once()
+
+
+def test_historical_too_imminent_does_not_hide_afternoon_cap(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=30)
+    result = compute_wake(
+        cfg, _nyc(2026, 10, 15, 13), _provider({
+            date(2026, 10, 15): [
+                _plan(_nyc(2026, 10, 15, 7), error="too_imminent"),
+                _plan(_nyc(2026, 10, 15, 16), "Afternoon"),
+            ],
+            date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 8))],
+        }),
+    )
+    assert result.wake_at == _nyc(2026, 10, 16, 7, 30)
+    assert result.next_prep_at == _nyc(2026, 10, 15, 15, 30)
+    assert result.next_event == "Afternoon"
+
+
+@pytest.mark.parametrize("error", ["no_route", "location_unresolved", "internal_error"])
+def test_past_unresolved_start_bounds_elapsed_wake(tmp_path: Path, error: str) -> None:
+    cfg = _config(tmp_path)
+    unknown = _plan(_nyc(2026, 10, 15, 6), error=error)
+    unknown.prep_at = None
+    unknown.leave_at = None
+    result = compute_wake(
+        cfg, _nyc(2026, 10, 15, 8), _provider({
+            date(2026, 10, 15): [unknown, _plan(_nyc(2026, 10, 15, 10), "Later")],
+            date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 9))],
+        }),
+    )
+    assert result.wake_at == _nyc(2026, 10, 16, 9)
+    assert result.next_prep_at == _nyc(2026, 10, 15, 10)
+
+
+@pytest.mark.parametrize("error", ["no_route", "location_unresolved", "too_imminent"])
+def test_historical_success_does_not_excuse_future_error(tmp_path: Path, error: str) -> None:
+    cfg = _config(tmp_path)
+    with pytest.raises(AlarmError, match="incomplete planning"):
+        compute_wake(
+            cfg, _nyc(2026, 10, 15, 13), _provider({
+                date(2026, 10, 15): [
+                    _plan(_nyc(2026, 10, 15, 7), error="too_imminent"),
+                    _plan(_nyc(2026, 10, 15, 16), error=error),
+                ],
+            }),
+        )

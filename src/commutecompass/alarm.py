@@ -51,7 +51,7 @@ class WakeResult:
     source: Literal["event", "fallback"]
     # Plan whose prep_at drove the wake (None for fallback).
     plan: Optional["Plan"]
-    # Earliest future prep_at (today's or target day's plans) — HA nap cap.
+    # Earliest future prep_at across today/tomorrow, minus wake lead — HA nap cap.
     next_prep_at: Optional[datetime]
     next_event: str
 
@@ -83,18 +83,40 @@ def fallback_for_day(day_start: datetime, fallback: time) -> datetime:
 
 
 def wake_for_day(
-    day_start: datetime, plans: "list[Plan]", config: "Config"
+    day_start: datetime, plans: "list[Plan]", config: "Config", *, now: Optional[datetime] = None
 ) -> tuple[datetime, Optional["Plan"]]:
-    """Return (wake_at, driving plan) for one logical day."""
-    fallback = fallback_for_day(day_start, config.alarm.fallback_clock())
-    first = _earliest_prep_plan(plans)
-    if first is None or first.prep_at is None:
-        return fallback, None
+    """Return the day's first wake, retaining historical evidence it has elapsed.
+
+    An unresolved event that has already started cannot require a future wake:
+    its start is a conservative upper bound on prep. Keep that bound rather than
+    dropping the event and inventing a second wake from a later appointment.
+    Unknown future timings still fail closed, even after the day's fallback.
+    """
+    wake = fallback_for_day(day_start, config.alarm.fallback_clock())
+    first: Optional[Plan] = None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
-    # Absolute arithmetic: aware-datetime subtraction in one zone is wall-clock.
-    wake = (first.prep_at.astimezone(UTC) - lead).astimezone(NYC_TZ)
-    if wake.astimezone(UTC) >= fallback.astimezone(UTC):
-        return fallback, None
+    now_utc = now.astimezone(UTC) if now is not None else None
+    for p in plans:
+        prep = p.prep_at
+        if p.error is not None or prep is None:
+            if (
+                now_utc is not None
+                and p.error == "too_imminent"
+                and prep is not None
+                and p.leave_at is not None
+                and prep.astimezone(UTC) <= p.leave_at.astimezone(UTC) <= now_utc
+                and p.leave_at.astimezone(UTC) <= p.event.start.astimezone(UTC)
+            ):
+                pass  # Known past prep remains evidence of the first wake.
+            elif now_utc is not None and p.event.start.astimezone(UTC) <= now_utc:
+                prep = p.event.start  # Historical uncertainty cannot cap a future nap.
+            else:
+                raise AlarmError(f"incomplete planning for {day_start.date()}")
+        assert prep is not None
+        # Absolute arithmetic: same-zone datetime subtraction is wall-clock.
+        candidate = (prep.astimezone(UTC) - lead).astimezone(NYC_TZ)
+        if candidate.astimezone(UTC) < wake.astimezone(UTC):
+            wake, first = candidate, p
     return wake, first
 
 
@@ -105,24 +127,27 @@ def compute_wake(
 ) -> WakeResult:
     """Compute the next morning wake.
 
-    ``plans_for_day(day_start)`` returns plans for the logical day beginning
-    at ``day_start``; it is called lazily (tomorrow is only planned when
-    today's wake has already passed).
+    Both days are planned: today's wake wins while future, and the nap cap
+    considers the earliest future prep across today and tomorrow. Incomplete
+    planning raises rather than publishing a potentially unsafe later fallback.
     """
     now_utc = now.astimezone(UTC)
     today_start, _ = logical_day_bounds_nyc(now)
     today_plans = plans_for_day(today_start)
-    wake, plan = wake_for_day(today_start, today_plans, config)
+    tomorrow_start, _ = logical_day_bounds_nyc(today_start + timedelta(hours=36))
+    tomorrow_plans = plans_for_day(tomorrow_start)
+    # Even after today's fallback, today's afternoon prep still caps naps.
+    # Validate both snapshots so partial planning never clears that cap.
+    tomorrow_wake, tomorrow_plan = wake_for_day(tomorrow_start, tomorrow_plans, config, now=now)
+    wake, plan = wake_for_day(today_start, today_plans, config, now=now)
     day_start = today_start
-    target_plans = today_plans
     if wake.astimezone(UTC) <= now_utc:
-        tomorrow_start, _ = logical_day_bounds_nyc(today_start + timedelta(hours=36))
-        target_plans = plans_for_day(tomorrow_start)
-        wake, plan = wake_for_day(tomorrow_start, target_plans, config)
+        wake, plan = tomorrow_wake, tomorrow_plan
         day_start = tomorrow_start
+    if wake.astimezone(UTC) <= now_utc:
+        raise AlarmError("no future wake in today's or tomorrow's plans")
 
-    pool = list(today_plans) if day_start == today_start else [*today_plans, *target_plans]
-    nxt = _earliest_prep_plan(pool, after=now)
+    nxt = _earliest_prep_plan([*today_plans, *tomorrow_plans], after=now)
     from commutecompass.format import _sanitize_text
 
     return WakeResult(
@@ -130,7 +155,11 @@ def compute_wake(
         day=to_nyc(day_start).date(),
         source="event" if plan is not None else "fallback",
         plan=plan,
-        next_prep_at=to_nyc(nxt.prep_at) if nxt is not None and nxt.prep_at is not None else None,
+        next_prep_at=(
+            (nxt.prep_at.astimezone(UTC) - timedelta(minutes=config.alarm.wake_lead_minutes))
+            .astimezone(NYC_TZ)
+            if nxt is not None and nxt.prep_at is not None else None
+        ),
         next_event=_sanitize_text(nxt.event.title) if nxt is not None else "",
     )
 
@@ -167,20 +196,9 @@ def _default_provider(
         if key in planned:
             return list(planned[key])
         _, day_end = logical_day_bounds_nyc(day_start)
-        # When this day's latest possible wake has passed, no event can make
-        # it future again. Only stored plans are needed for today's nap cap;
-        # don't refetch yesterday/today just to choose tomorrow.
-        fallback = fallback_for_day(day_start, config.alarm.fallback_clock())
-        if fallback.astimezone(UTC) <= now.astimezone(UTC):
-            return store.today_plans() if store is not None else []
-        if store is not None:
-            ran = store.get_job_heartbeat("morning")
-            if ran is not None and to_nyc(ran) >= day_start:
-                start_utc, end_utc = day_start.astimezone(UTC), day_end.astimezone(UTC)
-                return [
-                    p for p in store.today_plans()
-                    if start_utc <= p.event.start.astimezone(UTC) <= end_utc
-                ]
+        # Stored morning plans are not a complete calendar snapshot (new events
+        # may have arrived). Fetch both days even after today's fallback so HA's
+        # nap cap cannot silently lose an afternoon prep.
         from commutecompass.jobs.tomorrow import plan_window
 
         plans = plan_window(config, day_start, day_end)
@@ -239,6 +257,8 @@ def publish(
     ok = call_service(base_url, token, domain, name, data=build_payload(result))
     if not ok:
         logger.warning("alarm: publish to %s failed", config.alarm.publish_script)
+    elif store is not None:
+        store.record_job_success("alarm_publish", _now)
     return result, ok
 
 
@@ -247,9 +267,10 @@ def publish_safe(
     *,
     store: Optional["Store"] = None,
     planned: Optional[Mapping[date, "list[Plan]"]] = None,
+    now: Optional[datetime] = None,
 ) -> None:
     """:func:`publish` for background callers (poll/tomorrow): never raises."""
     try:
-        publish(config, store=store, planned=planned)
+        publish(config, store=store, planned=planned, now=now)
     except Exception as exc:  # noqa: BLE001 — alarm must never break a job
         logger.warning("alarm publish failed: %s", exc)

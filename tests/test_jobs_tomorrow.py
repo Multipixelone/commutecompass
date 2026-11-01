@@ -140,8 +140,8 @@ def _route() -> Route:
 
 
 def test_picks_earliest_prep_and_pushes(tomorrow_config: Config) -> None:
-    """Earliest non-errored prep_at is selected; HA push receives ISO datetime."""
-    events = _tomorrow_events()
+    """A complete plan publishes its earliest prep_at as an ISO datetime."""
+    events = _tomorrow_events()[:2]
     route = _route()
 
     late_prep = events[0].start - timedelta(minutes=45)
@@ -298,8 +298,8 @@ def test_calendar_fetch_failure_returns_none(tomorrow_config: Config) -> None:
     assert result is None
 
 
-def test_plan_failure_doesnt_kill_run(tomorrow_config: Config) -> None:
-    """One event's plan_event raising still lets the rest contribute."""
+def test_plan_failure_preserves_existing_alarm(tomorrow_config: Config) -> None:
+    """One missing route must not replace an existing wake with a later one."""
     events = _tomorrow_events()[:2]
     route = _route()
     early_prep = events[1].start - timedelta(minutes=65)
@@ -322,9 +322,8 @@ def test_plan_failure_doesnt_kill_run(tomorrow_config: Config) -> None:
         mock_cal.return_value.fetch_events.return_value = events
         result = tomorrow_run(tomorrow_config)
 
-    assert result is not None
-    assert result.event.id == "evt-early"
-    mock_push.assert_called_once()
+    assert result is None
+    mock_push.assert_not_called()
 
 
 def test_morning_pings_not_touched(tomorrow_config: Config) -> None:
@@ -406,3 +405,83 @@ def test_alarm_publish_not_called_when_disabled(tomorrow_config: Config) -> None
         mock_cal.return_value.fetch_events.return_value = []
         tomorrow_run(tomorrow_config)
     mock_pub.assert_not_called()
+
+
+def test_partial_calendar_failure_does_not_publish(tomorrow_config: Config) -> None:
+    """A failure after fetching one calendar is not a verified empty day."""
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    tomorrow_config.calendars.append(CalendarSpec(id="second", name="Second"))
+    with patch("commutecompass.jobs.tomorrow.CalendarClient") as calendar, patch(
+        "commutecompass.jobs.tomorrow.push_tomorrow_alarm"
+    ) as legacy, patch("commutecompass.ha_client.call_service") as alarm:
+        calendar.return_value.fetch_events.side_effect = RuntimeError("second calendar failed")
+        assert tomorrow_run(tomorrow_config) is None
+    legacy.assert_not_called()
+    alarm.assert_not_called()
+
+
+def test_partial_plan_failure_does_not_publish_either_alarm(tomorrow_config: Config) -> None:
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    events = _tomorrow_events()[:2]
+    plans = [
+        Plan(event=events[0], error="no_route"),
+        Plan(event=events[1], prep_at=events[1].start - timedelta(minutes=30)),
+    ]
+    with patch("commutecompass.jobs.tomorrow.plan_window", return_value=plans), patch(
+        "commutecompass.jobs.tomorrow.push_tomorrow_alarm"
+    ) as legacy, patch("commutecompass.ha_client.call_service") as alarm:
+        assert tomorrow_run(tomorrow_config) is None
+    legacy.assert_not_called()
+    alarm.assert_not_called()
+
+
+def test_evening_job_publishes_despite_historical_too_imminent(tomorrow_config: Config) -> None:
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    now = datetime(2026, 10, 15, 20, tzinfo=NYC_TZ)
+    event = _tomorrow_events()[1].model_copy(update={
+        "start": datetime(2026, 10, 16, 9, tzinfo=NYC_TZ),
+        "end": datetime(2026, 10, 16, 10, tzinfo=NYC_TZ),
+    })
+    future = Plan(event=event, prep_at=event.start - timedelta(hours=1))
+    past_event = event.model_copy(update={
+        "start": event.start - timedelta(days=1),
+        "end": event.end - timedelta(days=1),
+    })
+    past = Plan(
+        event=past_event, prep_at=past_event.start - timedelta(hours=1),
+        leave_at=past_event.start - timedelta(minutes=30), error="too_imminent",
+    )
+    with patch("commutecompass.jobs.tomorrow.now_nyc", return_value=now), patch(
+        "commutecompass.alarm.now_nyc", return_value=now
+    ), patch("commutecompass.jobs.tomorrow.plan_window", side_effect=[[future], [past]]), patch(
+        "commutecompass.jobs.tomorrow.push_tomorrow_alarm", return_value=True
+    ), patch("commutecompass.ha_client.call_service", return_value=True) as alarm:
+        assert tomorrow_run(tomorrow_config) == future
+    alarm.assert_called_once()
+    assert future.prep_at is not None
+    assert alarm.call_args.kwargs["data"]["wake_at"] == future.prep_at.isoformat()
+
+
+def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> None:
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    now = datetime(2026, 10, 15, 20, tzinfo=NYC_TZ)
+    with patch("commutecompass.jobs.tomorrow.now_nyc", return_value=now), patch(
+        "commutecompass.alarm.now_nyc", return_value=now
+    ), patch("commutecompass.jobs.tomorrow.plan_window", return_value=[]), patch(
+        "commutecompass.ha_client.call_service", return_value=True
+    ) as alarm:
+        assert tomorrow_run(tomorrow_config) is None
+    alarm.assert_called_once()
+    assert alarm.call_args.kwargs["data"] == {
+        "wake_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
+        "next_prep_at": "",
+        "next_event": "",
+    }

@@ -71,6 +71,8 @@ def _publish_alarm_safe(config: Config, day_start: datetime, plans: list[Plan]) 
     """Re-publish the wake alarm with already-planned tomorrow plans; never raises."""
     from commutecompass.alarm import publish_safe
 
+    # Do not force a day: an early invocation must preserve today's active wake,
+    # while late-night calls must never replace tomorrow's wake with past today.
     publish_safe(config, planned={day_start.date(): plans})
 
 
@@ -141,6 +143,10 @@ def _push_earliest(config: Config, plans: list[Plan], *, dry_run: bool) -> Plan 
     """Pick the earliest prep_at across ``plans`` and push it to HA."""
     if not plans:
         logger.info("tomorrow job: no events tomorrow — nothing to push")
+        return None
+
+    if any(p.error is not None or p.prep_at is None for p in plans):
+        logger.warning("tomorrow job: incomplete planning — preserving the existing HA alarm")
         return None
 
     earliest = _earliest_prep(plans)

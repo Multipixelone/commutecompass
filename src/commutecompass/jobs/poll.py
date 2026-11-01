@@ -435,20 +435,21 @@ def run(
             else:
                 logger.warning("Location update send failed for event %s", plan.event.id)
 
-    # ── Phase 5b: re-publish the wake alarm if a replan moved the first prep ──
+    # Refresh both days before the evening shortcut, even without a replan.
+    # Only successful publishes advance the heartbeat; uncertainty leaves HA's
+    # existing wake intact and the next poll retries.
     if config.alarm.enabled:
         earliest_prep_after = _earliest_prep_at(_store.today_plans())
-        if earliest_prep_after != earliest_prep_before:
+        publish_now = _now_fn()
+        last_publish = _store.get_job_heartbeat("alarm_publish")
+        refresh_due = (
+            last_publish is None
+            or publish_now.astimezone(UTC) - last_publish.astimezone(UTC) >= timedelta(minutes=15)
+        )
+        if refresh_due or earliest_prep_after != earliest_prep_before:
             from commutecompass.alarm import publish_safe
 
-            logger.info(
-                "Earliest prep changed (%s -> %s); re-publishing wake alarm",
-                earliest_prep_before, earliest_prep_after,
-            )
-            from commutecompass.timeutil import logical_day_bounds_nyc
-
-            day_start, _ = logical_day_bounds_nyc(_now_fn())
-            publish_safe(config, store=_store, planned={day_start.date(): _store.today_plans()})
+            publish_safe(config, store=_store, now=publish_now)
 
     # ── Phase 6: heartbeat ────────────────────────────────────────────────────
     # Record that poll completed, and ping the external dead-man's-switch (if
