@@ -113,14 +113,15 @@ def validate_leg(
     if len(stations) != 1:
         return ValidationResult(reason="ambiguous_station")
     entry = stations[0]
-    local_date = departure.astimezone(NYC_TZ).date()
-    days = {local_date, local_date - timedelta(days=1)}
-    if not any(index.covers(day) for day in days):
-        return ValidationResult(reason="outside_coverage")
-    candidates = [d for d in index.departures_near(
+    # The index accounts for long GTFS offsets and DST anchors; do not prune
+    # its service dates before checking ambiguity (even the next day can match).
+    candidates = index.departures_near(
         entry.platform_ids, (line_name,), departure, window_s=30,
-    ) if d.service_date in days]
+    )
     if not candidates:
+        local_date = departure.astimezone(NYC_TZ).date()
+        if not any(index.covers(day) for day in (local_date, local_date - timedelta(days=1))):
+            return ValidationResult(reason="outside_coverage")
         return ValidationResult(reason="no_departure")
     # Do not let the arrival/headsign checks break ties between boardings.
     if len(candidates) != 1:

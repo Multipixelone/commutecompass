@@ -19,7 +19,8 @@ now=None) -> ImportStats``
     Raises ``AllowlistMismatchError`` when an allowlist parent/platform is
     missing, misnamed or further than ``max_coord_distance_m`` from the
     vendored coordinates, and ``FeedError`` for a broken/unusable feed.
-    Trips that visit any stop twice are rejected (not imported).
+    Any matched trip with repeated stops/sequences or malformed times rejects
+    the entire import: dropping it could create a false unique boarding.
 
 ``refresh(db_path, *, allowlist=None, fetch=None, tmp_dir=None, now=None)
 -> ImportStats``
@@ -41,8 +42,8 @@ window_s=30) -> list[Departure]``
     Every stop event at one of ``platform_stop_ids`` on one of ``route_ids``
     whose absolute departure instant is within ``window_s`` of
     ``instant_utc`` (tz-aware) and whose service is active on its service
-    day.  Service days considered: the NYC local dates of the window ±1 day,
-    restricted to coverage.  Instants follow GTFS: seconds after "noon minus
+    day.  Contributing service days are bounded by the indexed departure
+    offsets and feed coverage.  Instants follow GTFS: seconds after "noon minus
     12h" of the service day (:func:`service_instant`), so ≥24:00:00 times and
     DST days are exact; all comparisons are in UTC.  Sorted by instant.
 ``GtfsIndex.trip_stops(trip_id) -> list[TripStop]`` — full stop sequence
@@ -92,7 +93,8 @@ FEED_URLS: tuple[tuple[FeedKind, str], ...] = (
     ("regular", REGULAR_URL),
 )
 
-SCHEMA_VERSION = 1
+# Version 1 could silently drop matched trips, making uniqueness unsafe.
+SCHEMA_VERSION = 2
 MAX_INDEX_AGE = timedelta(days=8)
 # Tolerate small clock skew between the refresh host and readers.
 _FUTURE_SKEW = timedelta(minutes=5)
@@ -601,11 +603,13 @@ def _build(
         if batch:
             conn.executemany("INSERT INTO gtfs_stop_time VALUES (?,?,?,?,?)", batch)
         if rejected:
-            _logger.warning("gtfs import: rejected %d trips (repeated stop or bad time)", len(rejected))
-            conn.executemany(
-                "DELETE FROM gtfs_stop_time WHERE trip_id = ?", [(t,) for t in rejected]
+            # A valid prefix may still rival another boarding. Removing these
+            # trips would make an incomplete candidate inventory look unique.
+            raise FeedError(
+                f"incomplete matched trip inventory: {len(rejected)} trips have "
+                "repeated stops/sequences or bad times"
             )
-        kept = matched - rejected
+        kept = matched
         if not kept:
             raise FeedError("no allowlisted trips in feed")
         conn.executemany(
@@ -843,10 +847,6 @@ class GtfsIndex:
             return []
         target = instant_utc.astimezone(UTC)
         lo, hi = target - timedelta(seconds=window_s), target + timedelta(seconds=window_s)
-        first = lo.astimezone(NYC_TZ).date() - timedelta(days=1)
-        last = hi.astimezone(NYC_TZ).date()
-        candidates = [first + timedelta(days=i) for i in range((last - first).days + 1)]
-
         out: list[Departure] = []
         p_marks = ",".join("?" * len(platforms))
         r_marks = ",".join("?" * len(routes))
@@ -857,10 +857,25 @@ class GtfsIndex:
             f" WHERE st.stop_id IN ({p_marks}) AND t.route_id IN ({r_marks})"
             " AND st.departure_s BETWEEN ? AND ?"
         )
+        # Bound possible anchors using actual offsets, not a fixed number of
+        # local days. GTFS offsets can exceed 48h, and spring-forward's anchor
+        # can lie on the previous local date. Adding 12h recovers local noon
+        # (and hence the service date), even across an offset transition.
+        bounds = self._conn.execute(
+            "SELECT MIN(st.departure_s), MAX(st.departure_s)"
+            " FROM gtfs_stop_time st JOIN gtfs_trip t ON t.trip_id = st.trip_id"
+            f" WHERE st.stop_id IN ({p_marks}) AND t.route_id IN ({r_marks})",
+            [*platforms, *routes],
+        ).fetchone()
+        if bounds is None or bounds[0] is None:
+            return []
+        first_noon = lo - timedelta(seconds=int(bounds[1])) + timedelta(hours=12)
+        last_noon = hi - timedelta(seconds=int(bounds[0])) + timedelta(hours=12)
+        first = max(first_noon.astimezone(NYC_TZ).date(), self._info.coverage_start)
+        last = min(last_noon.astimezone(NYC_TZ).date(), self._info.coverage_end)
         active: dict[tuple[str, date], bool] = {}
-        for service_date in candidates:
-            if not self.covers(service_date):
-                continue
+        for i in range((last - first).days + 1):
+            service_date = first + timedelta(days=i)
             anchor = service_instant(service_date, 0)
             lo_s = int((lo - anchor).total_seconds())
             hi_s = int((hi - anchor).total_seconds()) + 1

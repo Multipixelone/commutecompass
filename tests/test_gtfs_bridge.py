@@ -12,7 +12,7 @@ import pytest
 from bridge_helpers import BOARDING, DAY, NOW, TRIP, build_index, open_index, transit_step
 from commutecompass.gtfs_allowlist import load_allowlist
 from commutecompass.gtfs_bridge import RejectionReason, validate_leg
-from commutecompass.gtfs_index import GtfsIndex, service_instant
+from commutecompass.gtfs_index import FeedError, GtfsIndex, service_instant
 from commutecompass.models import TransitLeg
 from commutecompass.routing import _parse_step
 from commutecompass.timeutil import NYC_TZ
@@ -28,6 +28,63 @@ def parsed(step: dict[str, Any]) -> TransitLeg:
     leg = _parse_step(step, NYC_TZ)
     assert leg is not None
     return leg
+
+
+@pytest.mark.parametrize("rival", [False, True])
+def test_spring_forward_next_service_day_is_not_filtered(tmp_path: Path, rival: bool) -> None:
+    sunday = date(2027, 3, 14)
+    departure = service_instant(sunday, 30 * 60)
+    assert departure.astimezone(NYC_TZ).date() == sunday - timedelta(days=1)
+    now = departure - timedelta(minutes=15)
+    files = {
+        "trips.txt": "route_id,trip_id,service_id,direction_id,shape_id\n"
+        f"A,{TRIP},Sunday,0,A..N\n",
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        f"{TRIP},A48N,00:30:00,00:30:00,10\n"
+        f"{TRIP},A47N,00:32:00,00:32:00,11\n",
+        "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,"
+        "start_date,end_date\nSunday,0,0,0,0,0,0,1,20270314,20270314\n"
+        "Saturday,0,0,0,0,0,1,0,20270313,20270313\n",
+    }
+    if rival:
+        files["trips.txt"] += "A,SA_141000_A..N,Saturday,0,A..N\n"
+        files["stop_times.txt"] += (
+            "SA_141000_A..N,A48N,23:30:00,23:30:00,10\n"
+            "SA_141000_A..N,A47N,23:32:00,23:32:00,11\n"
+        )
+    step = transit_step(departure)
+    with open_index(build_index(tmp_path / "gtfs.db", now=now, files=files), now=now) as idx:
+        result = validate_leg(parsed(step), step, idx, now=now)
+    if rival:
+        assert result.reason == "ambiguous_departure" and result.leg is None
+    else:
+        assert result.reason is None and result.leg is not None
+        assert result.leg.gtfs_start_date == "20270314"
+
+
+@pytest.mark.parametrize("late_row", [
+    "A48N,08:34:00,08:34:00,12",
+    "A48S,invalid,08:34:00,12",
+])
+def test_invalid_later_rival_stop_cannot_create_unique_boarding(
+    tmp_path: Path, late_row: str,
+) -> None:
+    path = build_index(tmp_path / "gtfs.db")
+    original = path.read_bytes()
+    rival = "WK_050801_A..N"
+    files = {
+        "trips.txt": "route_id,trip_id,service_id,direction_id,shape_id\n"
+        f"A,{TRIP},Weekday,0,A..N\nA,{rival},Weekday,0,A..N\n",
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        f"{TRIP},A48N,08:30:00,08:30:00,10\n"
+        f"{TRIP},A47N,08:32:00,08:32:00,11\n"
+        f"{rival},A48N,08:30:00,08:30:00,10\n"
+        f"{rival},A47N,08:32:00,08:32:00,11\n"
+        f"{rival},{late_row}\n",
+    }
+    with pytest.raises(FeedError, match="incomplete matched trip inventory"):
+        build_index(path, files=files)
+    assert path.read_bytes() == original
 
 
 def test_success_and_static_departure_anchor(index: GtfsIndex) -> None:
@@ -75,6 +132,7 @@ def test_rejection_reasons(index: GtfsIndex, reason: RejectionReason) -> None:
         patches.append(patch("commutecompass.gtfs_bridge.load_allowlist", return_value=(entry, entry)))
     elif reason == "outside_coverage":
         patches.append(patch.object(index, "covers", return_value=False))
+        patches.append(patch.object(index, "departures_near", return_value=[]))
     elif reason == "no_departure":
         patches.append(patch.object(index, "departures_near", return_value=[]))
     elif reason == "ambiguous_departure":

@@ -91,9 +91,6 @@ TRIPS: list[tuple[str, str, str, int, str, list[tuple[str, str]]]] = [
      [("A49N", "09:58:00"), ("A48N", "10:00:00"), ("A47N", "10:02:00")]),
     ("L1S7-A_060000_A..N", "A", "L1S7", 0, "A..N",
      [("A49N", "09:58:00"), ("A47N", "10:02:00")]),
-    # Revisits A48N → rejected.
-    ("WK_060000_C..N", "C", "Weekday", 0, "C..N",
-     [("A48N", "10:00:00"), ("A47N", "10:02:00"), ("A48N", "10:04:00")]),
     # Not an allowlisted route at A48 → not imported.
     ("WK_060000_E..N", "E", "Weekday", 0, "E..N",
      [("A48N", "10:00:00"), ("A47N", "10:02:00")]),
@@ -140,6 +137,33 @@ def _open_at(tmp_path: Path, when: datetime) -> GtfsIndex:
 # ─────────── Pure helpers ───────────
 
 
+def test_departures_include_all_offset_bounded_service_days(tmp_path: Path) -> None:
+    saturday = date(2027, 3, 13)
+    sunday = date(2027, 3, 14)
+    target = service_instant(sunday, 30 * 60)
+    assert target == _nyc(2027, 3, 13, 23, 30).astimezone(UTC)
+    archive = _build_zip(tmp_path / "feed.zip", extra={
+        "trips.txt": "route_id,trip_id,service_id,direction_id,shape_id\n"
+        "A,SA_141000_A..N,Saturday,0,A..N\n"
+        "A,SU_003000_A..N,Sunday,0,A..N\n"
+        "A,WK_429000_A..N,Weekday,0,A..N\n",
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        "SA_141000_A..N,A48N,23:30:00,23:30:00,1\n"
+        "SU_003000_A..N,A48N,00:30:00,00:30:00,1\n"
+        "WK_429000_A..N,A48N,71:30:00,71:30:00,1\n",
+    })
+    db = tmp_path / "gtfs.db"
+    import_feed(archive, db, feed_kind="regular", allowlist=[ENTRY], now=target)
+    with GtfsIndex.open(db, now=target) as index:  # type: ignore[union-attr]
+        departures = index.departures_near(PLATFORMS, ("A",), target)
+        assert {(d.trip_id, d.service_date) for d in departures} == {
+            ("SA_141000_A..N", saturday),
+            ("SU_003000_A..N", sunday),
+            ("WK_429000_A..N", date(2027, 3, 11)),
+        }
+        assert all(d.departure_utc == target for d in departures)
+
+
 def test_parse_gtfs_time() -> None:
     assert parse_gtfs_time("00:00:00") == 0
     assert parse_gtfs_time("25:30:00") == 25 * 3600 + 1800
@@ -178,6 +202,39 @@ def test_service_instant_dst_anchor() -> None:
 # ─────────── Import ───────────
 
 
+@pytest.mark.parametrize("late_row", [
+    "RIVAL_049301_A..N,A48N,08:34:00,08:34:00,4",  # repeated boarding
+    "RIVAL_049301_A..N,A49N,broken,08:34:00,4",  # bad time after valid prefix
+    "RIVAL_049301_A..N,A49N,08:34:00,08:34:00,2",  # repeated sequence
+])
+def test_incomplete_rival_inventory_rejects_import_atomically(
+    tmp_path: Path, late_row: str,
+) -> None:
+    now = _nyc(2026, 10, 30, 8, 0)
+    archive = _build_zip(tmp_path / "feed.zip")
+    db = tmp_path / "gtfs.db"
+    import_feed(archive, db, feed_kind="regular", allowlist=[ENTRY], now=now)
+    original = db.read_bytes()
+    # Both trips have valid boarding/alighting prefixes at the same instant.
+    # A later invalid stop must not silently make the first trip unique.
+    archive = _build_zip(tmp_path / "rival.zip", extra={
+        "trips.txt": "route_id,trip_id,service_id,direction_id,shape_id\n"
+        "A,WK_049300_A..N,Weekday,0,A..N\nA,RIVAL_049301_A..N,Weekday,0,A..N\n",
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        "WK_049300_A..N,A48N,08:30:00,08:30:00,1\n"
+        "WK_049300_A..N,A47N,08:32:00,08:32:00,2\n"
+        "RIVAL_049301_A..N,A48N,08:30:00,08:30:00,1\n"
+        "RIVAL_049301_A..N,A47N,08:32:00,08:32:00,2\n" + late_row + "\n",
+    })
+    with pytest.raises(FeedError, match="incomplete matched trip inventory"):
+        import_feed(archive, db, feed_kind="supplemented", allowlist=[ENTRY], now=now)
+    assert db.read_bytes() == original
+    assert not list(tmp_path.glob(".gtfs.db.*.tmp"))
+    with GtfsIndex.open(db, now=now) as index:  # type: ignore[union-attr]
+        assert index.feed_info().feed_kind == "regular"
+        assert index.departures_near(PLATFORMS, ("A",), _nyc(2026, 10, 30, 8, 30))
+
+
 def test_import_filters_and_records_metadata(tmp_path: Path) -> None:
     now = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
     zip_path = _build_zip(tmp_path / "feed.zip")
@@ -191,15 +248,14 @@ def test_import_filters_and_records_metadata(tmp_path: Path) -> None:
     # Coverage comes from service data (10-24 calendar start), not feed_info.
     assert stats.coverage_start == date(2026, 10, 24)
     assert stats.coverage_end == date(2027, 3, 31)
-    assert stats.rejected_trips == 1
-    assert stats.trips == 7  # 10 trips − E route − L1S7 (no A48) − revisit
+    assert stats.rejected_trips == 0
+    assert stats.trips == 7  # 9 trips − E route − L1S7 (no A48)
 
     with GtfsIndex.open(tmp_path / "gtfs.db", now=now) as index:  # type: ignore[union-attr]
         info = index.feed_info()
         assert info.imported_at == now
         assert info.source_url == "https://example/feed.zip"
         assert info.feed_sha256 == stats.feed_sha256
-        assert index.trip_stops("WK_060000_C..N") == []  # revisit rejected
         assert index.trip_stops("WK_060000_E..N") == []  # wrong route
         stops = index.trip_stops("WK_049300_A..N")
         assert [s.stop_id for s in stops] == ["A49N", "A48N", "A47N"]
@@ -364,6 +420,18 @@ def test_open_missing_and_corrupt(tmp_path: Path) -> None:
     assert GtfsIndex.open(empty) is None
 
 
+def test_open_rejects_old_incomplete_inventory_schema(tmp_path: Path) -> None:
+    import sqlite3
+
+    now = _nyc(2026, 10, 30, 8, 0)
+    db = tmp_path / "gtfs.db"
+    import_feed(_build_zip(tmp_path / "feed.zip"), db,
+                feed_kind="regular", allowlist=[ENTRY], now=now)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE gtfs_meta SET value = '1' WHERE key = 'schema_version'")
+    assert GtfsIndex.open(db, now=now) is None
+
+
 def test_open_stale_future_and_out_of_coverage(tmp_path: Path) -> None:
     imported = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
     db = tmp_path / "gtfs.db"
@@ -399,12 +467,19 @@ def test_refresh_prefers_supplemented(tmp_path: Path) -> None:
     assert urls == ["https://rrgtfsfeeds.s3.amazonaws.com/gtfs_supplemented.zip"]
 
 
-def test_refresh_falls_back_to_regular(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_inventory", [False, True])
+def test_refresh_falls_back_to_regular(tmp_path: Path, invalid_inventory: bool) -> None:
     src = _build_zip(tmp_path / "src.zip")
+    bad = _build_zip(tmp_path / "bad.zip", extra={
+        "stop_times.txt": "trip_id,stop_id,arrival_time,departure_time,stop_sequence\n"
+        "WK_049300_A..N,A48N,08:30:00,08:30:00,1\n"
+        "WK_049300_A..N,A47N,08:32:00,08:32:00,2\n"
+        "WK_049300_A..N,A48N,08:34:00,08:34:00,3\n",
+    })
 
     def fetch(url: str, dest: Path) -> None:
         if "supplemented" in url:
-            dest.write_bytes(b"truncated")  # validation failure, not download failure
+            dest.write_bytes(bad.read_bytes() if invalid_inventory else b"truncated")
         else:
             dest.write_bytes(src.read_bytes())
 
