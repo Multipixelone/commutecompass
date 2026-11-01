@@ -69,7 +69,9 @@ def nyct_feed(*, opposite: bool = False) -> Any:
 
 
 @pytest.mark.parametrize("case", ["matched", "missing_index", "bridge_exception", "opposite"])
-def test_directions_morning_through_nyct_poll(tmp_path: Path, case: str) -> None:
+def test_directions_morning_through_nyct_poll(
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = config_for(tmp_path)
     if case != "missing_index":
         build_index(Path(config.paths.gtfs_db_path), now=MORNING)
@@ -129,8 +131,13 @@ def test_directions_morning_through_nyct_poll(tmp_path: Path, case: str) -> None
     notifier.reset_mock()
     _feed_cache.clear()
     feed = nyct_feed(opposite=case == "opposite")
+    # No HTTP occurs below, so TLS/proxy setup must not depend on the host or
+    # Nix sandbox. An absent CA file guards against accidentally restoring a
+    # real client: construction would fail before the mocked feed fetch runs.
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-ca.pem"))
     try:
         with (
+            patch("commutecompass.realtime.httpx.Client") as realtime_client,
             patch("commutecompass.realtime.fetch_feed_message", return_value=feed) as fetched,
             patch("commutecompass.timeutil.now_nyc", return_value=POLL),
             patch.object(store, "claim_ping_entry", wraps=store.claim_ping_entry) as claim,
@@ -139,7 +146,11 @@ def test_directions_morning_through_nyct_poll(tmp_path: Path, case: str) -> None
                      fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     finally:
         _feed_cache.clear()
-    fetched.assert_called_once()
+    fetched.assert_called_once_with(
+        config.realtime.subway_tripupdate_urls[0],
+        boarding.system,
+        realtime_client.return_value.__enter__.return_value,
+    )
     saved = store.get_plan(event.id)
     assert saved is not None and saved.route == original.route
     if case == "matched":
