@@ -437,3 +437,32 @@ def test_daemon_restores_audio_on_exit(tmp_path: Path) -> None:
     assert player.events[0] == "start"
     assert player.events[-1] == "stop"
     assert published[-1] == "idle"
+
+
+def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
+    class BrokenPlayer(FakePlayer):
+        def start(self) -> None:
+            raise RuntimeError("sink missing")
+
+    beats: list[Any] = []
+    player = BrokenPlayer()
+    daemon = AlarmDaemon(
+        reader=lambda: inp(), player=player,
+        cache=AlarmCache(tmp_path / "c.json"), settings=S,
+        heartbeat=_recorder(beats), clock=lambda: at(0),
+    )
+    daemon.run_once()
+    assert beats == []
+    assert "stop" in player.events
+
+
+def test_snooze_across_dst_uses_elapsed_minutes() -> None:
+    from datetime import UTC
+
+    start = datetime(2026, 11, 1, 1, 55, tzinfo=NYC_TZ)
+    pressed = datetime(2026, 11, 1, 1, 56, tzinfo=NYC_TZ)
+    st, _ = step(DaemonState(), start, inp(start), S)
+    st, _ = step(st, pressed, inp(start, snooze_pressed_at=pressed), S)
+    assert st.snooze_until is not None
+    assert st.snooze_until.astimezone(UTC) - pressed.astimezone(UTC) == timedelta(minutes=9)
+    assert st.snooze_until.fold == 1

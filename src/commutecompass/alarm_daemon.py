@@ -286,9 +286,12 @@ def step(
             state = replace(state, mode="idle", active=None, ring_started=None, snoozes=0)
         elif _after(inputs.snooze_pressed_at, state.ring_started) and state.snoozes < settings.max_snoozes:
             actions += [StopRing("snooze"), PublishState("snoozed")]
-            state = replace(state, mode="snoozed", snooze_until=now + settings.snooze,
+            state = replace(state, mode="snoozed",
+                            snooze_until=(now.astimezone(UTC) + settings.snooze).astimezone(now.tzinfo),
                             snoozes=state.snoozes + 1)
-        elif state.ring_started is not None and _le(state.ring_started + settings.max_ring, now):
+        elif state.ring_started is not None and (
+            now.astimezone(UTC) - state.ring_started.astimezone(UTC) >= settings.max_ring
+        ):
             actions += [StopRing("timeout"), PublishState("idle")]
             state = replace(state, mode="idle", active=None, ring_started=None, snoozes=0)
     elif state.mode == "snoozed":
@@ -404,15 +407,23 @@ class PipeWirePlayer:
         *,
         run: Runner = _default_run,
         popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+        initial_volume: float = 0.3,
     ) -> None:
         self._sink = sink
         self._sound = sound
-        self._run = run
+        self._runner = run
         self._popen = popen
+        self._initial_volume = max(0.0, min(1.0, initial_volume))
         self._node: Optional[tuple[int, str]] = None
         self._saved: Optional[tuple[float, bool]] = None
         self._proc: Optional["subprocess.Popen[bytes]"] = None
         self._volume: Optional[float] = None
+
+    def _run(self, args: list[str]) -> "subprocess.CompletedProcess[str]":
+        result = self._runner(args)
+        if result.returncode != 0:
+            raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr[:200]}")
+        return result
 
     def _resolve(self) -> Optional[tuple[int, str]]:
         res = self._run(["pw-dump"])
@@ -421,7 +432,7 @@ class PipeWirePlayer:
         except ValueError:
             node = None
         if node is None:
-            logger.error("alarm daemon: no PipeWire sink matching %r — using default", self._sink)
+            raise RuntimeError(f"no PipeWire Audio/Sink matching {self._sink!r}")
         return node
 
     def _target(self) -> str:
@@ -438,13 +449,11 @@ class PipeWirePlayer:
         self.stop()
         self._node = self._resolve()
         target = self._target()
-        try:
-            self._saved = parse_wpctl_volume(self._run(["wpctl", "get-volume", target]).stdout or "")
-        except ValueError as exc:
-            logger.warning("alarm daemon: could not save volume: %s", exc)
-            self._saved = None
+        # Refuse to change audio without a restorable snapshot.
+        self._saved = parse_wpctl_volume(self._run(["wpctl", "get-volume", target]).stdout or "")
+        self._run(["wpctl", "set-volume", target, f"{self._initial_volume:.2f}"])
+        self._volume = self._initial_volume
         self._run(["wpctl", "set-mute", target, "0"])
-        self._volume = None
         self._spawn()
 
     def tick(self, volume: float) -> None:
@@ -528,6 +537,7 @@ class AlarmDaemon:
     state: DaemonState = field(default_factory=DaemonState)
     _running: bool = True
     _last_heartbeat: Optional[datetime] = None
+    _audio_healthy: bool = True
 
     def __post_init__(self) -> None:
         self.state = self.cache.load()
@@ -538,16 +548,23 @@ class AlarmDaemon:
         inputs = self.reader()
         before = self.state
         self.state, actions = step(self.state, now, inputs, self.settings)
-        for action in actions:
-            self._apply(action)
-        if self.state.mode == "ringing" and self.state.ring_started is not None:
-            self.player.tick(ramp_fraction(now - self.state.ring_started,
-                                           self.ramp_start_percent, self.ramp_seconds))
+        # Persist the claim before starting audio, so an abrupt restart cannot
+        # ring the same instant again.
         if (before.pending, before.pending_kind, before.done) != (
             self.state.pending, self.state.pending_kind, self.state.done
         ):
             self.cache.save(self.state)
-        if inputs.ha_ok and (
+        for action in actions:
+            self._apply(action)
+        if self.state.mode == "ringing" and self.state.ring_started is not None:
+            try:
+                elapsed = now.astimezone(UTC) - self.state.ring_started.astimezone(UTC)
+                self.player.tick(ramp_fraction(elapsed, self.ramp_start_percent, self.ramp_seconds))
+            except Exception as exc:  # noqa: BLE001 — let HA's dead-man fallback fire
+                self._audio_healthy = False
+                logger.error("alarm daemon: audio tick failed: %s", exc)
+                self._stop_audio()
+        if inputs.ha_ok and self._audio_healthy and (
             self._last_heartbeat is None
             or (now - self._last_heartbeat).total_seconds() >= self.poll_seconds
         ):
@@ -560,8 +577,11 @@ class AlarmDaemon:
             logger.info("alarm daemon: ringing for %s alarm at %s", action.kind or "?", action.instant.isoformat())
             try:
                 self.player.start()
+                self._audio_healthy = True
             except Exception as exc:  # noqa: BLE001 — keep polling; HA fallback alerts
+                self._audio_healthy = False
                 logger.error("alarm daemon: audio start failed: %s", exc)
+                self._stop_audio()
         elif isinstance(action, StopRing):
             logger.info("alarm daemon: stopping (%s)", action.reason)
             self._stop_audio()
@@ -617,7 +637,7 @@ def build_daemon(config: "Config") -> AlarmDaemon:
 
     return AlarmDaemon(
         reader=HAReader(base_url, token, cfg).read,
-        player=PipeWirePlayer(cfg.sink, sound),
+        player=PipeWirePlayer(cfg.sink, sound, initial_volume=cfg.ramp_start_percent / 100),
         cache=AlarmCache(cache_path),
         settings=Settings.from_config(cfg),
         ramp_start_percent=cfg.ramp_start_percent,
