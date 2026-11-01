@@ -20,3 +20,4 @@ build/
 *.db-journal
 /.pre-commit-config.yaml
 .claude/settings.local.json
+.slim/deepwork/
