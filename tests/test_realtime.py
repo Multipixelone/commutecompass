@@ -618,9 +618,9 @@ def nyct_extension(*, assigned: bool | None = True, direction: int | None = None
 def nyct_entity(
     feed: Any, *, trip: str = NYCT_TRIP, stop: str = "R20S", late: int = 360,
     departure: bool = True, arrival: bool = False, extension: bytes | None = None,
-    direction_id: int | None = 0,
+    direction_id: int | None = 0, standard_fields: bool = False,
 ) -> None:
-    """Append a production-shaped NYCT trip update: no stop_sequence, no delay."""
+    """Append a NYCT update, optionally including standard sequence/delay fields."""
     entity = feed.entity.add()
     entity.id = trip
     tu = entity.trip_update
@@ -635,11 +635,17 @@ def nyct_entity(
     tu.timestamp = int(NOW.timestamp())
     stu = tu.stop_time_update.add()
     stu.stop_id = stop
+    if standard_fields:
+        stu.stop_sequence = 10
     at = int((SCHED + timedelta(seconds=late)).timestamp())
     if departure:
         stu.departure.time = at
+        if standard_fields:
+            stu.departure.delay = late
     if arrival:
         stu.arrival.time = at
+        if standard_fields:
+            stu.arrival.delay = late
 
 
 def nyct_feed(**entity: Any) -> Any:
@@ -734,35 +740,85 @@ def test_nyct_opposite_direction_late_does_not_pollute_on_time_match() -> None:
     assert nyct_observe(feed)[:3] == (0, None, "observed")
 
 
+@pytest.mark.parametrize("standard_fields", [False, True])
 @pytest.mark.parametrize("assigned", [False, None])
-def test_nyct_unassigned_trip_is_unmatched(assigned: bool | None) -> None:
-    feed = nyct_feed(extension=nyct_extension(assigned=assigned, direction=3))
+def test_nyct_unassigned_trip_is_unmatched(assigned: bool | None, standard_fields: bool) -> None:
+    feed = nyct_feed(extension=nyct_extension(assigned=assigned, direction=3),
+                     standard_fields=standard_fields, direction_id=1)
     result = nyct_observe(feed)
     assert (result.minutes, result.status) == (0, "unmatched")
     assert result.detail == "NYCT trip is not assigned to a train"
 
 
-def test_nyct_missing_extension_is_unmatched() -> None:
-    assert nyct_observe(nyct_feed(extension=b"")).status == "unmatched"
+@pytest.mark.parametrize("standard_fields", [False, True])
+def test_nyct_missing_extension_is_unmatched(standard_fields: bool) -> None:
+    assert nyct_observe(nyct_feed(extension=b"", standard_fields=standard_fields,
+                                  direction_id=1)).status == "unmatched"
 
 
-@pytest.mark.parametrize("direction", [1, 2, 4])
-def test_nyct_extension_direction_disagreement_rejects(direction: int) -> None:
-    result = nyct_observe(nyct_feed(extension=nyct_extension(direction=direction)))
+@pytest.mark.parametrize("standard_fields", [False, True])
+@pytest.mark.parametrize("shape,static_direction,extension_direction", [
+    ("S", 1, 1), ("N", 0, 3),  # NORTH/SOUTH contradictions in both directions
+    ("S", 1, 2), ("S", 1, 4), ("N", 0, 2), ("N", 0, 4),  # EAST/WEST vetoes
+])
+def test_nyct_extension_direction_disagreement_rejects(
+    shape: str, static_direction: int, extension_direction: int, standard_fields: bool,
+) -> None:
+    trip, stop = f"087600_N..{shape}36R", f"R20{shape}"
+    route = nyct_route(gtfs_trip_id=trip, gtfs_boarding_stop_id=stop,
+                       gtfs_direction_id=static_direction)
+    feed = nyct_feed(trip=trip, stop=stop, direction_id=static_direction,
+                     extension=nyct_extension(direction=extension_direction),
+                     standard_fields=standard_fields)
+    result = nyct_observe(feed, route)
     assert (result.minutes, result.status) == (0, "unmatched")
 
 
-def test_nyct_platform_suffix_disagreeing_with_shape_rejects() -> None:
+@pytest.mark.parametrize("standard_fields", [False, True])
+def test_nyct_malformed_extension_rejects(standard_fields: bool) -> None:
+    # Valid protobuf envelope containing a truncated NYCT varint.
+    extension = _varint(1001 << 3 | 2) + b"\x01\x80"
+    feed = nyct_feed(extension=extension, standard_fields=standard_fields, direction_id=1)
+    assert nyct_observe(feed).status == "unmatched"
+
+
+@pytest.mark.parametrize("shape,static_direction", [("S", 1), ("N", 0)])
+def test_nyct_explicit_delay_with_correct_direction_matches(
+    shape: str, static_direction: int,
+) -> None:
+    trip, stop = f"087600_N..{shape}36R", f"R20{shape}"
+    route = nyct_route(gtfs_trip_id=trip, gtfs_boarding_stop_id=stop,
+                       gtfs_direction_id=static_direction)
+    feed = nyct_feed(trip=trip, stop=stop, direction_id=static_direction,
+                     extension=nyct_extension(direction=1 if shape == "N" else 3),
+                     standard_fields=True)
+    assert nyct_observe(feed, route)[:3] == (6, "Q running ~6 min late", "observed")
+
+
+@pytest.mark.parametrize("standard_fields", [False, True])
+def test_nyct_platform_suffix_disagreeing_with_shape_rejects(standard_fields: bool) -> None:
     route = nyct_route(gtfs_boarding_stop_id="R20N")
-    assert nyct_observe(nyct_feed(stop="R20N"), route).status == "unmatched"
+    feed = nyct_feed(stop="R20N", standard_fields=standard_fields, direction_id=1)
+    assert nyct_observe(feed, route).status == "unmatched"
 
 
-def test_nyct_missing_departure_time_falls_back_to_arrival_only() -> None:
-    no_times = nyct_feed(departure=False)
+def test_nyct_unparseable_shape_with_standard_fields_rejects() -> None:
+    trip = "087600_N..X36R"
+    feed = nyct_feed(trip=trip, standard_fields=True, direction_id=1)
+    assert nyct_observe(feed, nyct_route(gtfs_trip_id=trip)).status == "unmatched"
+
+
+@pytest.mark.parametrize("standard_fields", [False, True])
+def test_nyct_missing_departure_time_never_uses_arrival(standard_fields: bool) -> None:
+    no_times = nyct_feed(departure=False, standard_fields=standard_fields, direction_id=1)
     result = nyct_observe(no_times)
     assert (result.minutes, result.status) == (0, "unmatched")
-    arrival_only = nyct_feed(departure=False, arrival=True, late=420)
-    assert nyct_observe(arrival_only)[:3] == (7, "Q running ~7 min late", "observed")
+    arrival_only = nyct_feed(departure=False, arrival=True, late=420,
+                             standard_fields=standard_fields, direction_id=1)
+    result = nyct_observe(arrival_only)
+    assert (result.minutes, result.status) == (0, "unmatched")
+    prediction = result_for(serialized(arrival_only)).predictions["R20S"][0]
+    assert nyct_derived_delay(prediction, nyct_route().legs[0]) is None
 
 
 def test_nyct_trip_or_date_mismatch_never_matches() -> None:
@@ -789,6 +845,31 @@ def test_nyct_duplicate_boarding_updates_reject() -> None:
     assert nyct_observe(feed).status == "unmatched"
 
 
+@pytest.mark.parametrize("standard_fields", [False, True])
+@pytest.mark.parametrize("kind", ["cancelled", "trip_cancelled", "skipped"])
+@pytest.mark.parametrize("extension,valid", [
+    (nyct_extension(direction=3), True),
+    (nyct_extension(assigned=False, direction=3), True),
+    (nyct_extension(direction=1), False),
+    (nyct_extension(direction=2), False),
+    (nyct_extension(direction=4), False),
+    (_varint(1001 << 3 | 2) + b"\x01\x80", False),
+])
+def test_nyct_cancel_skip_respects_direction_veto(
+    standard_fields: bool, kind: str, extension: bytes, valid: bool,
+) -> None:
+    feed = nyct_feed(standard_fields=standard_fields, direction_id=1, extension=extension)
+    tu = feed.entity[0].trip_update
+    if kind == "skipped":
+        tu.stop_time_update[0].schedule_relationship = 1
+    else:
+        tu.trip.schedule_relationship = 3
+        if kind == "trip_cancelled":
+            tu.ClearField("stop_time_update")
+    expected = "skipped" if kind == "skipped" else "cancelled"
+    assert nyct_observe(feed).status == (expected if valid else "unmatched")
+
+
 def test_nyct_cancel_skip_and_stale_semantics_unchanged() -> None:
     cancelled = nyct_feed()
     cancelled.entity[0].trip_update.trip.schedule_relationship = 3
@@ -811,6 +892,19 @@ def test_nyct_partial_feed_failure_is_reported() -> None:
     delay = realtime_delay(nyct_route(), SCHED, RealtimeConfig(enabled=True),
                            fetcher=lambda urls, system: result, clock=lambda: NOW)
     assert (delay.minutes, delay.status, delay.feed_failed) == (6, "observed", True)
+
+
+def test_non_subway_generic_matching_ignores_nyct_extension_veto() -> None:
+    route = nyct_route(system="LIRR", line="Babylon", departure_stop="Atlantic Terminal")
+    feed = serialized(nyct_feed(standard_fields=True, direction_id=1,
+                                extension=nyct_extension(assigned=False, direction=1)))
+    predictions: Predictions = {}
+    usable = _accumulate(feed, predictions, "LIRR", now=NOW)
+    delay = realtime_delay(
+        route, SCHED, RealtimeConfig(enabled=True), clock=lambda: NOW,
+        fetcher=lambda urls, system: FetchResult(predictions, usable_feeds=int(usable)),
+    )
+    assert delay[:3] == (6, "Babylon running ~6 min late", "observed")
 
 
 def test_non_subway_feeds_ignore_nyct_adapter() -> None:

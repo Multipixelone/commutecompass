@@ -223,7 +223,14 @@ def _compute(
                 departures.append(pred.departure)
             # Exact trip instance + directional platform/sequence context is
             # required. Names, nearest departures and headsigns prove nothing.
-            if _same_boarding(pred, leg) or _nyct_same_boarding(pred, leg):
+            # NYCT identity checks are authoritative even when the producer
+            # also supplies standard fields. Never let the generic matcher
+            # override a shape/platform/extension direction veto.
+            matches = (
+                _nyct_same_boarding(pred, leg)
+                if _is_nyct_prediction(pred, system) else _same_boarding(pred, leg)
+            )
+            if matches:
                 candidates.append(pred)
 
     # ZoneInfo equality/hash/order ignore fold when tzinfo is shared.
@@ -249,9 +256,9 @@ def _compute(
     # D4: an unassigned NYCT trip's prediction is just the schedule.
     if pred.nyct is not None and (pred.nyct.malformed or not pred.nyct.is_assigned):
         return RealtimeDelay(0, None, "unmatched", "NYCT trip is not assigned to a train", **common)
-    # Feeds that supply an explicit delay keep the standard path; the NYCT
-    # adapter only derives one when the producer omitted it.
-    if not (pred.delay is None and _nyct_same_boarding(pred, leg)):
+    # Generic feeds require an explicit delay. NYCT always requires assigned
+    # departure evidence, cross-checking any explicit delay against the schedule.
+    if not _is_nyct_prediction(pred, system):
         if pred.departure is None or pred.delay is None:
             return RealtimeDelay(0, None, "unmatched", "departure time and explicit delay required", **common)
         # Explicit delay provides a scheduled timestamp, not a nearest-event guess.
@@ -329,6 +336,12 @@ def nyct_trip_direction(trip_id: str) -> Optional[Literal["N", "S"]]:
     return "N" if match.group(1) == "N" else "S"
 
 
+def _is_nyct_prediction(pred: Prediction, system: str) -> bool:
+    return system == "MTA Subway" and (
+        pred.nyct is not None or nyct_trip_direction(pred.trip_id) is not None
+    )
+
+
 def _nyct_direction_agrees(pred: Prediction, leg: TransitLeg) -> bool:
     """Shape, platform suffix, extension (if present) and leg must all agree.
 
@@ -350,7 +363,7 @@ def _nyct_direction_agrees(pred: Prediction, leg: TransitLeg) -> bool:
 
 
 def _nyct_same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
-    """Exact trip/date/route/platform match for NYCT feeds lacking sequence/delay."""
+    """Authoritative trip/date/route/platform match for all NYCT observations."""
     if leg.system != "MTA Subway" or not _has_bridge_provenance(leg):
         return False
     if not (
@@ -378,16 +391,16 @@ def _nyct_same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
 def nyct_derived_delay(pred: Prediction, leg: TransitLeg) -> Optional[int]:
     """Boarding delay in UTC seconds for a matched, assigned NYCT trip, else None.
 
-    The leg's ``depart_at`` is the bridge-validated static departure. Uses the
-    predicted departure, or the arrival when departure is absent. None for an
-    unassigned or extension-less trip (D4), no predicted time, or a producer
-    delay that contradicts the derived value.
+    The leg's ``depart_at`` is the bridge-validated static departure. Arrival-only
+    predictions are ineligible: no static arrival/departure equality is persisted.
+    None for an unassigned or extension-less trip (D4), no predicted departure,
+    or a producer delay that contradicts the derived value.
     """
     if not _nyct_same_boarding(pred, leg):
         return None
     if pred.nyct is None or pred.nyct.malformed or not pred.nyct.is_assigned:
         return None
-    observed = pred.departure or pred.arrival
+    observed = pred.departure
     if observed is None:
         return None
     delay = int(round(observed.timestamp() - leg.depart_at.timestamp()))
