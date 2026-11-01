@@ -24,6 +24,7 @@ from commutecompass.config import (
 from commutecompass.models import (
     Alert,
     Event,
+    GtfsProvenance,
     PingEntry,
     Plan,
     Route,
@@ -48,6 +49,10 @@ def refresh_fixture(store: Store, now: datetime, *, leave_minutes: int = 30) -> 
         gtfs_trip_id="trip", gtfs_route_id="Q", gtfs_start_date=now.strftime("%Y%m%d"),
         gtfs_start_time="07:00:00", gtfs_direction_id=0,
         gtfs_boarding_stop_id="R20N", gtfs_boarding_stop_sequence=10,
+        gtfs_provenance=GtfsProvenance(
+            source="gtfs_bridge", feed_kind="supplemented", feed_version="test",
+            feed_sha256="0" * 64, validated_at=now,
+        ),
     )
     event = Event(id="refresh", calendar_id="cal", calendar_name="Test", title="Class",
                   start=boarding + timedelta(minutes=40), end=boarding + timedelta(hours=2))

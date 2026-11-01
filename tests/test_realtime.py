@@ -1,7 +1,7 @@
 """Offline serialized GTFS-RT regressions for fail-closed delay eligibility."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -10,7 +10,7 @@ import pytest
 from google.transit import gtfs_realtime_pb2 as gtfs  # type: ignore[import-untyped]
 
 from commutecompass.config import RealtimeConfig
-from commutecompass.models import Event, Plan, Route, TransitLeg
+from commutecompass.models import Event, GtfsProvenance, Plan, Route, TransitLeg
 from commutecompass.realtime import (
     FetchResult, Predictions, _accumulate, _cached_fetch, _feed_cache,
     _fetch_predictions, _match_stop_ids, _route_matches, realtime_delay,
@@ -20,6 +20,11 @@ from commutecompass.store import Store
 
 SCHED = datetime(2026, 5, 8, 8, tzinfo=NYC_TZ)
 NOW = SCHED - timedelta(minutes=10)
+# Identity is trusted only when the static GTFS bridge vouches for it.
+PROVENANCE = GtfsProvenance(
+    source="gtfs_bridge", feed_kind="supplemented", feed_version="20260508",
+    feed_sha256="0" * 64, validated_at=datetime(2026, 5, 8, 8, tzinfo=UTC),
+)
 
 
 def make_route(**overrides: Any) -> Route:
@@ -30,6 +35,7 @@ def make_route(**overrides: Any) -> Route:
         scheduled_departure_valid=True, gtfs_trip_id="A", gtfs_route_id="Q",
         gtfs_start_date="20260508", gtfs_start_time="07:30:00",
         gtfs_boarding_stop_id="R20N", gtfs_boarding_stop_sequence=10, gtfs_direction_id=0,
+        gtfs_provenance=PROVENANCE,
     )
     fields.update(overrides)
     leg = TransitLeg(**fields)
@@ -286,8 +292,40 @@ def test_arrival_only_is_information_not_boarding_delay() -> None:
     assert observe(feed).status == "unmatched"
 
 
+def test_full_identity_without_bridge_provenance_is_unmatched() -> None:
+    assert observe(feed_with()).status == "observed"
+    result = observe(feed_with(), make_route(gtfs_provenance=None))
+    assert (result.minutes, result.status) == (0, "unmatched")
+
+
+def test_legacy_json_identity_without_provenance_is_unmatched() -> None:
+    payload = make_route().model_dump(mode="json")
+    del payload["legs"][0]["gtfs_provenance"]
+    legacy = Route.model_validate(payload)
+    assert legacy.legs[0].gtfs_trip_id == "A"
+    result = observe(feed_with(), legacy)
+    assert (result.minutes, result.status) == (0, "unmatched")
+
+
+@pytest.mark.parametrize("flags", [
+    {"from_cache": True, "approximate": True}, {"from_cache": True}, {"approximate": True},
+])
+def test_cached_or_estimated_route_is_unmatched_even_with_provenance(
+    flags: dict[str, bool],
+) -> None:
+    route = make_route().model_copy(update=flags)
+
+    def no_fetch(urls: list[str], system: str) -> FetchResult:
+        pytest.fail("cached/estimated routes must not fetch realtime predictions")
+
+    result = realtime_delay(route, SCHED, RealtimeConfig(enabled=True),
+                            fetcher=no_fetch, clock=lambda: NOW)
+    assert (result.minutes, result.status) == (0, "unmatched")
+
+
 @pytest.mark.parametrize("fields", [
-    {"gtfs_trip_id": None}, {"gtfs_route_id": None}, {"gtfs_start_date": None},
+    {"gtfs_provenance": None}, {"gtfs_trip_id": None}, {"gtfs_route_id": None},
+    {"gtfs_start_date": None},
     {"gtfs_direction_id": None}, {"gtfs_boarding_stop_sequence": None},
     {"gtfs_start_date": "20260509"}, {"gtfs_start_time": "08:30:00"},
     {"gtfs_boarding_stop_sequence": 11}, {"gtfs_route_id": "R"},

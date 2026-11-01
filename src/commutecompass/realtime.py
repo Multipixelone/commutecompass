@@ -144,6 +144,10 @@ def _compute(
     # Only the first boarding leg is actionable by leaving earlier; downstream
     # delays are unavoidable and belong to the (deferred) reschedule case.
     leg = transit_legs[0]
+    # Cached/estimated routes never carry trusted identity (planner strips it);
+    # refuse them here too rather than relying on a stale start_date.
+    if route.from_cache or route.approximate:
+        return RealtimeDelay(0, None, "unmatched", "cached or estimated route has no boarding identity")
     if not leg.scheduled_departure_valid:
         return RealtimeDelay(0, None, "unmatched", "boarding schedule is untrusted")
     system = leg.system
@@ -230,8 +234,16 @@ def _compute(
     return RealtimeDelay(delay_minutes, f"{leg.line} running ~{delay_minutes} min late", "observed", **common)
 
 
+def _has_bridge_provenance(leg: TransitLeg) -> bool:
+    """True only for identity produced by the static GTFS bridge."""
+    provenance = leg.gtfs_provenance
+    return provenance is not None and provenance.source == "gtfs_bridge"
+
+
 def _same_boarding(pred: Prediction, leg: TransitLeg) -> bool:
     """Require independently validated identity; no name/headsign inference."""
+    if not _has_bridge_provenance(leg):
+        return False
     if not (
         leg.gtfs_trip_id and leg.gtfs_route_id and leg.gtfs_start_date
         and leg.gtfs_boarding_stop_id and leg.gtfs_boarding_stop_sequence is not None
