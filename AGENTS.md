@@ -126,6 +126,18 @@ commutecompass --config examples/config.toml tomorrow --dry-run
      `STDOUT_MSG_START` / `STDOUT_MSG_END` with a zero-width space.  If
      you add a new framing marker, also extend `_escape_stdout_delimiters`.
 
+8. **GTFS identity is bridge-only**
+   - Only `gtfs_bridge.validate_leg` may set `TransitLeg.gtfs_*` identity
+     and `gtfs_provenance`, and it sets both together or neither.  Realtime
+     matching requires provenance; cached and estimated routes are stripped.
+   - The bridge fails open: a missing, stale (>8 days) or corrupt `gtfs.db`,
+     an off-allowlist station, or any error means planning continues
+     without identity and the reason is logged.  Never let bridge errors
+     break routing, morning or poll.
+   - The allowlist is vendored in `data/gtfs_bridge_allowlist.toml`; `gtfs-refresh` (04:30
+     NYC timer) rebuilds `paths.gtfs_db_path` from the supplemented feed,
+     falling back to the regular feed.  See `docs/realtime-identity-bridge.md`.
+
 ## Code style expectations
 
 - Python: type hints required; keep mypy strict-compatible.

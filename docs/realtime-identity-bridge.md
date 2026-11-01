@@ -77,7 +77,8 @@ Serialization: add one optional nested model to `TransitLeg`:
 ```
 gtfs_provenance: Optional[GtfsProvenance] = None
 class GtfsProvenance(BaseModel):
-    source: Literal["static_gtfs_bridge_v1"]
+    source: Literal["gtfs_bridge"]
+    feed_kind: Literal["supplemented", "regular"]  # which static feed was imported
     feed_version: str        # feed_info.feed_version of the imported static feed
     feed_sha256: str         # hash of the downloaded zip
     validated_at: datetime   # tz-aware, UTC
