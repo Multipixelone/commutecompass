@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+import pytest
+
 from commutecompass.format import (
     _route_summary,
     _summarize_route_mode,
@@ -59,6 +61,7 @@ def make_event(
         start=start,
         end=start + timedelta(hours=2),
         location_raw=location,
+        location_effective=location,
         location_resolved=resolved,
     )
 
@@ -281,8 +284,8 @@ class TestFormatDigest:
         assert "🎭" in result
         assert "🎓" in result
 
-    def test_format_digest_job_uses_ice_cream_icon_and_salt_straw_fallback(self) -> None:
-        """Job calendar uses 🍨 and Salt & Straw when location is missing."""
+    def test_format_digest_job_uses_resolved_destination_when_raw_missing(self) -> None:
+        """A job calendar must not imply any particular employer."""
         event = make_event(
             id="evt-job",
             title="Example User · 6pm - 11pm · SHIFT COORDINATOR",
@@ -294,9 +297,11 @@ class TestFormatDigest:
 
         result = format_digest([plan], [])
 
-        assert "🍨" in result
-        assert "Salt & Straw" in result
-        assert "(no location)" not in result
+        assert "💼" in result
+        assert event.location_resolved is not None
+        assert event.location_resolved.value in result
+        assert "Salt & Straw" not in result
+        assert "unknown location" not in result
 
     def test_format_digest_with_alerts(self) -> None:
         """format_digest includes alert lines when provided."""
@@ -1314,6 +1319,66 @@ def test_format_alerts_block_matches_digest_rendering() -> None:
     assert "*Active service alerts:*" in block
     assert "Train delays" in block
     assert "A, C" in block
+
+
+@pytest.mark.parametrize("calendar_name", ["Job", "Work", "FAO Work"])
+def test_unresolved_work_destination_is_unknown(calendar_name: str) -> None:
+    event = make_event(calendar_name=calendar_name, location="")
+    event.location_resolved = None
+    plan = make_plan(event, None)
+    assert "unknown location" in format_leave_ping(plan)
+    for message in (format_digest([plan], []), format_digest([
+        plan.model_copy(update={"error": "location_unresolved"}),
+    ], [])):
+        assert "unknown location" in message
+        assert "Salt & Straw" not in message
+
+
+@pytest.mark.parametrize("effective", [None, "", " \n\t", "\x00\u202e"])
+def test_destination_falls_back_to_resolved_before_stale_raw(effective: str | None) -> None:
+    event = make_event(location="Old workplace", location_value="FAO Schwarz")
+    event.location_effective = effective
+    plan = make_plan(event, None)
+    for message in (format_leave_ping(plan), format_digest([plan], [])):
+        assert "FAO Schwarz" in message
+        assert "Old workplace" not in message
+        assert "Salt & Straw" not in message
+
+
+def test_empty_effective_destination_does_not_revive_stale_raw() -> None:
+    event = make_event(location="Outdated workplace")
+    event.location_effective = ""
+    event.location_resolved = None
+    plan = make_plan(event, None)
+    for message in (format_leave_ping(plan), format_digest([plan], [])):
+        assert "unknown location" in message
+        assert "Outdated workplace" not in message
+
+
+def test_legacy_unresolved_destination_preserves_raw_label() -> None:
+    event = make_event(location="Named venue")
+    event.location_effective = None
+    event.location_resolved = None
+    plan = make_plan(event, None)
+    for message in (format_leave_ping(plan), format_digest([plan], [])):
+        assert "Named venue" in message
+
+
+@pytest.mark.parametrize("source", ["effective", "resolved"])
+def test_destination_is_sanitized_then_markdown_escaped(source: str) -> None:
+    event = make_event(location="Stale location")
+    destination = "\x00\u202eFAO *Schwarz* [shop]! " + "x" * 250
+    event.location_effective = destination if source == "effective" else None
+    assert event.location_resolved is not None
+    event.location_resolved.value = destination
+    plan = make_plan(event, None)
+    for message in (format_leave_ping(plan), format_digest([plan], [])):
+        assert r"FAO \*Schwarz\* \[shop\]\!" in message
+        assert "\x00" not in message
+        assert "\u202e" not in message
+        assert "x" * 201 not in message
+        assert "…" in message
+        assert "Stale location" not in message
 
 
 def test_fmt_time_renders_no_leading_zero() -> None:

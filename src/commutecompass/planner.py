@@ -153,6 +153,8 @@ def plan_event(
 
     # Step 1: resolve location (override applied first)
     raw_location = get_effective_location(event, config)
+    # Retain the named destination without overwriting the calendar's raw value.
+    event = event.model_copy(update={"location_effective": raw_location})
 
     # Determine travel mode (CLI > event > location-based config > default)
     mode: Literal["transit", "driving", "walking", "bicycling"] = (

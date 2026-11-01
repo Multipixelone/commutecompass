@@ -166,6 +166,26 @@ def _compact_location(location_raw: str | None, *, fallback: str) -> str:
     return ", ".join(lines)
 
 
+def _destination_label(plan: Plan) -> str:
+    """Prefer the resolver input's name, then the actual resolved destination.
+
+    Legacy plans lack location_effective, so their resolved value takes priority
+    over potentially stale raw calendar text. Raw text is a last resort only
+    for legacy plans; an explicitly empty effective value must not revive it.
+    Never infer an employer.
+    """
+    event = plan.event
+    for value in (
+        event.location_effective,
+        event.location_resolved.value if event.location_resolved else None,
+        event.location_raw if event.location_effective is None else None,
+    ):
+        label = _compact_location(value, fallback="")
+        if _sanitize_text(label).strip():
+            return label
+    return "unknown location"
+
+
 def format_digest(
     plans: list[Plan],
     alerts: list[Alert],
@@ -253,7 +273,7 @@ def _format_plan_summary(plan: Plan) -> str:
     if "theatre" in cal_lower or "stage" in cal_lower:
         icon = "🎭"
     elif "job" in cal_lower or "work" in cal_lower:
-        icon = "🍨"
+        icon = "💼"
     elif "school" in cal_lower or "class" in cal_lower:
         icon = "🎓"
     elif "personal" in cal_lower:
@@ -261,10 +281,7 @@ def _format_plan_summary(plan: Plan) -> str:
     else:
         icon = "📍"
     lines.append(f"{icon} *{escape_md(_sanitize_text(event.title))}* \\({escape_md(_sanitize_text(event.calendar_name))}\\)")
-    location_fallback = "Salt & Straw" if ("job" in cal_lower or "work" in cal_lower) else "(no location)"
-    location = _compact_location(event.location_raw, fallback=location_fallback)
-    if ("job" in cal_lower or "work" in cal_lower) and location.strip() == "(no location)":
-        location = "Salt & Straw"
+    location = _destination_label(plan)
     lines.append(
         f"  {start_str} at {escape_md(_sanitize_text(location))}"
     )
@@ -483,7 +500,7 @@ def format_leave_ping(plan: Plan) -> str:
 
     title = escape_md(_sanitize_text(plan.event.title))
     start_str = plan.event.start.strftime("%I:%M %p").lstrip("0")
-    location = escape_md(_sanitize_text(_compact_location(plan.event.location_raw, fallback="unknown location")))
+    location = escape_md(_sanitize_text(_destination_label(plan)))
 
     lines = [
         "🚶 *Leave now*",

@@ -106,6 +106,39 @@ def make_ping(event_id: str = "evt-001", fire_offset_minutes: int = -10) -> Ping
     )
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_effective_destination_store_round_trip(tmp_db_path: Path, legacy: bool) -> None:
+    from commutecompass.format import format_digest, format_leave_ping
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+    plan = make_plan(make_event())
+    plan.event.location_raw = "Outdated workplace"
+    plan.event.location_effective = "FAO Schwarz"
+    assert plan.event.location_resolved is not None
+    plan.event.location_resolved.value = "200 Example St"
+    store.upsert_plan(plan)
+    if legacy:
+        # Simulate an older cached plan with no effective-location key.
+        data = plan.model_dump(mode="json")
+        del data["event"]["location_effective"]
+        with closing(sqlite3.connect(tmp_db_path)) as conn:
+            conn.execute(
+                "UPDATE plans SET plan_json = ? WHERE event_id = ?",
+                (json.dumps(data), plan.event.id),
+            )
+            conn.commit()
+
+    restored = store.get_plan(plan.event.id)
+    assert restored is not None
+    assert restored.event.location_raw == "Outdated workplace"
+    assert restored.event.location_effective == (None if legacy else "FAO Schwarz")
+    for message in (format_leave_ping(restored), format_digest([restored], [])):
+        assert ("200 Example St" if legacy else "FAO Schwarz") in message
+        assert "Outdated workplace" not in message
+        assert "Salt & Straw" not in message
+
+
 # ── Schema init tests ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("expired", ["current", "updated", "both"])

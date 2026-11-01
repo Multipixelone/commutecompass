@@ -183,6 +183,8 @@ class Event(BaseModel):
     start: datetime
     end: datetime
     location_raw: str | None = None
+    # Resolver input after overrides; None for legacy cached events.
+    location_effective: str | None = None
     location_resolved: ResolvedLocation | None = None
     mode_override: Literal["transit", "driving", "walking", "bicycling"] | None = None
 

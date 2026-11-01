@@ -357,6 +357,47 @@ def test_plan_event_resolves_location_and_computes_timings(
     assert result.event.location_resolved is resolved_location
 
 
+@pytest.mark.parametrize("raw_location", ["", "Outdated workplace"])
+@pytest.mark.parametrize("workplace", ["Salt & Straw", "FAO Schwarz"])
+def test_override_destination_survives_planning_and_rendering(
+    event: Event,
+    config: Config,
+    mock_route: Route,
+    nyc_now: datetime,
+    raw_location: str,
+    workplace: str,
+) -> None:
+    from commutecompass.format import format_digest, format_leave_ping
+
+    event.calendar_name = "Work"
+    event.location_raw = raw_location
+    effective = f"{workplace}, 200 Example St"
+    config.location_overrides = [
+        LocationOverride(calendar_id=event.calendar_id, location=effective),
+    ]
+    resolved = ResolvedLocation(
+        kind="address", value="200 Example St", source="geocode",
+    )
+    with patch("commutecompass.resolver.resolve", return_value=resolved) as resolve, \
+         patch("commutecompass.routing.plan_route", return_value=mock_route) as route, \
+         patch("commutecompass.planner.now_nyc", return_value=nyc_now):
+        plan = plan_event(
+            event, config, MagicMock(spec=VenueRegistry), MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+
+    assert resolve.call_args.args[0] == effective
+    assert route.call_args.kwargs["destination"] is resolved
+    assert plan.event.location_raw == raw_location
+    assert event.location_raw == raw_location
+    for message in (format_leave_ping(plan), format_digest([plan], [])):
+        assert effective in message
+        assert "unknown location" not in message
+        assert "Outdated workplace" not in message
+        if workplace == "FAO Schwarz":
+            assert "Salt & Straw" not in message
+
+
 def test_plan_event_location_unresolved(
     event: Event,
     config: Config,
