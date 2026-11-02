@@ -264,13 +264,16 @@ def test_get_plan_missing(tmp_db_path: Path) -> None:
     assert store.get_plan("nonexistent") is None
 
 
-def test_today_plans_returns_today(tmp_db_path: Path) -> None:
+def test_today_plans_returns_today(
+    tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """today_plans returns plans with event_start today in NYC."""
+    now = datetime(2026, 5, 12, 12, tzinfo=NYC_TZ)
+    monkeypatch.setattr("commutecompass.timeutil.now_nyc", lambda: now)
     store = Store(tmp_db_path)
     store.init_schema()
 
-    # Create event starting soon (1h offset) so it always falls within
-    # the current logical day regardless of time-of-day.
+    # Both event creation and logical-day selection use the same daytime clock.
     event = make_event("evt-today", start_offset_hours=1, end_offset_hours=3)
     plan = make_plan(event)
     store.upsert_plan(plan)

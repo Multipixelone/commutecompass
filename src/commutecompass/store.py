@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -82,6 +83,14 @@ def _json_serializer(obj: object) -> str:
 # was last initialised at, instead of probing every table with PRAGMA
 # table_info.  The existing column adds remain idempotent and run unconditionally.
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class PollReplanOutcome:
+    """Notification disposition of the final rows in a committed replan."""
+
+    actionable_due: bool
+    imminent_leave_consumed: bool
 
 
 class Store:
@@ -371,12 +380,28 @@ class Store:
                 )
             return True
 
-    def reconcile_poll_replan(self, expected: Plan, updated: Plan, now: datetime) -> bool:
+    @staticmethod
+    def _obsolete_prep(conn: sqlite3.Connection, plan: Plan | None,
+                       event_id: str, now: datetime) -> bool:
+        """Read departure state under the caller's write lock, never a snapshot."""
+        return bool(
+            (plan is not None and plan.error == "too_imminent")
+            or conn.execute(
+                "SELECT 1 FROM pings WHERE event_id = ? AND kind = 'leave' "
+                "AND (fired = 1 OR julianday(fire_at) <= julianday(?)) LIMIT 1",
+                (event_id, now.isoformat()),
+            ).fetchone()
+        )
+
+    def reconcile_poll_replan(
+        self, expected: Plan, updated: Plan, now: datetime,
+    ) -> PollReplanOutcome | None:
         """Commit a poll replan plus actionable alarms under full-plan CAS.
 
         Preserve fired rows, IDs, retry counts and pending offsets from the old
         plan. Already-due alarms never move later; newly due alarms clamp to now.
         Both current and replanned events must still start strictly after now.
+        Return the final actionable disposition, or None on stale rejection.
         No network work occurs while holding the write lock.
         """
         from uuid import uuid4
@@ -384,19 +409,19 @@ class Store:
         from commutecompass.format import format_leave_ping, format_prep_ping
 
         if updated.event.id != expected.event.id:
-            return False
+            return None
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT plan_json FROM plans WHERE event_id = ?", (expected.event.id,),
             ).fetchone()
             if row is None:
-                return False
+                return None
             current = Plan.model_validate_json(row[0])
             if (not _same_plan(current, expected)
                     or current.event.start.astimezone(UTC) <= now.astimezone(UTC)
                     or updated.event.start.astimezone(UTC) <= now.astimezone(UTC)):
-                return False
+                return None
             conn.execute(
                 "UPDATE plans SET plan_json = ?, planned_at = ?, event_start = ? WHERE event_id = ?",
                 (_json_dumps(updated.model_dump()), now.isoformat(),
@@ -434,7 +459,23 @@ class Store:
                         (str(uuid4()), expected.event.id, kind,
                          fire_at.astimezone(now.tzinfo).isoformat(), message),
                     )
-            return True
+            # Final row deadlines include preserved user offsets. Decide under
+            # the same lock as reconciliation, not with a post-commit query.
+            obsolete_prep = self._obsolete_prep(conn, updated, expected.event.id, now)
+            due = conn.execute(
+                "SELECT kind FROM pings WHERE event_id = ? AND fired = 0 "
+                "AND kind IN ('prep', 'leave') AND julianday(fire_at) <= julianday(?)",
+                (expected.event.id, now.isoformat()),
+            ).fetchall()
+            consumed = conn.execute(
+                "SELECT 1 FROM pings WHERE event_id = ? AND kind = 'leave' AND fired = 1 "
+                "AND julianday(fire_at) <= julianday(?) LIMIT 1",
+                (expected.event.id, now.isoformat()),
+            ).fetchone()
+            return PollReplanOutcome(
+                actionable_due=any(row[0] == "leave" or not obsolete_prep for row in due),
+                imminent_leave_consumed=consumed is not None,
+            )
 
     # ── Ping CRUD ──────────────────────────────────────────────────────────────
 
@@ -482,8 +523,8 @@ class Store:
                 """
                 SELECT id, event_id, kind, fire_at, fired, fired_at, message, send_attempts
                 FROM pings
-                WHERE fired = 0 AND fire_at <= ?
-                ORDER BY fire_at
+                WHERE fired = 0 AND julianday(fire_at) <= julianday(?)
+                ORDER BY julianday(fire_at)
                 """,
                 (before.isoformat(),),
             ).fetchall()
@@ -532,6 +573,7 @@ class Store:
         self, ping_id: str, fired_at: datetime, *, leave_only: bool = False,
         due_only: bool = False,
         defer_if: Callable[[Plan | None, CurrentLocation | None], bool] | None = None,
+        suppress_obsolete_prep: bool = False,
     ) -> PingEntry | None:
         """Atomically claim and return the authoritative current ping payload.
 
@@ -549,10 +591,13 @@ class Store:
         leaves every ping field unchanged unless the event is muted (mute still
         consumes rows). The callback must not perform I/O;
         it may retain the supplied plan for authoritative post-claim expiry.
+        Poll-only ``suppress_obsolete_prep`` retires eligible prep when the current
+        plan is too imminent or a current leave is due/consumed. Deferral and
+        quiet-hours eligibility take precedence; leave claims never consume prep.
         """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if defer_if is not None:
+            if defer_if is not None or suppress_obsolete_prep:
                 eligible = conn.execute(
                     "SELECT event_id, kind FROM pings WHERE id = ? AND fired = 0 "
                     "AND (? = 0 OR kind = 'leave') "
@@ -567,13 +612,20 @@ class Store:
                     ).fetchone()
                     plan = Plan.model_validate(_json_loads(plan_row[0])) if plan_row else None
                     location = self._current_location_from_conn(conn)
-                    defer = defer_if(plan, location)
+                    defer = defer_if(plan, location) if defer_if is not None else False
                     muted = conn.execute(
                         "SELECT 1 FROM event_mutes WHERE event_id = ? "
                         "AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))",
                         (eligible[0], fired_at.isoformat()),
                     ).fetchone()
                     if defer and muted is None:
+                        return None
+                    if (suppress_obsolete_prep and eligible[1] == "prep"
+                            and self._obsolete_prep(conn, plan, eligible[0], fired_at)):
+                        conn.execute(
+                            "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0",
+                            (fired_at.isoformat(), ping_id),
+                        )
                         return None
             cursor = conn.execute(
                 "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0 "

@@ -1381,6 +1381,24 @@ def test_destination_is_sanitized_then_markdown_escaped(source: str) -> None:
         assert "Stale location" not in message
 
 
+@pytest.mark.parametrize("source", ["effective", "resolved"])
+def test_imminent_leave_preserves_sanitized_destination_and_event_time(source: str) -> None:
+    event = make_event(title="\x00\u202eShift *one*", location="Stale location")
+    event.start = event.start.replace(hour=19, minute=0)
+    destination = "\x00\u202eNew [venue]! " + "x" * 250
+    event.location_effective = destination if source == "effective" else None
+    assert event.location_resolved is not None
+    event.location_resolved.value = destination
+    plan = make_plan(event, None).model_copy(update={"error": "too_imminent"})
+    message = format_leave_ping(plan)
+    assert r"Shift \*one\* at 7:00 PM" in message
+    assert r"New \[venue\]\!" in message
+    assert "no prep window" in message
+    assert "Stale location" not in message
+    assert "\x00" not in message and "\u202e" not in message
+    assert "x" * 201 not in message and "…" in message
+
+
 def test_fmt_time_renders_no_leading_zero() -> None:
     """_fmt_time produces 12-hour wall-clock without a leading zero."""
     from commutecompass.format import _fmt_time

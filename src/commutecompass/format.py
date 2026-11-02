@@ -494,7 +494,7 @@ def format_leave_ping(plan: Plan) -> str:
     Returns:
         Formatted leave ping string.
     """
-    if plan.error:
+    if plan.error and plan.error != "too_imminent":
         title = _sanitize_text(plan.event.title)
         return f"🚶 *Leave now*\n{escape_md(title)}\n⚠️ {_plan_error_label(plan.error)}"
 
@@ -506,6 +506,9 @@ def format_leave_ping(plan: Plan) -> str:
         "🚶 *Leave now*",
         f"{title} at {start_str} — {location}",
     ]
+
+    if plan.error == "too_imminent":
+        lines.append(f"⚠️ {_plan_error_label(plan.error)}")
 
     if plan.route:
         # Include route summary with first and last leg info

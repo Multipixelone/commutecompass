@@ -170,7 +170,7 @@ def test_directions_morning_through_nyct_poll(
         # Newly urgent prep is clamped to now, claimed atomically and dispatched
         # using the refreshed payload, not the morning's scheduled text.
         assert store.get_pending_ping(event.id, "prep") is None
-        claim.assert_called_once_with(prep.id, POLL, leave_only=False, due_only=True, defer_if=ANY)
+        claim.assert_called_once_with(prep.id, POLL, leave_only=False, due_only=True, defer_if=ANY, suppress_obsolete_prep=True)
         assert notifier.send.call_args.args[0] == format_prep_ping(saved)
         assert notifier.send.call_args.args[0] != prep.message
         with store._connect() as conn:

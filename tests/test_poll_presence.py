@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -169,8 +169,8 @@ def test_same_venue_shifts_defer_without_mutating_then_depart_once(config: Confi
     store.upsert_current_location(fix(lon=1))
     config.home_assistant.replan_window_minutes = 0
     notifier, alarm = poll(config, store)
-    assert notifier.send.call_count == 2
-    assert alarm.send.call_count == 2
+    assert notifier.send.call_count == 1
+    assert alarm.send.call_count == 1
     assert store.pending_pings(NOW) == []
     notifier, alarm = poll(config, store)
     notifier.send.assert_not_called()
@@ -188,9 +188,9 @@ def test_presence_does_not_suppress_other_venue_digest_or_service(config: Config
                                       fire_at=NOW, message=kind))
     notifier, alarm = poll(config, store)
     assert sorted(call.args[0] for call in notifier.send.call_args_list) == [
-        "digest", "leave", "prep", "service_update",
+        "digest", "leave", "service_update",
     ]
-    assert alarm.send.call_count == 2
+    assert alarm.send.call_count == 1
     assert len(store.pending_pings(NOW)) == 2
 
 
@@ -209,8 +209,8 @@ def test_due_dispatch_fails_open(config: Config, store: Store, enabled: bool,
     if location is not None:
         store.upsert_current_location(location)
     notifier, alarm = poll(config, store)
-    assert notifier.send.call_count == 2
-    assert alarm.send.call_count == 2
+    assert notifier.send.call_count == 1
+    assert alarm.send.call_count == 1
 
 
 @pytest.mark.parametrize("present", [True, False])
@@ -236,7 +236,7 @@ def test_no_initial_send_grace_cutoff(config: Config, store: Store) -> None:
     with store._connect() as conn:
         conn.execute("UPDATE pings SET fire_at = ?", ((NOW - timedelta(hours=1)).isoformat(),))
     notifier, _ = poll(config, store)
-    assert notifier.send.call_count == 2
+    assert notifier.send.call_count == 1
 
 
 def test_muted_present_rows_still_consumed(config: Config, store: Store) -> None:
@@ -325,7 +325,12 @@ def test_replan_rechecks_live_presence_after_blocking(config: Config, store: Sto
     else:
         assert notifier.send.call_count == 1
         assert store.get_plan(plan.event.id) == changed
-    alarm.send.assert_not_called()
+    if during == "stale":
+        # The reconciled prep is due; it replaces the standalone update.
+        assert "Start getting ready" in notifier.send.call_args.args[0]
+        alarm.send.assert_called_once()
+    else:
+        alarm.send.assert_not_called()
 
 
 def test_due_live_clock_after_blocking_send(config: Config, store: Store) -> None:
@@ -344,7 +349,7 @@ def test_due_live_clock_after_blocking_send(config: Config, store: Store) -> Non
 
     notifier.send.side_effect = send
     poll(config, store, notifier=notifier, now_fn=lambda: current)
-    assert notifier.send.call_count == 3  # Presence expires while the digest blocks.
+    assert notifier.send.call_count == 2  # Presence expires; obsolete prep stays silent.
 
 
 def test_stored_genuine_fix_survives_unavailable_fetch(config: Config, store: Store) -> None:
@@ -353,3 +358,256 @@ def test_stored_genuine_fix_survives_unavailable_fetch(config: Config, store: St
     notifier, _ = poll(config, store, ha_fetch_fn=lambda *a, **kw: None)
     notifier.send.assert_not_called()
     assert len(store.pending_pings(NOW)) == 2
+
+
+@pytest.mark.parametrize("order", [("prep", "leave"), ("leave", "prep")])
+@pytest.mark.parametrize("equal", [False, True])
+def test_due_actions_coalesce_independent_of_order(
+    config: Config, store: Store,
+    order: tuple[Literal["prep", "leave"], Literal["prep", "leave"]], equal: bool,
+) -> None:
+    config.home_assistant.replan_window_minutes = 0
+    plan = plan_at()
+    store.upsert_plan(plan)
+    for kind in order:
+        store.schedule_ping(PingEntry(
+            id=kind, event_id=plan.event.id, kind=kind, message=kind,
+            fire_at=NOW - timedelta(minutes=1 if equal or kind == "leave" else 2),
+        ))
+    # Exercise candidate order separately from chronological ordering.
+    pending = store.pending_pings
+    with patch.object(store, "pending_pings", side_effect=lambda before: sorted(
+        pending(before), key=lambda p: order.index(p.kind),
+    )):
+        notifier, alarm = poll(config, store)
+    assert [c.args[0] for c in notifier.send.call_args_list] == ["leave"]
+    assert [c.args[0] for c in alarm.send.call_args_list] == ["leave"]
+    assert store.pending_pings(NOW) == []
+
+
+def test_future_leave_permits_prep_then_leave(config: Config, store: Store) -> None:
+    config.home_assistant.replan_window_minutes = 0
+    plan = plan_at()
+    store.upsert_plan(plan)
+    deadlines: tuple[tuple[Literal["prep", "leave"], datetime], ...] = (
+        ("prep", NOW), ("leave", NOW + timedelta(minutes=10)),
+    )
+    for kind, deadline in deadlines:
+        store.schedule_ping(PingEntry(id=kind, event_id=plan.event.id, kind=kind,
+                                      fire_at=deadline, message=kind))
+    notifier, alarm = poll(config, store)
+    notifier.send.assert_called_once_with("prep")
+    alarm.send.assert_called_once_with("prep")
+    notifier, alarm = poll(config, store, now_fn=lambda: NOW + timedelta(minutes=10))
+    notifier.send.assert_called_once_with("leave")
+    alarm.send.assert_called_once_with("leave")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_phase5_imminent_dispatches_once_without_update(
+    config: Config, store: Store, existing: bool, fails: bool,
+) -> None:
+    old = plan_at().model_copy(update={"prep_at": NOW + timedelta(minutes=5)})
+    store.upsert_plan(old)
+    if existing:
+        for kind in ("prep", "leave"):
+            store.schedule_ping(PingEntry(
+                id=kind, event_id=old.event.id, kind=kind,
+                fire_at=getattr(old, f"{kind}_at"), message=f"old {kind}",
+            ))
+    updated = old.model_copy(update={
+        "prep_at": NOW - timedelta(minutes=25), "leave_at": NOW - timedelta(minutes=5),
+        "error": "too_imminent",
+    })
+    primary, alarm = MagicMock(), MagicMock()
+    primary.send.return_value = not fails
+    poll(config, store, notifier=primary, ha_alarm_notifier=alarm,
+         plan_event_fn=lambda *a, **kw: updated)
+    primary.send.assert_called_once()
+    assert "Leave now" in primary.send.call_args.args[0]
+    assert "no prep window" in primary.send.call_args.args[0]
+    assert "Location update" not in primary.send.call_args.args[0]
+    if fails:
+        alarm.send.assert_not_called()
+        pending = store.pending_pings(NOW)
+        assert len(pending) == 1 and pending[0].kind == "leave"
+        assert pending[0].send_attempts == 1
+        retry = pending[0]
+        poll(config, store, notifier=primary, ha_alarm_notifier=alarm)
+        assert primary.send.call_count == 2
+        again = store.pending_pings(NOW)[0]
+        assert (again.id, again.fire_at, again.message) == (retry.id, retry.fire_at, retry.message)
+        assert again.send_attempts == 2
+        alarm.send.assert_not_called()
+    else:
+        alarm.send.assert_called_once()
+        poll(config, store, notifier=primary, ha_alarm_notifier=alarm)
+        primary.send.assert_called_once()
+        alarm.send.assert_called_once()
+        assert store.pending_pings(NOW) == []
+
+
+def test_consumed_leave_suppresses_imminent_location_update(config: Config, store: Store) -> None:
+    old = plan_at()
+    store.upsert_plan(old)
+    store.schedule_ping(PingEntry(id="leave", event_id=old.event.id, kind="leave",
+                                  fire_at=NOW - timedelta(minutes=1), message="leave"))
+    assert store.claim_ping("leave", NOW)
+    updated = old.model_copy(update={
+        "prep_at": NOW - timedelta(minutes=20), "leave_at": NOW - timedelta(minutes=1),
+        "error": "too_imminent",
+    })
+    notifier, alarm = poll(config, store, plan_event_fn=lambda *a, **kw: updated)
+    notifier.send.assert_not_called()
+    alarm.send.assert_not_called()
+    assert store.pending_pings(NOW) == []
+
+
+@pytest.mark.parametrize("first", ["prep", "leave"])
+def test_atomic_suppression_across_store_instances(
+    config: Config, store: Store, first: Literal["prep", "leave"],
+) -> None:
+    schedule(store, plan_at(), retry=2)
+    before = {p.kind: p for p in store.pending_pings(NOW)}
+    other = Store(config.paths.db_path)
+    for kind, connection in ((first, store), ("leave" if first == "prep" else "prep", other)):
+        claimed = connection.claim_ping_entry(
+            before[kind].id, NOW, due_only=True, suppress_obsolete_prep=True,
+        )
+        assert (claimed is not None) == (kind == "leave")
+    with store._connect() as conn:
+        rows = conn.execute("SELECT id, fire_at, message, send_attempts, fired FROM pings").fetchall()
+    for row in rows:
+        original = next(p for p in before.values() if p.id == row[0])
+        assert row[1:] == (original.fire_at.isoformat(), original.message, 2, 1)
+
+
+def test_live_leave_postponement_permits_prep_and_current_payload(config: Config, store: Store) -> None:
+    schedule(store, plan_at())
+    snapshot = store.pending_pings(NOW)
+    other = Store(config.paths.db_path)
+    with other._connect() as conn:
+        conn.execute("UPDATE pings SET fire_at = ? WHERE kind = 'leave'",
+                     ((NOW + timedelta(minutes=10)).isoformat(),))
+        conn.execute("UPDATE pings SET message = 'current prep' WHERE kind = 'prep'")
+    claimed = store.claim_ping_entry(
+        next(p.id for p in snapshot if p.kind == "prep"), NOW,
+        due_only=True, suppress_obsolete_prep=True,
+    )
+    assert claimed is not None and claimed.message == "current prep"
+    assert store.claim_ping_entry(
+        next(p.id for p in snapshot if p.kind == "leave"), NOW,
+        due_only=True, suppress_obsolete_prep=True,
+    ) is None
+    assert other.get_pending_ping(plan_at().event.id, "leave") is not None
+
+
+def test_replan_outcome_respects_final_offset_deadlines(config: Config, store: Store) -> None:
+    old = plan_at().model_copy(update={"prep_at": NOW + timedelta(minutes=5)})
+    store.upsert_plan(old)
+    # Positive user offsets keep both final alarms in the future even when the
+    # replanned nominal departure is already past.
+    for kind in ("prep", "leave"):
+        store.schedule_ping(PingEntry(
+            id=kind, event_id=old.event.id, kind=kind,
+            fire_at=getattr(old, f"{kind}_at") + timedelta(minutes=60), message=kind,
+        ))
+    updated = old.model_copy(update={
+        "prep_at": NOW - timedelta(minutes=20), "leave_at": NOW - timedelta(minutes=1),
+        "error": "too_imminent",
+    })
+    outcome = store.reconcile_poll_replan(old, updated, NOW)
+    assert outcome is not None
+    assert not outcome.actionable_due and not outcome.imminent_leave_consumed
+    assert not store.pending_pings(NOW)
+    assert store.reconcile_poll_replan(old, updated, NOW) is None
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_pending_and_suppression_compare_instants_across_dst_folds(
+    store: Store, fold: int,
+) -> None:
+    from datetime import UTC
+
+    now = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=fold)
+    past = now.astimezone(UTC) - timedelta(minutes=1)
+    future = now.astimezone(UTC) + timedelta(minutes=1)
+    # Mix offsets such that lexicographic ISO comparison gets both membership
+    # and ordering wrong. All dates must instead be compared as instants.
+    store.schedule_ping(PingEntry(id="prep", event_id="dst", kind="prep",
+                                  fire_at=past, message="prep"))
+    store.schedule_ping(PingEntry(id="leave", event_id="dst", kind="leave",
+                                  fire_at=past.astimezone(NYC_TZ), message="leave"))
+    store.schedule_ping(PingEntry(id="future", event_id="later", kind="prep",
+                                  fire_at=future.astimezone(NYC_TZ), message="future"))
+    assert {p.id for p in store.pending_pings(now)} == {"prep", "leave"}
+    assert store.claim_ping_entry("prep", now, due_only=True, suppress_obsolete_prep=True) is None
+    assert store.claim_ping_entry("leave", now, due_only=True, suppress_obsolete_prep=True) is not None
+    assert store.get_pending_ping("later", "prep") is not None
+
+
+def test_released_leave_not_retried_by_second_dispatch(config: Config, store: Store) -> None:
+    # A deliberately offset due leave is eligible for early dispatch while the
+    # nominal plan still qualifies for a phase-5 location refresh.
+    old = plan_at()
+    schedule(store, old)
+    updated = old.model_copy(update={
+        "prep_at": NOW - timedelta(minutes=20), "leave_at": NOW - timedelta(minutes=1),
+        "error": "too_imminent",
+    })
+    primary, alarm = MagicMock(), MagicMock()
+    primary.send.return_value = False
+    poll(config, store, notifier=primary, ha_alarm_notifier=alarm,
+         plan_event_fn=lambda *a, **kw: updated)
+    primary.send.assert_called_once_with("leave")
+    alarm.send.assert_not_called()
+    pending = store.pending_pings(NOW)
+    assert len(pending) == 1 and pending[0].kind == "leave"
+    assert pending[0].id == f"{old.event.id}-leave"
+    # Reconciliation advances the old -11 minute user offset with the plan;
+    # a second send would incorrectly increment attempts within this invocation.
+    assert pending[0].fire_at == NOW - timedelta(minutes=12)
+    assert pending[0].send_attempts == 1
+
+
+def test_quiet_prep_untouched_then_retired_when_eligible(config: Config, store: Store) -> None:
+    config.home_assistant.replan_window_minutes = 0
+    config.scheduling.quiet_hours_start = (NOW - timedelta(hours=1)).timetz()
+    config.scheduling.quiet_hours_end = (NOW + timedelta(minutes=5)).timetz()
+    schedule(store, plan_at(), retry=2)
+    before = store.get_pending_ping(plan_at().event.id, "prep")
+    notifier, alarm = poll(config, store)
+    notifier.send.assert_called_once_with("leave")
+    alarm.send.assert_called_once_with("leave")
+    assert store.get_pending_ping(plan_at().event.id, "prep") == before
+    notifier, alarm = poll(config, store, now_fn=lambda: NOW + timedelta(minutes=6))
+    notifier.send.assert_not_called()
+    alarm.send.assert_not_called()
+    assert not store.pending_pings(NOW + timedelta(minutes=6))
+
+
+def test_retry_cap_retires_only_leave_without_ha(config: Config, store: Store) -> None:
+    config.home_assistant.replan_window_minutes = 0
+    schedule(store, plan_at(), retry=5)
+    notifier, alarm = MagicMock(), MagicMock()
+    notifier.send.return_value = False
+    poll(config, store, notifier=notifier, ha_alarm_notifier=alarm)
+    # Existing policy allows the final attempt, but does not release it again.
+    notifier.send.assert_called_once_with("leave")
+    alarm.send.assert_not_called()
+    assert not store.pending_pings(NOW)
+
+
+def test_pending_order_is_instant_order_not_iso_order(store: Store) -> None:
+    from datetime import UTC
+
+    deadlines = [
+        datetime(2026, 11, 1, 1, 20, tzinfo=NYC_TZ, fold=1),
+        datetime(2026, 11, 1, 5, 30, tzinfo=UTC),
+        datetime(2026, 11, 1, 1, 10, tzinfo=NYC_TZ, fold=1),
+    ]
+    for index, deadline in enumerate(deadlines):
+        store.schedule_ping(PingEntry(id=str(index), event_id=str(index), kind="leave",
+                                      fire_at=deadline, message="leave"))
+    assert [p.id for p in store.pending_pings(NOW)] == ["1", "2", "0"]

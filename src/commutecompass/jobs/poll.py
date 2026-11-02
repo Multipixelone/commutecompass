@@ -242,95 +242,102 @@ def run(
     # Atomic claim-then-send: every ping we try to send is first claimed in a
     # transaction returning its current payload, so concurrent refreshes cannot
     # leave us sending a stale pending snapshot. Failures use bounded retries.
-    now = _now_fn()
-    due_pings = _store.pending_pings(before=now)
-    for candidate in due_pings:
+    attempted_ids: set[str] = set()
+
+    def dispatch_due() -> None:
         now = _now_fn()
-        claim_plan: Plan | None = None
+        due_pings = _store.pending_pings(before=now)
+        for candidate in due_pings:
+            if candidate.id in attempted_ids:
+                continue
+            now = _now_fn()
+            claim_plan: Plan | None = None
 
-        def defer_if_present(
-            plan: Plan | None, location: CurrentLocation | None, at: datetime = now,
-        ) -> bool:
-            nonlocal claim_plan
-            claim_plan = plan
-            # Expired alarms are consumed, not indefinitely deferred at the venue.
-            if plan is not None and at.astimezone(UTC) >= plan.event.start.astimezone(UTC):
-                return False
-            return _present_at_destination(config, plan, location, at)
+            def defer_if_present(
+                plan: Plan | None, location: CurrentLocation | None, at: datetime = now,
+            ) -> bool:
+                nonlocal claim_plan
+                claim_plan = plan
+                # Expired alarms are consumed, not indefinitely deferred at the venue.
+                if plan is not None and at.astimezone(UTC) >= plan.event.start.astimezone(UTC):
+                    return False
+                return _present_at_destination(config, plan, location, at)
 
-        # Read current payload, plan and fix under the claim lock, not from the
-        # pending snapshot. Presence never consumes a row or counts as a retry.
-        ping = _store.claim_ping_entry(
-            candidate.id, now, leave_only=quiet_at(now), due_only=True,
-            defer_if=defer_if_present,
-        )
-        if ping is None:
-            logger.debug("Ping %s already claimed or suppressed", candidate.id)
-            continue
-        if (ping.kind in _RETRYABLE_PING_KINDS and claim_plan is not None
-                and now.astimezone(UTC) >= claim_plan.event.start.astimezone(UTC)):
-            logger.info("Discarding expired %s ping %s", ping.kind, ping.id)
-            continue
-
-        # Honor `commutecompass mute <event>` / `mute --today`. The mute
-        # ledger is forward-looking only; a row already fired stays fired.
-        # We claim the ping anyway so the user's intent is recorded (it
-        # doesn't re-fire on the next poll); the send is just skipped.
-        if _store.is_muted(ping.event_id):
-            logger.info(
-                "Muted event %s — skipping %s ping %s",
-                ping.event_id,
-                ping.kind,
-                ping.id,
+            # Read current payload, plan and fix under the claim lock, not from the
+            # pending snapshot. Presence never consumes a row or counts as a retry.
+            ping = _store.claim_ping_entry(
+                candidate.id, now, leave_only=quiet_at(now), due_only=True,
+                defer_if=defer_if_present, suppress_obsolete_prep=True,
             )
-            continue
+            if ping is None:
+                logger.debug("Ping %s already claimed or suppressed", candidate.id)
+                continue
+            attempted_ids.add(ping.id)
+            if (ping.kind in _RETRYABLE_PING_KINDS and claim_plan is not None
+                    and now.astimezone(UTC) >= claim_plan.event.start.astimezone(UTC)):
+                logger.info("Discarding expired %s ping %s", ping.kind, ping.id)
+                continue
 
-        sent_ok = _notifier.send(ping.message)
-        now = _now_fn()
-        if sent_ok:
-            logger.info("Fired ping %s (%s)", ping.id, ping.kind)
-        else:
-            # The claim already set fired=1.  For actionable pings still within
-            # their grace window and under the attempt cap, hand the row back so
-            # the next poll retries; otherwise leave it fired (give up) so a
-            # broken notifier can't storm or deliver a stale alarm.
-            attempt = ping.send_attempts + 1
-            within_grace = (
-                now.astimezone(UTC) - ping.fire_at.astimezone(UTC)
-            ).total_seconds() <= _SEND_RETRY_GRACE_SECONDS
-            retryable = (
-                ping.kind in _RETRYABLE_PING_KINDS
-                and attempt < _MAX_SEND_ATTEMPTS
-                and within_grace
-            )
-            if retryable and _store.release_ping(ping.id):
-                logger.warning(
-                    "Send failed for %s ping %s (attempt %d/%d) — released for retry",
+            # Honor `commutecompass mute <event>` / `mute --today`. The mute
+            # ledger is forward-looking only; a row already fired stays fired.
+            # We claim the ping anyway so the user's intent is recorded (it
+            # doesn't re-fire on the next poll); the send is just skipped.
+            if _store.is_muted(ping.event_id):
+                logger.info(
+                    "Muted event %s — skipping %s ping %s",
+                    ping.event_id,
                     ping.kind,
                     ping.id,
-                    attempt,
-                    _MAX_SEND_ATTEMPTS,
                 )
+                continue
+
+            sent_ok = _notifier.send(ping.message)
+            now = _now_fn()
+            if sent_ok:
+                logger.info("Fired ping %s (%s)", ping.id, ping.kind)
             else:
+                # The claim already set fired=1.  For actionable pings still within
+                # their grace window and under the attempt cap, hand the row back so
+                # the next poll retries; otherwise leave it fired (give up) so a
+                # broken notifier can't storm or deliver a stale alarm.
+                attempt = ping.send_attempts + 1
+                within_grace = (
+                    now.astimezone(UTC) - ping.fire_at.astimezone(UTC)
+                ).total_seconds() <= _SEND_RETRY_GRACE_SECONDS
+                retryable = (
+                    ping.kind in _RETRYABLE_PING_KINDS
+                    and attempt < _MAX_SEND_ATTEMPTS
+                    and within_grace
+                )
+                if retryable and _store.release_ping(ping.id):
+                    logger.warning(
+                        "Send failed for %s ping %s (attempt %d/%d) — released for retry",
+                        ping.kind,
+                        ping.id,
+                        attempt,
+                        _MAX_SEND_ATTEMPTS,
+                    )
+                else:
+                    logger.warning(
+                        "Send failed for claimed ping %s (%s) after %d attempt(s) — giving up",
+                        ping.id,
+                        ping.kind,
+                        attempt,
+                    )
+
+            # Additive HA alarm: fire only AFTER primary success. An HA outage cannot
+            # un-fire the ping or cause repeat sends.
+            if (
+                sent_ok
+                and _ha_alarm is not None
+                and ping.kind in _ha_alarm_kinds
+                and not _ha_alarm.send(ping.message)
+            ):
                 logger.warning(
-                    "Send failed for claimed ping %s (%s) after %d attempt(s) — giving up",
-                    ping.id,
-                    ping.kind,
-                    attempt,
+                    "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
                 )
 
-        # Additive HA alarm: fire AFTER the primary send attempt regardless of
-        # its outcome (claim already consumed the row).  An HA outage cannot
-        # un-fire the ping or cause repeat sends.
-        if (
-            sent_ok
-            and _ha_alarm is not None
-            and ping.kind in _ha_alarm_kinds
-            and not _ha_alarm.send(ping.message)
-        ):
-            logger.warning(
-                "HA alarm send failed for ping %s (%s)", ping.id, ping.kind
-            )
+    dispatch_due()
 
     # ── Phase 3: fetch alerts ─────────────────────────────────────────────────
     global _alerts_cache
@@ -411,7 +418,8 @@ def run(
             route_changed = _route_significantly_different(plan, new_plan)
 
             if route_changed:
-                if not _store.reconcile_poll_replan(plan, new_plan, now):
+                outcome = _store.reconcile_poll_replan(plan, new_plan, now)
+                if outcome is None:
                     logger.debug("Discarding stale alert replan for %s", plan.event.id)
                     break  # Leave alert unseen for a fresh snapshot next cycle.
                 # Daily dedup: if the same alert already triggered a
@@ -438,6 +446,8 @@ def run(
                         plan.event.id,
                     )
 
+                if outcome.actionable_due:
+                    dispatch_due()
                 plan = new_plan
             else:
                 # No significant change but still mark seen
@@ -485,8 +495,12 @@ def run(
             if not _location_update_significant(plan, new_plan):
                 continue
 
-            if not _store.reconcile_poll_replan(plan, new_plan, now):
+            outcome = _store.reconcile_poll_replan(plan, new_plan, now)
+            if outcome is None:
                 logger.debug("Discarding stale location replan for %s", plan.event.id)
+                continue
+            if outcome.actionable_due or outcome.imminent_leave_consumed:
+                dispatch_due()
                 continue
             msg = format_location_update(plan, new_plan)
             if _notifier.send(msg):

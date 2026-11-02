@@ -118,6 +118,13 @@ commutecompass --config examples/config.toml tomorrow --dry-run
       default to False; `claim_ping(id, now)` remains a boolean compatibility
       wrapper that can claim an unfired row regardless of its deadline.
       Never use `mark_fired` after sending: claiming protects overlapping polls.
+   - Poll enables atomic obsolete-prep suppression: a due/already-consumed leave
+     or a current `too_imminent` plan retires eligible prep without sending.
+     Presence deferral and quiet-hours eligibility take precedence; never bulk
+     consume prep while claiming leave. Future leave deadlines still permit prep.
+     Location replans coalesce immediate actions with update messages using their
+     committed outcome. Dispatch passes share attempted IDs to prevent a released
+     failure from retrying within the same poll invocation.
    - On send **failure** of an actionable ping (`prep`/`leave`), the poll
      loop hands the row back with `store.release_ping(id)` (atomic 1→0,
      bumps `send_attempts`) so a later poll re-fires it.  Re-fire is bounded:

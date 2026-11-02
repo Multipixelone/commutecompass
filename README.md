@@ -166,6 +166,17 @@ are consumed silently rather than sent late. Morning planning still schedules
 reminders normally. This is not an all-notifications mute: daily digests, MTA
 service updates, manual queries, and tomorrow/wake-alarm publishing are unchanged.
 
+## Overdue reminders
+
+When prep and departure reminders are both overdue, **leave wins**: the obsolete
+prep reminder is retired instead of sending “start getting ready” after “leave
+now.” A prep reminder still fires normally when departure is in the future. If a
+location replan makes departure immediately due, poll sends the actionable leave
+reminder instead of a separate location-update message with the same warning.
+Confirmed destination presence still defers travel reminders; leaving makes them
+eligible again, with the same leave-wins rule. Failed leave deliveries retain the
+existing bounded retry policy.
+
 ## Home Assistant alarm
 
 CommuteCompass already pulls live location from Home Assistant when `[home_assistant].enabled = true`. With the optional `[home_assistant.alarm]` block it will *additionally* POST to an HA service every time a `prep` or `leave` ping fires — so HA can wake you up with a real alarm without changing your existing notification channel. The same `HOME_ASSISTANT_TOKEN` is reused; no new env var.

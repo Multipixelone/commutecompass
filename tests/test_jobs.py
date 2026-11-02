@@ -174,7 +174,7 @@ def test_poll_ping_becoming_due_during_fetch_is_claimed_once(
                      fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     notifier.send.assert_called_once_with("newly due")
     claim.assert_called_once_with(
-        "prep", start + timedelta(seconds=2), leave_only=False, due_only=True, defer_if=ANY,
+        "prep", start + timedelta(seconds=2), leave_only=False, due_only=True, defer_if=ANY, suppress_obsolete_prep=True,
     )
 
 
@@ -255,7 +255,7 @@ def test_poll_refresh_advances_in_place_before_dispatch(
             target = min(original.timestamp(), max(now.timestamp(), original.timestamp() - minutes * 60))
             assert datetime.fromisoformat(fire_at).timestamp() == target
         assert attempts == (1 if ping_id == other else 0)
-    assert notifier.send.call_count == (2 if leave_minutes == 3 else 0)
+    assert notifier.send.call_count == (1 if leave_minutes == 3 else 0)
 
 
 @pytest.mark.parametrize("case", ["disabled", "distant", "unmatched", "unavailable", "smaller", "past", "cancelled"])
@@ -1638,20 +1638,34 @@ def test_poll_quiet_hours_suppresses_prep_not_leave(
     minimal_config: Config,
     today_events: list[Event],
     sample_route: Route,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
     """During quiet hours, prep pings are suppressed but leave pings fire."""
-    # Use a fixed "now" that falls inside overnight quiet hours (22:00–07:00)
-    now = now_nyc().replace(hour=23, minute=30, second=0, microsecond=0)
+    # Use the same fixed quiet-hours clock for poll and store day selection.
+    now = set_logical_day_clock(datetime(2026, 5, 12, 23, 30, tzinfo=NYC_TZ))
     quiet_start = now.replace(hour=22, minute=0, second=0, microsecond=0).timetz()
     quiet_end = now.replace(hour=7, minute=0, second=0, microsecond=0).timetz()
     minimal_config.scheduling.quiet_hours_start = quiet_start
     minimal_config.scheduling.quiet_hours_end = quiet_end
 
-    leave_at = (now + timedelta(hours=3)) - timedelta(minutes=45)
+    leave_at = now - timedelta(minutes=5)
     prep_at = leave_at - timedelta(minutes=20)
+    # An upcoming event must not be expired before quiet-hours filtering runs.
+    event = today_events[0].model_copy(update={
+        "start": now + timedelta(hours=1), "end": now + timedelta(hours=2),
+    })
+    route_shift = leave_at - sample_route.depart_at
+    route = sample_route.model_copy(update={
+        "depart_at": leave_at,
+        "arrive_at": sample_route.arrive_at + route_shift,
+        "legs": [leg.model_copy(update={
+            "depart_at": leg.depart_at + route_shift,
+            "arrive_at": leg.arrive_at + route_shift,
+        }) for leg in sample_route.legs],
+    })
     plan = Plan(
-        event=today_events[0],
-        route=sample_route,
+        event=event,
+        route=route,
         leave_at=leave_at,
         prep_at=prep_at,
     )
@@ -1659,17 +1673,17 @@ def test_poll_quiet_hours_suppresses_prep_not_leave(
     # Both pings are already due
     leave_ping = PingEntry(
         id="ping-leave-qh",
-        event_id=today_events[0].id,
+        event_id=event.id,
         kind="leave",
-        fire_at=now - timedelta(minutes=5),
+        fire_at=leave_at,
         fired=False,
         message="🚶 *Leave now*",
     )
     prep_ping = PingEntry(
         id="ping-prep-qh",
-        event_id=today_events[0].id,
+        event_id=event.id,
         kind="prep",
-        fire_at=now - timedelta(minutes=25),
+        fire_at=prep_at,
         fired=False,
         message="⏰ *Start prep*",
     )
@@ -2062,7 +2076,7 @@ def test_poll_ha_alarm_fires_for_prep_and_leave_only(
         id="ping-leave",
         event_id=today_events[0].id,
         kind="leave",
-        fire_at=now - timedelta(minutes=1),
+        fire_at=now + timedelta(minutes=1),
         fired=False,
         message="leave now",
     )
@@ -2108,7 +2122,15 @@ def test_poll_ha_alarm_fires_for_prep_and_leave_only(
         now_fn=lambda: now,
     )
 
-    # Primary notifier saw all three pings
+    assert set(notifier.sent) == {"get ready", "digest body"}
+    assert alarm.sent == ["get ready"]
+    poll_run(
+        minimal_config, store=store, notifier=cast(TelegramNotifier, notifier),
+        ha_alarm_notifier=cast(TelegramNotifier, alarm),
+        fetch_alerts_fn=lambda **kw: [], alerts_affecting_route_fn=lambda *a, **kw: [],
+        plan_event_fn=MockPlanner(plan), now_fn=lambda: now + timedelta(minutes=1),
+    )
+    # Primary notifier saw all three pings at their proper times.
     assert set(notifier.sent) == {"leave now", "get ready", "digest body"}
     # Alarm notifier saw only prep + leave — digest is NOT alarm-worthy
     assert set(alarm.sent) == {"leave now", "get ready"}

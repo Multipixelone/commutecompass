@@ -1444,18 +1444,18 @@ class TestMtaAlertsCommand:
         assert "nothing to filter" in result.output.lower() or "no planned" in result.output.lower()
 
     def test_mta_alerts_renders_affecting_alerts(
-        self, runner: CliRunner, tmp_path: Path
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from datetime import timedelta
 
         from commutecompass.models import Alert, Event, Route, TransitLeg
         from commutecompass.models import Plan as _Plan
-        from commutecompass.timeutil import now_nyc
 
+        now = datetime(2026, 5, 12, 12, tzinfo=NYC_TZ)
+        monkeypatch.setattr("commutecompass.timeutil.now_nyc", lambda: now)
         cfg = _fake_config(tmp_path)
         store = Store(cfg.paths.db_path)
         store.init_schema()
-        now = now_nyc()
         depart = now + timedelta(minutes=30)
         arrive = depart + timedelta(minutes=20)
         leg = TransitLeg(
