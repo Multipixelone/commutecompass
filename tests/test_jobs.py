@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from instants import same_plan, utc
@@ -174,7 +174,7 @@ def test_poll_ping_becoming_due_during_fetch_is_claimed_once(
                      fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     notifier.send.assert_called_once_with("newly due")
     claim.assert_called_once_with(
-        "prep", start + timedelta(seconds=2), leave_only=False, due_only=True,
+        "prep", start + timedelta(seconds=2), leave_only=False, due_only=True, defer_if=ANY,
     )
 
 

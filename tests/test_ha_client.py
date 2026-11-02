@@ -7,6 +7,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 
 from commutecompass.ha_client import (
     call_service,
@@ -23,6 +24,18 @@ def _mock_get_response(status: int, payload: object) -> httpx.Response:
 
 
 class TestFetchLocation:
+    @pytest.mark.parametrize("timestamp", [None, "", "bad", 123, "2026-05-09T12:34:56"])
+    def test_invalid_timestamp_never_manufactures_fresh_fix(self, timestamp: object) -> None:
+        payload = {
+            "attributes": {"latitude": 0, "longitude": 0, "gps_accuracy": 10},
+            "last_updated": timestamp,
+        }
+        with patch("httpx.Client") as client:
+            client.return_value.__enter__.return_value.get.return_value = _mock_get_response(
+                200, payload,
+            )
+            assert fetch_location("http://ha", "person.test", "tok") is None
+
     def test_happy_path_returns_current_location(self) -> None:
         payload = {
             "entity_id": "device_tracker.iphone",
@@ -107,6 +120,19 @@ class TestFetchLocation:
         assert result is not None
         assert result.accuracy_m == 12.0
         assert result.zone == "Work"
+
+    def test_zero_accuracy_ceiling_disables_fetch_filter(self) -> None:
+        payload = {
+            "attributes": {"latitude": 0, "longitude": 0, "gps_accuracy": 10},
+            "last_updated": "2026-05-09T12:34:56Z",
+        }
+        with patch("httpx.Client") as client:
+            client.return_value.__enter__.return_value.get.return_value = _mock_get_response(
+                200, payload,
+            )
+            result = fetch_location("http://ha", "person.test", "tok", min_accuracy_m=0)
+        assert result is not None
+        assert result.captured_at == datetime.fromisoformat("2026-05-09T12:34:56+00:00")
 
     def test_rejects_fuzzier_than_threshold(self) -> None:
         payload = {

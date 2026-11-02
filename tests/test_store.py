@@ -1023,6 +1023,44 @@ class TestCurrentLocation:
 # ── claim_ping (atomic) tests ──────────────────────────────────────────────────
 
 
+def test_claim_presence_filter_is_atomic_optional_and_nonconsuming(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    plan = make_plan(make_event())
+    store.upsert_plan(plan)
+    now = datetime.now(UTC)
+    loc = CurrentLocation(lat=0, lon=0, captured_at=now, accuracy_m=10)
+    store.upsert_current_location(loc)
+    ping = make_ping(plan.event.id).model_copy(update={"fire_at": now, "send_attempts": 2})
+    store.schedule_ping(ping)
+    with store._connect() as conn:
+        conn.execute("UPDATE pings SET send_attempts = 2 WHERE id = ?", (ping.id,))
+    calls: list[tuple[Plan | None, CurrentLocation | None]] = []
+
+    def defer(plan: Plan | None, location: CurrentLocation | None) -> bool:
+        calls.append((plan, location))
+        return True
+
+    # Eligibility is checked before the callback, and ineligible rows are untouched.
+    with store._connect() as conn:
+        conn.execute("UPDATE pings SET kind = 'prep' WHERE id = ?", (ping.id,))
+    assert store.claim_ping_entry(ping.id, now, leave_only=True, defer_if=defer) is None
+    with store._connect() as conn:
+        conn.execute("UPDATE pings SET kind = ? WHERE id = ?", (ping.kind, ping.id))
+    assert store.claim_ping_entry(ping.id, now - timedelta(seconds=1),
+                                 due_only=True, defer_if=defer) is None
+    assert not calls
+    for _ in range(2):
+        assert store.claim_ping_entry(ping.id, now, due_only=True, defer_if=defer) is None
+        assert store.pending_pings(now) == [ping]
+    assert len(calls) == 2
+    assert same_plan(calls[0][0], plan) and calls[0][1] == loc
+    # Default-off compatibility wrapper still claims even in the presence of a fix.
+    assert store.claim_ping(ping.id, now)
+    assert store.claim_ping_entry(ping.id, now, defer_if=defer) is None
+    assert len(calls) == 2
+
+
 def test_claim_ping_entry_returns_current_payload_and_preserves_retry(tmp_db_path: Path) -> None:
     store = Store(tmp_db_path)
     store.init_schema()

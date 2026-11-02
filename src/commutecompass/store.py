@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -531,6 +531,7 @@ class Store:
     def claim_ping_entry(
         self, ping_id: str, fired_at: datetime, *, leave_only: bool = False,
         due_only: bool = False,
+        defer_if: Callable[[Plan | None, CurrentLocation | None], bool] | None = None,
     ) -> PingEntry | None:
         """Atomically claim and return the authoritative current ping payload.
 
@@ -543,9 +544,37 @@ class Store:
         instant to be <= fired_at, atomically; future rows remain untouched.
         Both filters default to False for compatibility with unconditional
         unfired-row claims (including ``claim_ping``). Retry semantics are unchanged.
+        For eligible prep/leave rows only, optional synchronous ``defer_if`` reads
+        the current plan and unaged location under the same write lock. True
+        leaves every ping field unchanged unless the event is muted (mute still
+        consumes rows). The callback must not perform I/O;
+        it may retain the supplied plan for authoritative post-claim expiry.
         """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if defer_if is not None:
+                eligible = conn.execute(
+                    "SELECT event_id, kind FROM pings WHERE id = ? AND fired = 0 "
+                    "AND (? = 0 OR kind = 'leave') "
+                    "AND (? = 0 OR julianday(fire_at) <= julianday(?))",
+                    (ping_id, int(leave_only), int(due_only), fired_at.isoformat()),
+                ).fetchone()
+                if eligible is None:
+                    return None
+                if eligible[1] in {"prep", "leave"}:
+                    plan_row = conn.execute(
+                        "SELECT plan_json FROM plans WHERE event_id = ?", (eligible[0],),
+                    ).fetchone()
+                    plan = Plan.model_validate(_json_loads(plan_row[0])) if plan_row else None
+                    location = self._current_location_from_conn(conn)
+                    defer = defer_if(plan, location)
+                    muted = conn.execute(
+                        "SELECT 1 FROM event_mutes WHERE event_id = ? "
+                        "AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))",
+                        (eligible[0], fired_at.isoformat()),
+                    ).fetchone()
+                    if defer and muted is None:
+                        return None
             cursor = conn.execute(
                 "UPDATE pings SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0 "
                 "AND (? = 0 OR kind = 'leave') "
@@ -1001,24 +1030,30 @@ class Store:
         When max_age_minutes is set, return None if the row is older than that.
         """
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT lat, lon, zone, captured_at, source, accuracy_m "
-                "FROM current_location WHERE id = 'singleton'"
-            ).fetchone()
-        if row is None:
-            return None
-        captured_at = datetime.fromisoformat(row[3])
-        if max_age_minutes is not None:
+            location = self._current_location_from_conn(conn)
+        if location is not None and max_age_minutes is not None:
             from commutecompass.timeutil import now_nyc
 
-            age = now_nyc() - captured_at
+            if location.captured_at.utcoffset() is None:
+                return None
+            age = now_nyc().astimezone(UTC) - location.captured_at.astimezone(UTC)
             if age.total_seconds() > max_age_minutes * 60:
                 return None
-        return CurrentLocation(
-            lat=row[0],
-            lon=row[1],
-            zone=row[2],
-            captured_at=captured_at,
-            source=row[4],
-            accuracy_m=row[5],
-        )
+        return location
+
+    @staticmethod
+    def _current_location_from_conn(conn: sqlite3.Connection) -> CurrentLocation | None:
+        """Read the unaged fix, including inside an existing claim transaction."""
+        row = conn.execute(
+            "SELECT lat, lon, zone, captured_at, source, accuracy_m "
+            "FROM current_location WHERE id = 'singleton'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return CurrentLocation(
+                lat=row[0], lon=row[1], zone=row[2],
+                captured_at=datetime.fromisoformat(row[3]), source=row[4], accuracy_m=row[5],
+            )
+        except (ValueError, TypeError):
+            return None

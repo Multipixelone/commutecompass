@@ -145,6 +145,27 @@ OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.t
 
 Point your OpenClaw instance at `skills/commutecompass/`, and the chat commands are live. The scripts shell out to `commutecompass-skill`, a wrapper the NixOS module installs when `services.commutecompass.skill.users` is set; it sources the secrets env file and points at `/etc/commutecompass/config.toml`, so the calling session needs no preamble. Outside NixOS, ship an equivalent wrapper on PATH. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
 
+## Already at the destination
+
+With Home Assistant location enabled, `poll` defers prep and leave reminders
+(including their additive HA alarms) while a recent, accurate GPS fix confirms
+you are already at the event's resolved destination. This also skips
+location-driven replanning and its update message, avoiding a redundant
+one-minute estimated commute between shifts at the same venue.
+
+Confirmation requires a fix no older than five minutes (or the configured
+location age limit, if shorter), with **distance to destination + GPS accuracy
+≤ 100 metres**. Unknown accuracy, stale or untrustworthy timestamps, and
+unresolved destinations do not suppress reminders. A short estimated route alone
+is not arrival evidence.
+
+Deferred reminders remain pending without changing their deadlines or retry
+counts. They become eligible again if you leave or the location evidence expires
+before the event starts; once the event starts, obsolete prep/leave reminders
+are consumed silently rather than sent late. Morning planning still schedules
+reminders normally. This is not an all-notifications mute: daily digests, MTA
+service updates, manual queries, and tomorrow/wake-alarm publishing are unchanged.
+
 ## Home Assistant alarm
 
 CommuteCompass already pulls live location from Home Assistant when `[home_assistant].enabled = true`. With the optional `[home_assistant.alarm]` block it will *additionally* POST to an HA service every time a `prep` or `leave` ping fires — so HA can wake you up with a real alarm without changing your existing notification channel. The same `HOME_ASSISTANT_TOKEN` is reused; no new env var.

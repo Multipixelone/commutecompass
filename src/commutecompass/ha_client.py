@@ -8,7 +8,7 @@ from datetime import datetime
 import httpx
 
 from commutecompass.models import CurrentLocation, ZoneInfo
-from commutecompass.timeutil import NYC_TZ, now_nyc
+from commutecompass.timeutil import NYC_TZ
 
 _logger = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ def fetch_location(
     )
     if (
         min_accuracy_m is not None
+        and min_accuracy_m > 0
         and accuracy_m is not None
         and accuracy_m > min_accuracy_m
     ):
@@ -93,6 +94,8 @@ def fetch_location(
     zone = state if isinstance(state, str) and state else None
 
     captured_at = _parse_last_updated(payload.get("last_updated"))
+    if captured_at is None:
+        return None
 
     return CurrentLocation(
         lat=float(lat),
@@ -267,14 +270,13 @@ def fetch_zones(
     return zones
 
 
-def _parse_last_updated(raw: object) -> datetime:
-    """Parse HA's ISO-8601 last_updated; fall back to now_nyc() on failure."""
+def _parse_last_updated(raw: object) -> datetime | None:
+    """Keep HA's genuine capture instant; never manufacture a fresh fix."""
     if isinstance(raw, str):
         try:
             dt = datetime.fromisoformat(raw)
+            if dt.utcoffset() is not None:
+                return dt.astimezone(NYC_TZ)
         except ValueError:
-            return now_nyc()
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=NYC_TZ)
-        return dt.astimezone(NYC_TZ)
-    return now_nyc()
+            pass
+    return None

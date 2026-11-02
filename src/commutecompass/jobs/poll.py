@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from datetime import UTC, timedelta
 from typing import TYPE_CHECKING
@@ -42,6 +43,43 @@ _SEND_RETRY_GRACE_SECONDS = 15 * 60
 
 # Module-level memo: (captured_at, (subway_url, lirr_url, bus_url), alerts).
 _alerts_cache: tuple[datetime, tuple[str, str, str], list[Alert]] | None = None
+
+
+def _present_at_destination(
+    config: Config, plan: Plan | None, location: CurrentLocation | None, now: datetime,
+) -> bool:
+    """Conservative, ephemeral arrival evidence evaluated at the live poll instant."""
+    ha = config.home_assistant
+    if not ha.enabled or plan is None or location is None:
+        return False
+    destination = plan.event.location_resolved
+    if destination is None:
+        return False
+    coordinates = (location.lat, location.lon, destination.lat, destination.lon)
+    if any(value is None or not math.isfinite(value) for value in coordinates):
+        return False
+    lat, lon = destination.lat, destination.lon
+    if lat is None or lon is None:
+        return False
+    if not (-90 <= location.lat <= 90 and -90 <= lat <= 90
+            and -180 <= location.lon <= 180 and -180 <= lon <= 180):
+        return False
+    accuracy = location.accuracy_m
+    if accuracy is None or not math.isfinite(accuracy) or accuracy < 0:
+        return False
+    if ha.min_gps_accuracy_meters > 0 and accuracy > ha.min_gps_accuracy_meters:
+        return False
+    if location.captured_at.utcoffset() is None or now.utcoffset() is None:
+        return False
+    age = (now.astimezone(UTC) - location.captured_at.astimezone(UTC)).total_seconds()
+    if not 0 <= age <= min(ha.max_age_minutes, 5) * 60:
+        return False
+    dlat = math.radians(lat - location.lat)
+    dlon = math.radians(lon - location.lon)
+    a = (math.sin(dlat / 2) ** 2 + math.cos(math.radians(location.lat))
+         * math.cos(math.radians(lat)) * math.sin(dlon / 2) ** 2)
+    distance = 2 * 6_371_000 * math.asin(math.sqrt(min(1.0, a)))
+    return distance + accuracy <= 100
 
 
 def run(
@@ -208,13 +246,30 @@ def run(
     due_pings = _store.pending_pings(before=now)
     for candidate in due_pings:
         now = _now_fn()
-        # Recheck the current deadline and quiet-hours kind atomically: a replan
-        # may have postponed this same ID after the pending snapshot was read.
+        claim_plan: Plan | None = None
+
+        def defer_if_present(
+            plan: Plan | None, location: CurrentLocation | None, at: datetime = now,
+        ) -> bool:
+            nonlocal claim_plan
+            claim_plan = plan
+            # Expired alarms are consumed, not indefinitely deferred at the venue.
+            if plan is not None and at.astimezone(UTC) >= plan.event.start.astimezone(UTC):
+                return False
+            return _present_at_destination(config, plan, location, at)
+
+        # Read current payload, plan and fix under the claim lock, not from the
+        # pending snapshot. Presence never consumes a row or counts as a retry.
         ping = _store.claim_ping_entry(
             candidate.id, now, leave_only=quiet_at(now), due_only=True,
+            defer_if=defer_if_present,
         )
         if ping is None:
             logger.debug("Ping %s already claimed or suppressed", candidate.id)
+            continue
+        if (ping.kind in _RETRYABLE_PING_KINDS and claim_plan is not None
+                and now.astimezone(UTC) >= claim_plan.event.start.astimezone(UTC)):
+            logger.info("Discarding expired %s ping %s", ping.kind, ping.id)
             continue
 
         # Honor `commutecompass mute <event>` / `mute --today`. The mute
@@ -408,6 +463,8 @@ def run(
                 continue
             if (plan.leave_at.astimezone(UTC) - now.astimezone(UTC)).total_seconds() > window_seconds:
                 continue
+            if _present_at_destination(config, plan, _store.get_current_location(), now):
+                continue
             try:
                 new_plan = _plan_event_fn(
                     plan.event,
@@ -423,6 +480,8 @@ def run(
 
             new_plan = _retain_replan_safety(plan, new_plan)
             now = _now_fn()
+            if _present_at_destination(config, new_plan, _store.get_current_location(), now):
+                continue
             if not _location_update_significant(plan, new_plan):
                 continue
 

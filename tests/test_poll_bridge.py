@@ -3,7 +3,7 @@
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from bridge_helpers import BOARDING, build_index, directions
@@ -170,7 +170,7 @@ def test_directions_morning_through_nyct_poll(
         # Newly urgent prep is clamped to now, claimed atomically and dispatched
         # using the refreshed payload, not the morning's scheduled text.
         assert store.get_pending_ping(event.id, "prep") is None
-        claim.assert_called_once_with(prep.id, POLL, leave_only=False, due_only=True)
+        claim.assert_called_once_with(prep.id, POLL, leave_only=False, due_only=True, defer_if=ANY)
         assert notifier.send.call_args.args[0] == format_prep_ping(saved)
         assert notifier.send.call_args.args[0] != prep.message
         with store._connect() as conn:
