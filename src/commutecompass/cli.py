@@ -537,11 +537,13 @@ def plan(ctx: click.Context, selector: str, here: bool, from_address: str | None
     if new_plan.error:
         click.echo(f"Plan error: {new_plan.error}")
     else:
-        assert new_plan.leave_at is not None
         assert new_plan.prep_at is not None
         suffix = " (preview — not saved)" if is_preview else ""
         click.echo(f"Plan for {event_id}:{suffix}")
-        click.echo(f"  Leave at:   {new_plan.leave_at.strftime('%H:%M:%S')}")
+        if new_plan.leave_at is not None:
+            click.echo(f"  Leave at:   {new_plan.leave_at.strftime('%H:%M:%S')}")
+        else:
+            click.echo("  Video call — no commute")
         click.echo(f"  Start prep: {new_plan.prep_at.strftime('%H:%M:%S')}")
         if new_plan.route:
             click.echo(f"  Duration:   {new_plan.route.total_duration_seconds // 60} min")
@@ -854,7 +856,7 @@ def _apply_adjust(
     if plan is None:
         click.echo(f"No plan found for event {event_id}.", err=True)
         sys.exit(EXIT_NOT_FOUND)
-    if plan.prep_at is None or plan.leave_at is None:
+    if plan.prep_at is None or (plan.leave_at is None and not plan.event.virtual):
         click.echo(
             f"Event {event_id} has no scheduled prep/leave time — cannot adjust.",
             err=True,
@@ -899,10 +901,14 @@ def _apply_adjust(
         )
 
     direction = "earlier" if add_prep > 0 else "later"
+    leave_note = (
+        f"leave_at {plan.leave_at.strftime('%I:%M %p').lstrip('0')} unchanged."
+        if plan.leave_at is not None
+        else "video call, no leave time."
+    )
     click.echo(
         f"Adjusted prep for {event_id}: prep_at {new_prep_at.strftime('%I:%M %p').lstrip('0')} "
-        f"({abs(add_prep)} min {direction}); leave_at "
-        f"{plan.leave_at.strftime('%I:%M %p').lstrip('0')} unchanged."
+        f"({abs(add_prep)} min {direction}); {leave_note}"
     )
 
 

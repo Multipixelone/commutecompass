@@ -34,6 +34,8 @@ class CalendarSpec(BaseModel):
 class PrepConfig(BaseModel):
     prep_minutes: int = Field(default=20, ge=0, le=24 * 60)
     safety_buffer_minutes: int = Field(default=5, ge=0, le=24 * 60)
+    # Lead time before a video-call event (no commute): get-ready ping + wake.
+    virtual_prep_minutes: int = Field(default=15, ge=0, le=24 * 60)
 
 
 class SchedulingConfig(BaseModel):

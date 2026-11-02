@@ -281,6 +281,14 @@ def _format_plan_summary(plan: Plan) -> str:
     else:
         icon = "📍"
     lines.append(f"{icon} *{escape_md(_sanitize_text(event.title))}* \\({escape_md(_sanitize_text(event.calendar_name))}\\)")
+    if event.virtual and plan.leave_at is None and not plan.error:
+        lines.append(f"  {start_str} · 📹 video call")
+        if plan.prep_at:
+            prep_str = plan.prep_at.strftime("%I:%M %p").lstrip("0")
+            lines.append(f"  Get ready: {prep_str}")
+        lines.append("")
+        return "\n".join(lines)
+
     location = _destination_label(plan)
     lines.append(
         f"  {start_str} at {escape_md(_sanitize_text(location))}"

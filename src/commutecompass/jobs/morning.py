@@ -151,7 +151,8 @@ def run(config: Config) -> None:
 
     # ── 4. Schedule future prep + leave pings ─────────────────────────────────
     for plan in plans:
-        if plan.leave_at is None:
+        # Virtual (video-call) plans have prep_at but no leave_at.
+        if plan.leave_at is None and not plan.event.virtual:
             continue
 
         # prep ping
@@ -175,7 +176,7 @@ def run(config: Config) -> None:
             )
 
         # leave ping
-        if plan.leave_at.astimezone(UTC) > _now.astimezone(UTC):
+        if plan.leave_at is not None and plan.leave_at.astimezone(UTC) > _now.astimezone(UTC):
             message = format_leave_ping(plan)
             ping = PingEntry(
                 id=str(uuid.uuid4()),

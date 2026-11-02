@@ -421,6 +421,29 @@ def test_plan_event_location_unresolved(
     assert result.prep_at is None
 
 
+def test_virtual_event_gets_prep_without_commute(
+    event: Event,
+    config: Config,
+) -> None:
+    """Video-call events skip resolution and get prep_at = start - virtual lead."""
+    vevent = event.model_copy(update={"location_raw": None, "virtual": True})
+    with patch("commutecompass.resolver.resolve") as mock_resolve:
+        result = plan_event(
+            vevent,
+            config,
+            MagicMock(spec=VenueRegistry),
+            MagicMock(),
+            MagicMock(spec=OpencodeGoClient),
+        )
+    mock_resolve.assert_not_called()
+    assert result.error is None
+    assert result.route is None
+    assert result.leave_at is None
+    assert result.prep_at == vevent.start - timedelta(
+        minutes=config.prep.virtual_prep_minutes
+    )
+
+
 def test_plan_event_too_imminent_when_leave_in_past(
     event: Event,
     config: Config,

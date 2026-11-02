@@ -1278,6 +1278,23 @@ def test_format_digest_does_not_surface_event_id() -> None:
     assert "a1b2c3d4" not in out
 
 
+def test_format_digest_virtual_event_shows_video_call_and_prep() -> None:
+    """Video-call plans render a get-ready time, not an unresolved location."""
+    start = datetime(2026, 11, 2, 19, 0, tzinfo=UTC)
+    event = Event(
+        id="therapy", calendar_id="cal1", calendar_name="Personal",
+        title="Therapy", start=start, end=start + timedelta(hours=1),
+        location_effective="", virtual=True,
+    )
+    plan = Plan(event=event, prep_at=start - timedelta(minutes=15))
+
+    out = format_digest([plan], [])
+    assert "video call" in out
+    assert "Get ready:" in out
+    assert "unknown location" not in out
+    assert "Could not figure out" not in out
+
+
 def test_format_digest_emits_selector_footer_when_plans_present() -> None:
     """A short hint at the bottom tells OpenClaw how to refer to events."""
     event = make_event(id="aaaaaaaabbbb", title="X", start=datetime(2026, 5, 26, 9, 0, tzinfo=UTC))

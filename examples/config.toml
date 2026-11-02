@@ -18,6 +18,8 @@ lirr_station = "Atlantic Terminal"
 [prep]
 prep_minutes = 20
 safety_buffer_minutes = 5
+# Get-ready lead (ping + wake alarm) for video-call events with no location.
+virtual_prep_minutes = 15
 
 [scheduling]
 morning_run_time = "06:00"

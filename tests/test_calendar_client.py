@@ -212,6 +212,41 @@ def test_fetch_events_skips_all_day(
     assert events[0].id == "event-timed"
 
 
+def test_fetch_events_flags_virtual_only(
+    client_secret_json: str,
+    token_path: Path,
+) -> None:
+    """Video-call events with no physical location are flagged virtual."""
+    times = {
+        "start": {"dateTime": "2026-05-08T14:00:00+00:00"},
+        "end": {"dateTime": "2026-05-08T15:00:00+00:00"},
+    }
+    items = [
+        {"id": "meet-only", "summary": "Therapy",
+         "hangoutLink": "https://meet.google.com/abc-defg-hij", **times},
+        {"id": "url-location", "summary": "Call",
+         "location": "https://zoom.us/j/123456", **times},
+        {"id": "hybrid", "summary": "Hybrid", "location": "1 Main St, Brooklyn, NY",
+         "hangoutLink": "https://meet.google.com/xyz", **times},
+        {"id": "no-location", "summary": "Plain", **times},
+    ]
+
+    client = CalendarClient(client_secret_json, token_path)
+    with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
+        events = client.fetch_events(
+            [CalendarSpec(id="cal-personal", name="Personal", enabled=True)],
+            start=make_aware(datetime(2026, 5, 8, 0, 0, 0)),
+            end=make_aware(datetime(2026, 5, 8, 23, 59, 59)),
+        )
+
+    assert {e.id: e.virtual for e in events} == {
+        "meet-only": True,
+        "url-location": True,
+        "hybrid": False,
+        "no-location": False,
+    }
+
+
 def test_fetch_events_skips_disabled_calendars(
     client_secret_json: str,
     token_path: Path,

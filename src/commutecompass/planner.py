@@ -156,6 +156,16 @@ def plan_event(
     # Retain the named destination without overwriting the calendar's raw value.
     event = event.model_copy(update={"location_effective": raw_location})
 
+    # Video call with no configured override: no commute, just a get-ready time
+    # (drives the prep ping and the wake alarm).  An explicit location override
+    # means the user does travel, so it falls through to normal planning.
+    if event.virtual and raw_location == (event.location_raw or ""):
+        prep_at = datetime.fromtimestamp(
+            event.start.timestamp() - config.prep.virtual_prep_minutes * 60,
+            tz=event.start.tzinfo,
+        )
+        return Plan(event=event, prep_at=prep_at)
+
     # Determine travel mode (CLI > event > location-based config > default)
     mode: Literal["transit", "driving", "walking", "bicycling"] = (
         mode_override

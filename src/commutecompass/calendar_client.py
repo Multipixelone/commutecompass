@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from google.auth.exceptions import RefreshError
@@ -22,6 +23,28 @@ if TYPE_CHECKING:
 
 class AuthError(Exception):
     """Raised when OAuth refresh fails and user needs to re-authenticate."""
+
+
+_URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
+
+
+def _is_virtual_only(item: dict[str, Any]) -> bool:
+    """True if an event is a video call with no physical location.
+
+    Google Meet attachments arrive as ``hangoutLink``/``conferenceData`` while
+    ``location`` stays empty; other providers often paste the join URL into
+    ``location``.  Either way there is nowhere to travel to (the event is still
+    planned, with a get-ready time but no commute).  An event with a
+    real (non-URL) location is kept even if it also has a call attached.
+    """
+    location = (item.get("location") or "").strip()
+    location_is_url = bool(location) and all(
+        _URL_RE.match(part.strip()) for part in re.split(r"[,;\n]", location) if part.strip()
+    )
+    if location and not location_is_url:
+        return False
+    has_conference = bool(item.get("hangoutLink") or item.get("conferenceData"))
+    return location_is_url or has_conference
 
 
 
@@ -172,6 +195,7 @@ class CalendarClient:
                         location_raw=item.get("location"),
                         location_resolved=None,
                         mode_override=None,
+                        virtual=_is_virtual_only(item),
                     )
                     events.append(event)
 

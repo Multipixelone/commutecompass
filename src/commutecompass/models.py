@@ -187,6 +187,9 @@ class Event(BaseModel):
     location_effective: str | None = None
     location_resolved: ResolvedLocation | None = None
     mode_override: Literal["transit", "driving", "walking", "bicycling"] | None = None
+    # Video call (Meet/Zoom link, no physical location): nothing to commute to,
+    # but still worth a get-ready ping and wake alarm.
+    virtual: bool = False
 
 
 class GtfsProvenance(BaseModel):
