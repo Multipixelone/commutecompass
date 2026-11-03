@@ -266,6 +266,9 @@ class Plan(BaseModel):
     leave_at: datetime | None = None
     prep_at: datetime | None = None
     error: str | None = None
+    # Real latest departure the leave/prep times were derived from (before
+    # any buffer).  None for older plans and plans without a route.
+    depart_at: datetime | None = None
     # Safety + weather + realtime buffer used when this plan was computed.
     # None for older plans; current config cannot recover their original buffer.
     leave_buffer_minutes: int | None = Field(default=None, ge=0)

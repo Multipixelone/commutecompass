@@ -194,6 +194,8 @@ def test_plan_respects_selected_transit_departure(
     assert result.leave_at == route.depart_at - timedelta(minutes=total_buffer)
     assert result.prep_at == result.leave_at - timedelta(minutes=config.prep.prep_minutes)
     assert result.leave_buffer_minutes == total_buffer
+    # The real departure is exposed unbuffered, whatever the buffers add up to.
+    assert result.depart_at == route.depart_at
     assert result.realtime_buffer_minutes == realtime_minutes
     timing = route_timing(result.route)
     assert timing.duration_seconds == 3095
@@ -236,6 +238,7 @@ def test_duration_based_planning_without_current_schedule(
         seconds=seconds, minutes=config.prep.safety_buffer_minutes,
     )
     assert result.leave_buffer_minutes == config.prep.safety_buffer_minutes
+    assert result.depart_at == event.start - timedelta(seconds=seconds)
     timing = route_timing(result.route)
     assert timing.duration_seconds == seconds
     assert timing.depart_at is None and timing.arrive_at is None
@@ -295,6 +298,7 @@ def test_corrected_schedule_triggers_too_imminent(
         result = plan_event(event, config, MagicMock(), MagicMock(), MagicMock())
     assert result.error == "too_imminent"
     assert result.leave_buffer_minutes == 13
+    assert result.depart_at == route.depart_at
 
 
 @pytest.mark.parametrize("buffer_minutes", [0, 30])
