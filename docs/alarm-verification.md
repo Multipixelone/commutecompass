@@ -42,6 +42,16 @@
   fallback acknowledgement, DST and activity recovery. This is source approval,
   not device activation evidence.
 
+## Wake window source evidence (2026-11-03)
+
+- Fake-clock tests in `tests/test_alarm_window.py` cover the D-50..D-13
+  schedule, unlimited and shortened snoozes, re-ring profile, HA stop as
+  snooze, quiet timeout, final no-snooze/no-timeout/desktop-only dismissal,
+  restart mid-window (including with HA down) and after the deadline, DST
+  days, old cache files and unchanged nap/fallback/legacy behaviour.
+  `tests/test_alarm_ramp.py` covers hold-then-ramp volumes; `tests/test_alarm.py`
+  covers D-50 publication and `departure_at`. No HA write, audio or push.
+
 ## Activation gates (not automated by a unit test)
 
 1. Update the infra commutecompass flake input to a revision containing this feature; enable the optional daemon and publish timer for link. Configure `[alarm].enabled = true` in the private configuration, sharing the existing HA credentials. Enable the HA master switch once. Apply iot and link configuration deliberately; do not assume repo commits are deployed.
@@ -49,7 +59,8 @@
 3. Build the iOS Shortcut and its 21:00/charger automation on the phone. Grant HA critical notification permission and run a manual sync; compare `commute_alarm_confirmed` to the published wake. Ensure iPhone and HA interpret NYC times correctly, including travel/timezone changes.
 4. With the user present and warned, set a short nap test: verify speaker ramp, looping, restore of previous mute/volume, keyboard/mouse stop, HA stop, snooze, and 15-minute cap (using shorter configured values if desired). Start at safe physical speaker volume; software percent cannot measure loudness.
 5. Simulate audio failure / disconnected daemon with a near-future test deadline; verify exactly one critical alert. Restore services/settings afterward.
-6. Keep a manually set phone alarm until both the desktop end-to-end test and phone alarm have demonstrably worked.
+6. Commute wake window (needs the infra follow-up first: `input_text.commute_departure_utc`, `input_text.commute_alarm_window_done_utc`, publish script accepting `departure_at`). With the window values temporarily shortened, verify: first ring at D-50 at the normal ramp; 5-minute snoozes from HA button and phone action; re-ring hold at 20 % then slow ramp; HA stop only snoozes; final at D-13 ignores snooze/stop and keeps ringing; only keyboard/mouse at link dismisses it and writes the window-done helper; HA restores the fairy lights afterwards.
+7. Keep a manually set phone alarm until both the desktop end-to-end test and phone alarm have demonstrably worked.
 
 ## Limits
 

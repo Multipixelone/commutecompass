@@ -24,7 +24,7 @@ automatic, commute-aware, and loud.
 
 ```
 commutecompass alarm publish (timer + tomorrow job + poll replans)
-   └─POST script.commute_publish_alarm {wake_at, next_prep_at, next_event}
+   └─POST script.commute_publish_alarm {wake_at, next_prep_at, next_event[, departure_at]}
 HA
    input_datetime.commute_wake_at        ← publish
    input_datetime.commute_next_prep_at   ← publish   (effective nap/snooze cap)
@@ -44,6 +44,8 @@ HA
    input_text.commute_alarm_heartbeat_utc ← authoritative UTC heartbeat
    input_text.commute_alarm_handled_at ← daemon successful playback acknowledgement
    input_boolean.commute_alarm_audio_failed ← daemon playback-failure latch
+   input_text.commute_departure_utc ← publish (window: real departure D; epoch 0 = none)
+   input_text.commute_alarm_window_done_utc ← daemon (desktop dismissal of a window)
    input_text.commute_alarm_fallback_claims ← HA-owned once-only ledger
    automations: nap button → script; offline/audio-failed critical fallback
                 (once in deadline+1min to +3min window);
@@ -56,9 +58,18 @@ link: commutecompass alarm daemon (systemd, user tunnel, XDG_RUNTIME_DIR for Pip
 - Target logical day: today's wake if still in the future, else tomorrow's.
 - Plans for the day: earliest non-None `prep_at` across planned events (same
   planning as `jobs/tomorrow.py`; no DB upsert).
-- `wake = min(prep_at - wake_lead, fallback_time on that day)`; no plans → fallback.
-- `next_prep_at` = earliest future `prep_at` from today's/tomorrow's plans,
-  minus `wake_lead` — the effective hard cap for HA naps and daemon snoozes.
+- `wake = min(first_alarm, fallback_time on that day)`; no plans → fallback.
+  `first_alarm` is `D - window.first_alarm_lead_minutes` for a healthy commute
+  plan with a known real departure `D` while `[alarm.window]` is enabled, else
+  `prep_at - wake_lead`.
+- `D` (`alarm.plan_departure`) is the planner's real departure from the door
+  (`Plan.depart_at`), *not* `leave_at`; older stored plans derive it as
+  `leave_at + leave_buffer_minutes` and plans without either have no `D`.
+- `departure_at` (window enabled only) is `D` when the published wake is that
+  plan's window first alarm, else empty. The daemon treats a wake as a commute
+  window only when `departure - wake == first_alarm_lead` exactly.
+- `next_prep_at` = earliest future first alarm from today's/tomorrow's plans
+  — the effective hard cap for HA naps and legacy daemon snoozes.
   The cap itself can already have passed, in which case a nap is refused. May be null.
 - HA retains a just-due wake for the three-minute fallback window before ordinary
   next-day rollover; active desktop playback/snooze retains its original bounds.
@@ -105,6 +116,17 @@ snooze_minutes = 9
 max_snoozes = 2
 poll_seconds = 30
 cache_path = ""                  # empty = <db dir>/alarm-cache.json
+
+[alarm.window]                   # commute wake window (wakes with a known D)
+enabled = true
+departure_utc_entity = "input_text.commute_departure_utc"
+window_done_entity = "input_text.commute_alarm_window_done_utc"  # "" = off
+first_alarm_lead_minutes = 50    # first ring at D-50
+deadline_lead_minutes = 13       # final alarm at D-13
+snooze_minutes = 5               # unlimited count inside the window
+rering_start_percent = 20        # re-ring: absolute sink level ...
+rering_hold_seconds = 30         # ... held this long ...
+rering_ramp_seconds = 60         # ... then ramped to 100 %
 ```
 
 ### CLI (`commutecompass alarm …`)
@@ -122,3 +144,32 @@ instant more than 10 min stale on startup (missed alarm > late alarm).
 Audio: resolve sink via `wpctl status`/`pw-dump`; save volume+mute; unmute,
 set volume ramp; loop `pw-play --target <node>`; restore on stop/exit (also on
 SIGTERM).
+
+The state machine above is unchanged for naps, fallback wakes and any wake
+without a matching published departure.
+
+### Commute wake window (agreed 2026-11-03)
+
+Applies only to a `wake` whose published `departure_at` (`D`) satisfies
+`D - wake == first_alarm_lead`. `D` is the real departure from the door, not
+`leave_at` (no safety-buffer subtraction).
+
+| Time | Behaviour |
+|------|-----------|
+| D-60 | HA lights phase (fairy lights take-over + fade). HA-only; not the daemon. |
+| D-50 | First ring: configured sound, 30 → 100 % over `ramp_seconds`. |
+| D-50..D-13 | Snooze (HA button / phone action) = 5 min, unlimited; a snooze is shortened to end at D-13. HA **stop** acts as a snooze, never a dismissal. A ring left alone for `max_ring_minutes` goes quiet until D-13 (never idle). |
+| re-ring | Starts at 20 % absolute sink level, holds 30 s, ramps to 100 % over 60 s; snooze works throughout. |
+| D-13 | Final alarm: full first-alarm ramp (or keeps playing if already ringing), snooze and HA stop ignored, no ring timeout. |
+| any | Desktop activity (hypridle) dismisses the whole window and writes `window_done_entity`. |
+
+Only the master switch and an explicit skip cancel a window. A replan may move
+`D` earlier (deadline earlier) but never later; a cleared/changed wake helper
+does not cancel an active window. The window (`departure`, `phase`) is cached,
+so a restart mid-window resumes the snooze and still rings the final alarm; a
+due commute alarm rings late (as final if past D-13) until `D` itself, instead
+of the 10-minute stale limit. After `D` it is skipped and logged.
+
+Accepted failure modes: no phone fallback if desktop audio fails; with
+`stop_on_activity = false` the final alarm only ends via the master switch or
+skip (the daemon warns at startup).
