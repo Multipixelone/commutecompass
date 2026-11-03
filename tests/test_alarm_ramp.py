@@ -282,7 +282,10 @@ def test_daemon_quiesces_local_worker_on_all_exit_paths(tmp_path: Path, action: 
     assert h.calls == calls
 
 
-def test_stop_waits_only_for_inflight_command_before_restoring(tmp_path: Path) -> None:
+@pytest.mark.parametrize("command_fails", [False, True])
+def test_stop_waits_only_for_inflight_command_before_restoring(
+    tmp_path: Path, command_fails: bool,
+) -> None:
     h = RampHarness(tmp_path / "alarm.opus")
     entered, release = Event(), Event()
     original_run = h.player._runner
@@ -297,10 +300,20 @@ def test_stop_waits_only_for_inflight_command_before_restoring(tmp_path: Path) -
             if args[:2] == ["wpctl", "set-volume"] and args[-1] == "0.3700":
                 entered.set()
                 assert release.wait(2)
+                if command_fails:
+                    raise subprocess.TimeoutExpired(args, 0.5)
             return original_run(args)
         finally:
             active -= 1
 
+    original_restore = h.player._restore
+
+    def restore() -> None:
+        # Cancellation owns restoration only after the worker has been joined.
+        assert h.player._worker is None
+        original_restore()
+
+    h.player._restore = restore  # type: ignore[method-assign]
     h.player._runner = run
     h.player.start()
     h.ready()
@@ -320,8 +333,95 @@ def test_stop_waits_only_for_inflight_command_before_restoring(tmp_path: Path) -
         h.player.stop()
     assert not stopper.is_alive()
     assert max_active == 1
-    assert h.volumes == [0.3, 0.37, 0.2]
+    assert h.player._worker is None
+    assert h.volumes == ([0.3, 0.2] if command_fails else [0.3, 0.37, 0.2])
     assert h.calls[-1][1] == ["wpctl", "set-mute", "52", "1"]
+    calls = list(h.calls)
+    h.now += 10
+    if not command_fails:
+        h.player.tick()
+    assert h.calls == calls
+
+
+@pytest.mark.parametrize("fault", ["terminate", "wait", "kill", "reap", "volume", "mute", None])
+def test_stop_cleanup_failures_restore_and_retain_retryable_state(
+    tmp_path: Path, fault: str | None,
+) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start()
+    h.ready()
+    events: list[str] = []
+    failing = True
+
+    class StopProc(_Proc):
+        def terminate(self) -> None:
+            events.append("terminate")
+            if failing and fault == "terminate":
+                raise OSError("terminate failed")
+
+        def wait(self, timeout: float) -> int:
+            events.append("wait")
+            if not self.done:
+                if failing and fault == "wait":
+                    raise OSError("wait failed")
+                raise subprocess.TimeoutExpired("pw-play", timeout)
+            if failing and fault == "reap":
+                raise OSError("reap failed")
+            return 0
+
+        def kill(self) -> None:
+            events.append("kill")
+            if failing and fault == "kill":
+                raise OSError("kill failed")
+            self.done = True
+
+    proc = StopProc()
+    # Replace the mock playback process only after launch; no real process exists.
+    h.player._proc = proc  # type: ignore[assignment]
+    original_run = h.player._runner
+
+    def run(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["wpctl", "set-volume"] and args[-1] == "0.20":
+            events.append("volume")
+            if failing and fault == "volume":
+                raise OSError("volume failed")
+        if args[:2] == ["wpctl", "set-mute"] and args[-1] == "1":
+            events.append("mute")
+            if failing and fault == "mute":
+                raise OSError("mute failed")
+        return original_run(args)
+
+    h.player._runner = run
+    try:
+        if fault is None:
+            h.player.stop()
+        else:
+            with pytest.raises(OSError, match="failed"):
+                h.player.stop()
+        assert h.player._worker is None
+        assert events[-2:] == ["volume", "mute"]
+        assert "kill" in events
+        if fault != "kill":
+            assert events[events.index("kill") + 1] == "wait"  # reap after kill
+        assert (h.player._proc is not None) == (fault in {"kill", "reap"})
+        assert (h.player._saved is not None) == (fault in {"volume", "mute"})
+        if fault in {"kill", "reap", "volume", "mute"}:
+            count = len(h.procs)
+            with pytest.raises(OSError, match="failed"):
+                h.player.start()
+            assert len(h.procs) == count  # never start over unresolved cleanup
+            assert h.player._worker is None
+    finally:
+        failing = False
+        h.player.stop()
+    assert h.player._proc is None
+    assert h.player._saved is None
+    calls = list(h.calls)
+    h.player.start()
+    h.ready()
+    assert h.volumes[-1] == 0.3
+    h.player.stop()
+    assert h.calls[:len(calls)] == calls
 
 
 @pytest.mark.parametrize("blocking", ["read", "publish"])

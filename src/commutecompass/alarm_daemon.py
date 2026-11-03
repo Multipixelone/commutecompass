@@ -660,11 +660,12 @@ class PipeWirePlayer:
         except Exception as exc:
             logger.exception("alarm local audio failed")
             self._error = exc
-            try:
-                # Restore even if the HA thread is blocked in a request.
-                self._restore()
-            except Exception:
-                logger.exception("alarm audio restoration failed")
+            if not self._stop.is_set():
+                try:
+                    # Restore even if HA is blocked, unless stop owns cleanup.
+                    self._restore()
+                except Exception:
+                    logger.exception("alarm audio restoration failed")
 
     def stop(self) -> None:
         self._stop.set()
@@ -675,22 +676,47 @@ class PipeWirePlayer:
         self._restore()
 
     def _restore(self) -> None:
-        proc, self._proc = self._proc, None
+        errors: list[Exception] = []
+        proc = self._proc
         if proc is not None:
-            if proc.poll() is None:
-                proc.terminate()
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception as exc:  # noqa: BLE001 — finish cleanup before reporting
+                errors.append(exc)
             try:
                 proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            except Exception as exc:  # noqa: BLE001 — kill/reap even after a wait error
+                if not isinstance(exc, subprocess.TimeoutExpired):
+                    errors.append(exc)
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception as kill_exc:  # noqa: BLE001 — still restore the sink
+                    # Keep the handle: a later stop must retry, not orphan it.
+                    errors.append(kill_exc)
+                else:
+                    self._proc = None
+            else:
+                self._proc = None
         if self._saved is not None:
             vol, muted = self._saved
             target = self._target()
-            try:
-                self._run(["wpctl", "set-volume", target, f"{vol:.2f}"])
-            finally:
-                self._run(["wpctl", "set-mute", target, "1" if muted else "0"])
-            self._saved = None
+            restored = True
+            # Attempt both even when process cleanup or one sink command fails.
+            for args in (
+                ["wpctl", "set-volume", target, f"{vol:.2f}"],
+                ["wpctl", "set-mute", target, "1" if muted else "0"],
+            ):
+                try:
+                    self._run(args)
+                except Exception as exc:  # noqa: BLE001 — attempt both, retain failed snapshot
+                    restored = False
+                    errors.append(exc)
+            if restored:
+                self._saved = None
+        if errors:
+            raise errors[0]
 
 
 def synthesize_tone(path: Path, *, rate: int = 22_050) -> Path:
