@@ -941,6 +941,46 @@ class TestAlarmConfig:
         assert cfg.alarm.window.deadline_lead_minutes == 0
         assert cfg.alarm.window.deadline_utc_entity == "input_text.commute_alarm_deadline_utc"
 
+    def test_schedule_contract_defaults_legacy(self) -> None:
+        from commutecompass.config import AlarmConfig
+
+        a = AlarmConfig()
+        assert a.schedule_contract == "legacy"
+        assert a.schedule_entity == "input_text.commute_alarm_schedule_v1"
+        assert a.contract_entity == "input_select.commute_alarm_contract"
+        assert a.publish_v1_script == "script.commute_publish_alarm_v1"
+        # Status export is opt-in: empty by default.
+        assert a.status_entity == ""
+        assert (
+            AlarmConfig(status_entity="sensor.commute_alarm_status").status_entity
+            == "sensor.commute_alarm_status"
+        )
+
+    def test_schedule_contract_validated(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import AlarmConfig
+
+        assert AlarmConfig(schedule_contract="v1").schedule_contract == "v1"
+        with pytest.raises(ValidationError):
+            AlarmConfig(schedule_contract="v2")  # type: ignore[arg-type]
+
+    def test_schedule_contract_loads_from_toml(
+        self, tmp_path: Path, minimal_toml: Path, required_env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for k, v in required_env.items():
+            monkeypatch.setenv(k, v)
+        p = tmp_path / "c.toml"
+        p.write_text(
+            minimal_toml.read_text()
+            + '\n[alarm]\nenabled = true\nschedule_contract = "v1"\n'
+            'status_entity = "sensor.commute_alarm_status"\n'
+        )
+        cfg = load_config(p)
+        assert cfg.alarm.schedule_contract == "v1"
+        assert cfg.alarm.status_entity == "sensor.commute_alarm_status"
+
     def test_window_deadline_must_precede_first_alarm(self) -> None:
         from pydantic import ValidationError
 

@@ -1,5 +1,17 @@
 # Alarm verification and activation
 
+## Opt-in HA contract repair
+
+The additive implementation contract is [alarm-ha-contract.md](alarm-ha-contract.md).
+Its evidence must include exact serialized length (including microseconds and
+nulls), publication ordering/conflict/idempotency plus exact readback, HA restart
+republish, same-mode final transitions, session-keyed terminal snapshots, player
+failure, and fail-closed v1 schedule adoption. Slow/failing optional status export
+must not reset audio timing or prevent master-off/skip/desktop dismissal. Offline
+mocked tests do not establish real HA rendering, delivery, or audibility. Private
+infra remains unedited and unactivated; its owner must review all consumers and
+render the versioned script before any separately authorized migration.
+
 ## Claims and evidence owners
 
 - Publisher lane: commute wake is buffered `Plan.leave_at` (L) minus 37 minutes;

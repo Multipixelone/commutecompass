@@ -45,15 +45,17 @@ import tempfile
 import time as _time
 import wave
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from uuid import uuid4
 
 import httpx
 
+from commutecompass.alarm_contract import ScheduleError, format_utc, parse_schedule
 from commutecompass.timeutil import now_nyc, to_nyc
 
 if TYPE_CHECKING:
@@ -167,20 +169,41 @@ def _helper_time(
 
 def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> Inputs:
     """Map the raw HA state dump onto :class:`Inputs`."""
-    nxt = states.get(cfg.next_alarm_entity, {})
+    v1 = cfg.schedule_contract == "v1"
+    nxt = {} if v1 else states.get(cfg.next_alarm_entity, {})
     attrs = nxt.get("attributes") if isinstance(nxt.get("attributes"), dict) else {}
     kind = attrs.get("kind") if isinstance(attrs, dict) else ""
     enabled_state = states.get(cfg.enabled_entity, {}).get("state")
     # Publisher already subtracts wake_lead_minutes: this helper is HA's
     # effective hard cap, not the raw prep time. Never subtract the lead twice.
-    threshold, prep_known = _helper_time(states, cfg.next_prep_utc_entity)
-    wake, wake_known = _helper_time(states, cfg.wake_utc_entity)
+    threshold, prep_known = (None, False) if v1 else _helper_time(states, cfg.next_prep_utc_entity)
+    wake, wake_known = (None, False) if v1 else _helper_time(states, cfg.wake_utc_entity)
     nap, nap_known = _helper_time(states, cfg.nap_utc_entity)
     skipped, _ = _helper_time(states, cfg.skipped_utc_entity)
     deadline: datetime | None = None
     deadline_known = False
-    if cfg.window.enabled and cfg.window.deadline_utc_entity:
+    if not v1 and cfg.window.enabled and cfg.window.deadline_utc_entity:
         deadline, deadline_known = _helper_time(states, cfg.window.deadline_utc_entity)
+    if cfg.schedule_contract == "v1":
+        # A partial migration/write is no new wake knowledge, not a downgrade.
+        wake = deadline = threshold = None
+        wake_known = deadline_known = prep_known = False
+        if states.get(cfg.contract_entity, {}).get("state") == "v1":
+            try:
+                schedule = parse_schedule(
+                    states.get(cfg.schedule_entity, {}).get("state"),
+                    first_lead_seconds=cfg.window.first_alarm_lead_minutes * 60,
+                )
+            except ScheduleError as exc:
+                logger.warning("alarm daemon: ignoring invalid v1 schedule: %s", exc)
+            else:
+                wake, deadline = schedule.wake_at, schedule.deadline_at
+                # Despite its name, next_prep_at is the publisher's effective first-alarm
+                # / nap cap (WakeResult.next_prep_at), not raw prep. Never subtract twice.
+                threshold = schedule.next_prep_at
+                wake_known = deadline_known = prep_known = True
+        # Do not even expose the legacy sensor as a v1 wake hint.
+        nxt, kind = {}, ""
     return Inputs(
         ha_ok=True,
         next_alarm=parse_ha_datetime(nxt.get("state")),
@@ -220,6 +243,34 @@ class HAReader:
 
 
 @dataclass(frozen=True)
+class SessionStatus:
+    id: str
+    original_at: datetime
+    kind: str
+    phase: str
+    locked_deadline_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RingStatus:
+    id: str
+    started_at: datetime
+    playback: Literal["starting", "running", "stopped", "failed"] = "starting"
+    checked_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TerminalStatus:
+    session_id: str
+    original_at: datetime
+    kind: str
+    phase: str
+    locked_deadline_at: datetime | None
+    ended_at: datetime
+    reason: str
+
+
+@dataclass(frozen=True)
 class DaemonState:
     mode: Mode = "idle"
     enabled: bool = True
@@ -241,6 +292,11 @@ class DaemonState:
     pending_deadline: datetime | None = None
     # ISO-UTC instants already rung (or skipped as stale) — never re-ring.
     done: tuple[str, ...] = ()
+    revision: int = 0
+    session: SessionStatus | None = None
+    ring: RingStatus | None = None
+    ended_wake: TerminalStatus | None = None
+    ended_nap: TerminalStatus | None = None
 
     def is_done(self, instant: datetime) -> bool:
         return _key(instant) in self.done
@@ -250,10 +306,59 @@ def _key(instant: datetime) -> str:
     return instant.astimezone(UTC).isoformat()
 
 
+def _same_instant(left: datetime | None, right: datetime | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return _key(left) == _key(right)
+
+
 def _mark_done(state: DaemonState, instant: datetime) -> DaemonState:
     if state.is_done(instant):
         return state
     return replace(state, done=(*state.done, _key(instant))[-_DONE_MAX:])
+
+
+def _status_record(value: SessionStatus | RingStatus | TerminalStatus | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {key: format_utc(item) if isinstance(item, datetime) else item
+            for key, item in asdict(value).items()}
+
+
+def _load_session(raw: Any) -> SessionStatus | None:
+    if not isinstance(raw, dict):
+        return None
+    instant = parse_ha_datetime(raw.get("original_at"))
+    identity = raw.get("id")
+    if (not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{32}", identity) is None
+            or instant is None or raw.get("kind") not in ("wake", "nap")
+            or raw.get("phase") not in ("legacy", "window", "final")):
+        return None
+    return SessionStatus(identity, instant, raw["kind"], raw["phase"],
+                         parse_ha_datetime(raw.get("locked_deadline_at")))
+
+
+def _load_ring(raw: Any, *, stopped: bool = False) -> RingStatus | None:
+    if not isinstance(raw, dict):
+        return None
+    instant = parse_ha_datetime(raw.get("started_at"))
+    identity = raw.get("id")
+    if (not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{32}", identity) is None
+            or instant is None):
+        return None
+    # A previous process's successful playback is not evidence of current health.
+    return RingStatus(identity, instant, "stopped" if stopped else "starting")
+
+
+def _load_terminal(raw: Any) -> TerminalStatus | None:
+    if not isinstance(raw, dict):
+        return None
+    session = _load_session({**raw, "id": raw.get("session_id")})
+    ended = parse_ha_datetime(raw.get("ended_at"))
+    reason = raw.get("reason")
+    if session is None or ended is None or not isinstance(reason, str):
+        return None
+    return _terminal(session, ended, reason)
 
 
 class AlarmCache:
@@ -291,11 +396,23 @@ class AlarmCache:
             raw_phase if raw_phase in ("window", "final") and deadline is not None
             and restored_mode != "idle" else ""
         )
+        active_kind = str(raw.get("active_kind") or "")
+        locked_deadline = deadline if phase else None
+        session = _load_session(raw.get("session")) if restored_mode != "idle" else None
+        if session is not None and (
+            not _same_instant(session.original_at, active) or session.kind != active_kind
+            or session.phase != (phase or "legacy")
+            or not _same_instant(session.locked_deadline_at, locked_deadline)
+        ):
+            session = None
+        ring = _load_ring(raw.get("ring"), stopped=restored_mode == "snoozed") if session else None
+        if ring is not None and not _same_instant(ring.started_at, ring_started):
+            ring = None
         return DaemonState(
             mode=restored_mode,
             enabled=raw.get("enabled", True) is not False,
             active=active if restored_mode != "idle" else None,
-            active_kind=str(raw.get("active_kind") or ""),
+            active_kind=active_kind,
             ring_started=ring_started,
             snooze_until=snooze_until,
             snoozes=max(0, snoozes) if isinstance(snoozes, int) else 0,
@@ -304,8 +421,13 @@ class AlarmCache:
             prep_threshold=parse_ha_datetime(raw.get("prep_threshold")),
             pending=pending,
             pending_kind=str(raw.get("pending_kind") or ""),
-            deadline=deadline if phase else None,
+            deadline=locked_deadline,
             phase=phase,
+            revision=max(0, raw.get("revision", 0)) if type(raw.get("revision")) is int else 0,
+            session=session,
+            ring=ring,
+            ended_wake=_load_terminal(raw.get("ended_wake")),
+            ended_nap=_load_terminal(raw.get("ended_nap")),
             pending_deadline=parse_ha_datetime(raw.get("pending_deadline")),
             done=tuple(str(d) for d in done)[-_DONE_MAX:] if isinstance(done, list) else (),
         )
@@ -328,6 +450,11 @@ class AlarmCache:
             "prep_threshold": state.prep_threshold.isoformat() if state.prep_threshold else None,
             "deadline": state.deadline.isoformat() if state.deadline else None,
             "phase": state.phase,
+            "revision": state.revision,
+            "session": _status_record(state.session),
+            "ring": _status_record(state.ring),
+            "ended_wake": _status_record(state.ended_wake),
+            "ended_nap": _status_record(state.ended_nap),
             "pending_deadline": (
                 state.pending_deadline.isoformat() if state.pending_deadline else None
             ),
@@ -553,7 +680,7 @@ def _window_step(
     return state
 
 
-def step(
+def _step(
     state: DaemonState, now: datetime, inputs: Inputs, settings: Settings
 ) -> tuple[DaemonState, list[Action]]:
     """Advance one poll; HA's future-only sensor is a hint, helpers are authority."""
@@ -676,6 +803,107 @@ def step(
             actions += [StartRing(instant, kind), PublishState("ringing")]
             state = replace(state, mode="ringing", active=instant, active_kind=kind,
                             ring_started=now, snoozes=0)
+    return state, actions
+
+
+def _session(state: DaemonState, instant: datetime, kind: str) -> SessionStatus:
+    return SessionStatus(uuid4().hex, instant, kind, state.phase or "legacy", state.deadline)
+
+
+def _terminal(session: SessionStatus, now: datetime, reason: str) -> TerminalStatus:
+    return TerminalStatus(session.id, session.original_at, session.kind, session.phase,
+                          session.locked_deadline_at, now, reason)
+
+
+def _status_semantics(state: DaemonState) -> tuple[object, ...]:
+    """Revision tracks exported meaning, not observation/check times or delivery attempts."""
+    ring = replace(state.ring, checked_at=None) if state.ring is not None else None
+    return (state.mode, state.session, ring, state.audio_failed, state.snooze_until,
+            state.ended_wake, state.ended_nap)
+
+
+def _advance_revision(previous: DaemonState, current: DaemonState) -> DaemonState:
+    revision = previous.revision + (_status_semantics(previous) != _status_semantics(current))
+    return replace(current, revision=revision)
+
+
+def _cancellation_reason(instant: datetime, kind: str, inputs: Inputs) -> str:
+    if _same_instant(inputs.skipped_at, instant):
+        return "skip"
+    replacement = inputs.nap_at if kind == "nap" else inputs.wake_at
+    return "schedule_cleared" if replacement is None else "schedule_replaced"
+
+
+def _record_terminal(state: DaemonState, terminal: TerminalStatus) -> DaemonState:
+    if terminal.kind == "nap":
+        return replace(state, ended_nap=terminal)
+    return replace(state, ended_wake=terminal)
+
+
+def step(
+    state: DaemonState, now: datetime, inputs: Inputs, settings: Settings
+) -> tuple[DaemonState, list[Action]]:
+    """Advance scheduling and persistable logical identities, independent of HA export."""
+    if state.active is not None and state.session is None:
+        state = replace(state, session=_session(state, state.active, state.active_kind))
+    if state.mode == "ringing" and state.ring is None and state.ring_started is not None:
+        state = replace(state, ring=RingStatus(uuid4().hex, state.ring_started))
+    previous = state
+    state, actions = _step(state, now, inputs, settings)
+    reason = ""
+    if previous.active is not None and not _same_instant(state.active, previous.active):
+        if not state.enabled:
+            reason = "master_off"
+        elif (_window_cancelled(previous, inputs) if previous.phase else _cancelled(
+            previous.active, previous.active_kind, inputs, preserve_rollover=True,
+        )):
+            reason = _cancellation_reason(previous.active, previous.active_kind, inputs)
+        elif (any(isinstance(a, PublishWindowDone) for a in actions)
+              or _after(inputs.activity_at, previous.ring_started)):
+            reason = "desktop_activity"
+        elif (previous.deadline is not None and now.astimezone(UTC)
+              - _minus(previous.deadline, (settings.window or WindowSettings()).deadline_lead).astimezone(UTC)
+              > settings.stale_limit):
+            reason = "recovery_expired"
+        elif _after(inputs.stop_pressed_at, previous.ring_started):
+            reason = "legacy_stop"
+        else:
+            reason = "legacy_timeout"
+        if previous.session is not None:
+            terminal = _terminal(previous.session, now, reason)
+            state = _record_terminal(state, terminal)
+    # Cancellation or missed recovery may consume a cached candidate before its first ring.
+    if state.active is None and not reason:
+        candidates = [(previous.pending, previous.pending_kind, previous.pending_deadline),
+                      (inputs.wake_at, "wake", inputs.deadline_at), (inputs.nap_at, "nap", None)]
+        for instant, kind, deadline in candidates:
+            if instant is None or previous.is_done(instant):
+                continue
+            disabled_pending = not state.enabled and _same_instant(instant, previous.pending)
+            if not state.is_done(instant) and not disabled_pending:
+                continue
+            if not state.enabled:
+                reason = "master_off"
+            elif inputs.ha_ok and _cancelled(instant, kind, inputs):
+                reason = _cancellation_reason(instant, kind, inputs)
+            else:
+                reason = "recovery_expired"
+            session = SessionStatus(uuid4().hex, instant, kind, "window" if deadline else "legacy", deadline)
+            terminal = _terminal(session, now, reason)
+            state = _record_terminal(state, terminal)
+            break
+    if state.active is None:
+        state = replace(state, session=None, ring=None)
+    else:
+        existing_session = previous.session if _same_instant(state.active, previous.active) else None
+        session = existing_session or _session(state, state.active, state.active_kind)
+        session = replace(session, phase=state.phase or "legacy", locked_deadline_at=state.deadline)
+        ring = previous.ring if _same_instant(state.active, previous.active) else None
+        if any(isinstance(a, StartRing) for a in actions):
+            ring = RingStatus(uuid4().hex, state.ring_started or now)
+        elif state.mode != "ringing" and ring is not None:
+            ring = replace(ring, playback="stopped", checked_at=now)
+        state = replace(state, session=session, ring=ring)
     return state, actions
 
 
@@ -1086,6 +1314,7 @@ class AlarmDaemon:
     publish_audio_failed: Callable[[bool], bool] = lambda _f: True
     publish_handled: Callable[[datetime], bool] = lambda _t: True
     publish_window_done: Callable[[datetime], bool] = lambda _t: True
+    publish_status: Callable[[dict[str, Any]], bool] | None = None
     activity_monitor: ActivityMonitor | None = None
     clock: Callable[[], datetime] = now_nyc
     sleep: Callable[[float], None] = _time.sleep
@@ -1135,6 +1364,9 @@ class AlarmDaemon:
                     self.state = replace(self.state, mode="snoozed", phase="window", snooze_until=now)
             self._restoring_window = False
         self.state, actions = step(self.state, now, inputs, self.settings)
+        if (self._resume_audio and _same_instant(before.active, self.state.active)
+                and before.mode == self.state.mode == "ringing" and before.ring is not None):
+            self.state = replace(self.state, ring=before.ring, ring_started=before.ring_started)
         # Persist before playback so a restart can resume the same bounded
         # ring/snooze window rather than consume or extend it.
         if self._resume_audio:
@@ -1145,8 +1377,10 @@ class AlarmDaemon:
             ):
                 actions.insert(0, StartRing(self.state.active, self.state.active_kind,
                                             ring_profile(self.state, self.settings)))
-        if before != self.state:
+        self.state = _advance_revision(before, self.state)
+        if self.state != before:
             self.cache.save(self.state)
+        before_audio = self.state
         for action in actions:
             self._apply(action)
         if inputs.ha_ok:
@@ -1173,8 +1407,13 @@ class AlarmDaemon:
             and self.publish_handled(self._handled_pending)
         ):
             self._handled_pending = None
+        if self.state.ring is not None and self.state.mode == "ringing":
+            playback: Literal["running", "failed"] = "running" if self._audio_healthy else "failed"
+            self.state = replace(self.state, ring=replace(self.state.ring, playback=playback,
+                                                          checked_at=self.clock()))
         self.state = replace(self.state, audio_failed=not self._audio_healthy)
-        if self.state != before:
+        self.state = _advance_revision(before_audio, self.state)
+        if self.state != before_audio:
             self.cache.save(self.state)
         if (
             inputs.ha_ok
@@ -1187,6 +1426,11 @@ class AlarmDaemon:
             or (now.astimezone(UTC) - self._last_heartbeat.astimezone(UTC)).total_seconds() >= self.poll_seconds
         ) and self.heartbeat(now):
             self._last_heartbeat = now
+        if inputs.ha_ok and self.publish_status is not None:
+            try:
+                self.publish_status(status_snapshot(self.state, self.clock()))
+            except Exception as exc:  # noqa: BLE001 — advisory export must never gate controls
+                logger.warning("alarm daemon: status export failed: %s", exc)
         return RINGING_POLL_SECONDS if self.state.mode != "idle" else self.poll_seconds
 
     def _apply(self, action: Action) -> None:
@@ -1258,6 +1502,17 @@ class AlarmDaemon:
             self._reconcile_mode()
 
 
+def status_snapshot(state: DaemonState, now: datetime) -> dict[str, Any]:
+    """Small HA REST state payload. Never used as scheduling authority."""
+    return {"state": state.mode, "attributes": {
+        "schema": 1, "revision": state.revision, "observed_at": format_utc(now),
+        "session": _status_record(state.session), "ring": _status_record(state.ring),
+        "audio_failed": state.audio_failed,
+        "snooze_until": format_utc(state.snooze_until) if state.snooze_until else None,
+        "ended": {"wake": _status_record(state.ended_wake), "nap": _status_record(state.ended_nap)},
+    }}
+
+
 def build_daemon(config: Config) -> AlarmDaemon:
     """Wire the real HA reader, PipeWire player and HA write-back."""
     from commutecompass.alarm import require_ha
@@ -1304,6 +1559,23 @@ def build_daemon(config: Config) -> AlarmDaemon:
         return call_service(base_url, token, "input_text", "set_value",
                             {"entity_id": cfg.window.window_done_entity, "value": _key(instant)})
 
+    def publish_status(payload: dict[str, Any]) -> bool:
+        # One attempt with phase/inactivity timeouts, not a total wall-clock deadline.
+        # Inspect headers only: an arbitrary/trickling response body must not delay controls.
+        try:
+            timeout = httpx.Timeout(connect=0.5, read=0.5, write=0.5, pool=0.5)
+            with httpx.Client(timeout=timeout) as client, client.stream(
+                "POST", f"{base_url.rstrip('/')}/api/states/{cfg.status_entity}",
+                headers={"Authorization": f"Bearer {token}"}, json=payload,
+            ) as response:
+                if not 200 <= response.status_code < 300:
+                    logger.warning("alarm daemon: status export returned %s", response.status_code)
+                    return False
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("alarm daemon: status export failed: %s", exc)
+            return False
+        return True
+
     return AlarmDaemon(
         reader=HAReader(base_url, token, cfg).read,
         player=PipeWirePlayer(cfg.sink, sound, initial_volume=cfg.ramp_start_percent / 100,
@@ -1316,6 +1588,7 @@ def build_daemon(config: Config) -> AlarmDaemon:
         publish_audio_failed=publish_audio_failed,
         publish_handled=publish_handled,
         publish_window_done=publish_window_done,
+        publish_status=publish_status if cfg.status_entity else None,
         activity_monitor=ActivityMonitor(cfg.wayland_display) if cfg.stop_on_activity else None,
     )
 

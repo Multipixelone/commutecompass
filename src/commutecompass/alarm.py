@@ -24,6 +24,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Literal
 
+from commutecompass.alarm_contract import (
+    ScheduleError,
+    ScheduleSnapshot,
+    build_publish_payload,
+    new_schedule,
+)
 from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc, now_nyc, to_nyc
 
 if TYPE_CHECKING:
@@ -269,6 +275,109 @@ def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, obje
     return payload
 
 
+def build_schedule(
+    result: WakeResult,
+    config: Config,
+    *,
+    issued_at: datetime,
+    schedule_id: str | None = None,
+) -> ScheduleSnapshot:
+    """v1 snapshot for ``result``: ``commute`` with a window deadline, else ``legacy``.
+
+    The returned snapshot carries the publication identity (id + issued_at);
+    retries must reuse it instead of building a new one.
+    """
+    lead_seconds = config.alarm.window.first_alarm_lead_minutes * 60
+    try:
+        return new_schedule(
+            issued_at=issued_at,
+            kind="commute" if result.deadline_at is not None else "legacy",
+            wake_at=result.wake_at,
+            deadline_at=result.deadline_at,
+            next_prep_at=result.next_prep_at,
+            schedule_id=schedule_id,
+            first_lead_seconds=lead_seconds,
+        )
+    except ScheduleError as exc:
+        raise AlarmError(f"cannot build alarm schedule v1: {exc}") from exc
+
+
+def fetch_entity_state(
+    base_url: str, token: str, entity_id: str, *, timeout: float = 5.0,
+) -> str | None:
+    """``GET /api/states/{entity_id}`` → raw ``state`` string, None on any failure."""
+    import httpx
+
+    url = f"{base_url.rstrip('/')}/api/states/{entity_id}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("alarm: HA read of %s failed: %s", entity_id, exc)
+        return None
+    if response.status_code != 200:
+        logger.warning("alarm: HA read of %s returned %d", entity_id, response.status_code)
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        logger.warning("alarm: HA read of %s returned bad JSON", entity_id)
+        return None
+    state = body.get("state") if isinstance(body, dict) else None
+    return state if isinstance(state, str) else None
+
+
+def publish_v1(
+    config: Config,
+    schedule: ScheduleSnapshot,
+    next_event: str,
+    *,
+    attempts: int = 2,
+) -> str:
+    """Publish ``schedule`` via ``publish_v1_script`` and confirm exact readback.
+
+    Sends ``{"snapshot": <canonical string>, "next_event": ...}``; the HA
+    script owns ordering (stale/conflicting publications are refused there).
+    Acceptance is only ``schedule_entity`` holding the exact canonical string
+    afterwards — HTTP success alone is not enough, and a lost response whose
+    commit is visible counts as success.  Each of ``attempts`` (no sleep)
+    resends the *same* snapshot.  Never falls back to, or writes, the legacy
+    script.  Returns the snapshot string; raises :class:`AlarmError`.
+    """
+    from commutecompass.ha_client import call_service
+
+    base_url, token = require_ha(config)
+    domain, name = split_service(config.alarm.publish_v1_script)
+    if not config.alarm.schedule_entity:
+        raise AlarmConfigError("alarm.schedule_entity must be set for schedule_contract v1")
+    try:
+        payload = build_publish_payload(
+            schedule, next_event,
+            first_lead_seconds=config.alarm.window.first_alarm_lead_minutes * 60,
+        )
+    except ScheduleError as exc:
+        raise AlarmError(f"invalid alarm schedule v1: {exc}") from exc
+    snapshot = payload["snapshot"]
+    data: dict[str, object] = dict(payload)
+    observed: str | None = None
+    for _ in range(max(1, attempts)):
+        called = call_service(base_url, token, domain, name, data=data)
+        observed = fetch_entity_state(base_url, token, config.alarm.schedule_entity)
+        if observed == snapshot:
+            logger.info("alarm: v1 schedule %s committed", schedule.id)
+            return snapshot
+        # Never log the raw helper value: it is arbitrary HA state.
+        logger.warning(
+            "alarm: v1 publish of %s not confirmed (call_ok=%s, readback=%s)",
+            schedule.id, called,
+            "missing" if observed is None else f"mismatch(len={len(observed)})",
+        )
+    raise AlarmError(
+        f"alarm schedule v1 {schedule.id} not confirmed in {config.alarm.schedule_entity}"
+    )
+
+
 def publish(
     config: Config,
     *,
@@ -281,7 +390,9 @@ def publish(
     """Compute the wake and POST it to ``[alarm].publish_script``.
 
     Returns ``(result, pushed)``.  ``pushed`` is False on dry-run or HA
-    failure.  Raises :class:`AlarmConfigError` when HA is not configured (not
+    failure.  With ``schedule_contract = "v1"`` the wake is published only
+    via :func:`publish_v1` (never the legacy script), and an unconfirmed
+    commit raises :class:`AlarmError` instead of returning False.  Raises :class:`AlarmConfigError` when HA is not configured (not
     on dry-run) and :class:`AlarmError` when planning fails.
     """
     from commutecompass.ha_client import call_service
@@ -289,7 +400,10 @@ def publish(
     _now = now or now_nyc()
     if not dry_run:
         base_url, token = require_ha(config)
-        domain, name = split_service(config.alarm.publish_script)
+        v1 = config.alarm.schedule_contract == "v1"
+        domain, name = split_service(
+            config.alarm.publish_v1_script if v1 else config.alarm.publish_script
+        )
     if store is None and plans_for_day is None:
         from commutecompass.store import Store
 
@@ -306,6 +420,12 @@ def publish(
     )
     if dry_run:
         return result, False
+    if config.alarm.schedule_contract == "v1":
+        schedule = build_schedule(result, config, issued_at=_now)
+        publish_v1(config, schedule, result.next_event)
+        if store is not None:
+            store.record_job_success("alarm_publish", _now)
+        return result, True
     payload = build_payload(result, window=config.alarm.window.enabled)
     ok = call_service(base_url, token, domain, name, data=payload)
     if not ok:

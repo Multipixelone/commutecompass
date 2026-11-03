@@ -48,6 +48,13 @@ if no anchor); it does not send `prep_at`, `logical_date`, `summary` or
 it is the buffered door-leave deadline, not a train departure. The coordinated
 private infra contract migration is pending; this document does not claim deployment.
 
+## Optional v1 HA contract repair
+
+See [alarm-ha-contract.md](alarm-ha-contract.md) for the opt-in atomic schedule
+and advisory session-status contract, including versioned HA declarations for
+the infra owner. Legacy defaults remain unchanged. The implementation does not
+activate v1, publish upstream, edit infra, or establish live-device behavior.
+
 ## State & contracts
 
 ### Python additions

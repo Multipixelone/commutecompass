@@ -360,6 +360,18 @@ class AlarmConfig(BaseModel):
     # Empty = <db dir>/alarm-cache.json
     cache_path: str = ""
     window: AlarmWindowConfig = AlarmWindowConfig()
+    # HA contract (docs/alarm-ha-contract.md).  ``legacy`` keeps the old
+    # ``publish_script`` payload; ``v1`` publishes one atomic snapshot via
+    # ``publish_v1_script`` and confirms exact readback of ``schedule_entity``.
+    # No automatic fallback between the two.
+    schedule_contract: Literal["legacy", "v1"] = "legacy"
+    schedule_entity: str = "input_text.commute_alarm_schedule_v1"
+    contract_entity: str = "input_select.commute_alarm_contract"
+    publish_v1_script: str = "script.commute_publish_alarm_v1"
+    # Advisory daemon status sensor (POST /api/states).  Empty (default)
+    # disables the export so new HA traffic stays explicitly opt-in; set e.g.
+    # ``status_entity = "sensor.commute_alarm_status"`` to enable it.
+    status_entity: str = ""
 
     @field_validator("fallback_time")
     @classmethod

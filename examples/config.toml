@@ -215,6 +215,13 @@ enabled = false
 fallback_time = "12:00"          # HH:MM NYC; latest morning wake, even without events
 wake_lead_minutes = 0
 publish_script = "script.commute_publish_alarm"
+# Opt-in repair contract: stage/review HA consumers before separately approved activation.
+# See docs/alarm-ha-contract.md. Missing v1 state never falls back to legacy.
+schedule_contract = "legacy"
+schedule_entity = "input_text.commute_alarm_schedule_v1"
+contract_entity = "input_select.commute_alarm_contract"
+publish_v1_script = "script.commute_publish_alarm_v1"
+status_entity = ""               # opt-in advisory export: sensor.commute_alarm_status
 nap_script = "script.commute_nap"
 skip_script = "script.commute_alarm_skip"
 next_alarm_entity = "sensor.commute_next_alarm"

@@ -568,3 +568,311 @@ def test_historical_success_does_not_excuse_future_error(tmp_path: Path, error: 
                 ],
             }),
         )
+
+
+# ─────────── schedule contract v1 ───────────
+
+class _FakeHA:
+    """Mock HA: script call result + scripted readbacks of the schedule helper."""
+
+    def __init__(self, *, call_ok: bool = True, readbacks: list[str | None] | None = None,
+                 commit: bool = True) -> None:
+        self.call_ok = call_ok
+        self.readbacks = list(readbacks or [])
+        self.commit = commit
+        self.helper: str | None = "old"
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.reads: list[str] = []
+
+    def call_service(self, *args: Any, **kwargs: Any) -> bool:
+        self.calls.append((args, kwargs))
+        raw = kwargs["data"]["snapshot"]
+        # Like HA's input_text (max: 255) / script length guard: the *raw
+        # received* string is what must fit, so check it here, not upstream.
+        assert isinstance(raw, str) and len(raw) <= 255, len(raw)
+        if self.commit:
+            self.helper = kwargs["data"]["snapshot"]
+        return self.call_ok
+
+    def fetch(self, base_url: str, token: str, entity_id: str, **_: Any) -> str | None:
+        self.reads.append(entity_id)
+        if self.readbacks:
+            return self.readbacks.pop(0)
+        return self.helper
+
+
+def _publish_v1(tmp_path: Path, ha: _FakeHA, plans: list[Plan], **alarm: Any) -> Any:
+    cfg = _config(tmp_path, schedule_contract="v1", **alarm)
+    with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service), patch(
+        "commutecompass.alarm.fetch_entity_state", side_effect=ha.fetch,
+    ):
+        return publish(
+            cfg, now=_nyc(2026, 10, 15, 5, 0, ),
+            plans_for_day=_provider({date(2026, 10, 15): plans}),
+        )
+
+
+def test_v1_publishes_canonical_snapshot_and_confirms(tmp_path: Path) -> None:
+    from commutecompass.alarm_contract import parse_schedule
+
+    ha = _FakeHA()
+    plan = _commute_plan(_nyc(2026, 10, 15, 9, 0))
+    result, ok = _publish_v1(tmp_path, ha, [plan])
+    assert ok
+    assert len(ha.calls) == 1
+    args, kwargs = ha.calls[0]
+    assert args[:4] == ("http://ha.local:8123", "ha-tok", "script", "commute_publish_alarm_v1")
+    assert set(kwargs["data"]) == {"snapshot", "next_event"}
+    assert kwargs["data"]["next_event"] == "Class"
+    snap = parse_schedule(kwargs["data"]["snapshot"])
+    assert snap.kind == "commute"
+    assert snap.wake_at == result.wake_at
+    assert snap.deadline_at == result.deadline_at == plan.leave_at
+    assert snap.next_prep_at == result.next_prep_at
+    assert snap.issued_at == _nyc(2026, 10, 15, 5, 0)
+    assert '"issued_at":"2026-10-15T09:00:00Z"' in kwargs["data"]["snapshot"]
+    assert ha.reads == ["input_text.commute_alarm_schedule_v1"]
+
+
+def test_v1_prep_only_wake_is_legacy_kind(tmp_path: Path) -> None:
+    from commutecompass.alarm_contract import parse_schedule
+
+    ha = _FakeHA()
+    _publish_v1(tmp_path, ha, [_plan(_nyc(2026, 10, 15, 8, 0))])
+    snap = parse_schedule(ha.calls[0][1]["data"]["snapshot"])
+    assert snap.kind == "legacy" and snap.deadline_at is None
+
+
+def test_v1_fallback_wake_is_legacy_kind(tmp_path: Path) -> None:
+    from commutecompass.alarm_contract import parse_schedule
+
+    ha = _FakeHA()
+    _publish_v1(tmp_path, ha, [])
+    snap = parse_schedule(ha.calls[0][1]["data"]["snapshot"])
+    assert snap.kind == "legacy"
+    assert snap.wake_at == _nyc(2026, 10, 15, 12, 0)
+
+
+def test_v1_custom_first_lead_round_trips(tmp_path: Path) -> None:
+    from commutecompass.alarm_contract import parse_schedule
+    from commutecompass.config import AlarmWindowConfig
+
+    ha = _FakeHA()
+    _publish_v1(tmp_path, ha, [_commute_plan(_nyc(2026, 10, 15, 9, 0))],
+                window=AlarmWindowConfig(first_alarm_lead_minutes=30))
+    raw = ha.calls[0][1]["data"]["snapshot"]
+    assert parse_schedule(raw, first_lead_seconds=1800).kind == "commute"
+
+
+@pytest.mark.parametrize("readbacks", [
+    [None, None],  # helper unreadable
+    ["old", "old"],  # HA refused (e.g. stale/conflict) — helper unchanged
+    ["garbage", "garbage"],
+])
+def test_v1_call_success_without_exact_readback_raises(
+    tmp_path: Path, readbacks: list[str | None],
+) -> None:
+    ha = _FakeHA(readbacks=readbacks)
+    with pytest.raises(AlarmError):
+        _publish_v1(tmp_path, ha, [_commute_plan(_nyc(2026, 10, 15, 9, 0))])
+    # Never falls back to the legacy publish script.
+    assert all(c[0][3] == "commute_publish_alarm_v1" for c in ha.calls)
+
+
+def test_v1_retry_reuses_identity_and_body(tmp_path: Path) -> None:
+    ha = _FakeHA(call_ok=False, commit=False)
+    with pytest.raises(AlarmError):
+        _publish_v1(tmp_path, ha, [_commute_plan(_nyc(2026, 10, 15, 9, 0))])
+    assert len(ha.calls) == 2
+    assert ha.calls[0][1]["data"] == ha.calls[1][1]["data"]
+    assert all(c[0][3] == "commute_publish_alarm_v1" for c in ha.calls)
+
+
+def test_v1_lost_response_with_visible_commit_succeeds(tmp_path: Path) -> None:
+    ha = _FakeHA(call_ok=False, commit=True)
+    _, ok = _publish_v1(tmp_path, ha, [_commute_plan(_nyc(2026, 10, 15, 9, 0))])
+    assert ok and len(ha.calls) == 1
+
+
+def test_v1_second_attempt_confirms(tmp_path: Path) -> None:
+    ha = _FakeHA(readbacks=["old"])
+    _, ok = _publish_v1(tmp_path, ha, [_commute_plan(_nyc(2026, 10, 15, 9, 0))])
+    assert ok and len(ha.calls) == 2
+    assert ha.calls[0][1]["data"] == ha.calls[1][1]["data"]
+
+
+def test_v1_failure_via_publish_safe_never_writes_legacy(tmp_path: Path) -> None:
+    from commutecompass.alarm import publish_safe
+
+    ha = _FakeHA(call_ok=False, commit=False)
+    cfg = _config(tmp_path, schedule_contract="v1")
+    with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service), patch(
+        "commutecompass.alarm.fetch_entity_state", side_effect=ha.fetch,
+    ), patch("commutecompass.alarm.compute_wake") as cw:
+        cw.return_value = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({}))
+        publish_safe(cfg, now=_nyc(2026, 10, 15, 5, 0), store=None, planned={})
+    assert ha.calls and all(c[0][3] == "commute_publish_alarm_v1" for c in ha.calls)
+
+
+def test_v1_dry_run_skips_ha(tmp_path: Path) -> None:
+    ha = _FakeHA()
+    cfg = _config(tmp_path, schedule_contract="v1")
+    with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service):
+        _, ok = publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=_provider({}),
+                        dry_run=True)
+    assert not ok and not ha.calls
+
+
+def test_v1_malformed_script_id_rejected_before_planning(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, schedule_contract="v1", publish_v1_script="nodot")
+    provider = _provider({})
+    with pytest.raises(AlarmConfigError):
+        publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=provider)
+    assert provider.calls == []
+
+
+def test_fetch_entity_state_parses_and_fails_closed() -> None:
+    import httpx
+
+    from commutecompass.alarm import fetch_entity_state
+
+    def run(resp: Any) -> str | None:
+        with patch("httpx.Client") as client:
+            get = client.return_value.__enter__.return_value.get
+            if isinstance(resp, Exception):
+                get.side_effect = resp
+            else:
+                get.return_value = resp
+            return fetch_entity_state("http://ha/", "tok", "input_text.x")
+
+    assert run(httpx.Response(200, json={"state": "abc"})) == "abc"
+    assert run(httpx.Response(200, json={"state": 1})) is None
+    assert run(httpx.Response(200, json=[])) is None
+    assert run(httpx.Response(200, text="nope")) is None
+    assert run(httpx.Response(404, json={"state": "abc"})) is None
+    assert run(httpx.ConnectError("x")) is None
+    with patch("httpx.Client") as client:
+        get = client.return_value.__enter__.return_value.get
+        get.return_value = httpx.Response(200, json={"state": "s"})
+        fetch_entity_state("http://ha/", "tok", "input_text.x")
+        assert get.call_args.args[0] == "http://ha/api/states/input_text.x"
+
+
+def test_legacy_default_publish_unchanged(tmp_path: Path) -> None:
+    """Default contract keeps the legacy script and never reads the v1 helper."""
+    cfg = _config(tmp_path)
+    assert cfg.alarm.schedule_contract == "legacy"
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs, patch(
+        "commutecompass.alarm.fetch_entity_state",
+    ) as fetch:
+        publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=_provider({}))
+    fetch.assert_not_called()
+    assert cs.call_args.args[3] == "commute_publish_alarm"
+    assert set(cs.call_args.kwargs["data"]) == {"wake_at", "next_prep_at", "next_event", "deadline_at"}
+
+
+def test_v1_planner_failure_publishes_nothing(tmp_path: Path) -> None:
+    """Incomplete planning raises; it is never turned into a kind='none' clear."""
+    ha = _FakeHA()
+    cfg = _config(tmp_path, schedule_contract="v1")
+
+    def broken(day_start: datetime) -> list[Plan]:
+        raise AlarmError("calendar fetch failed")
+
+    with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service), patch(
+        "commutecompass.alarm.fetch_entity_state", side_effect=ha.fetch,
+    ):
+        with pytest.raises(AlarmError):
+            publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=broken)
+        # Background path swallows the error but still sends nothing.
+        from commutecompass.alarm import publish_safe
+
+        with patch("commutecompass.alarm._default_provider", return_value=broken):
+            publish_safe(cfg, now=_nyc(2026, 10, 15, 5, 0), store=None, planned={})
+    assert ha.calls == [] and ha.reads == []
+    assert ha.helper == "old"
+
+
+def test_v1_errored_plan_publishes_nothing(tmp_path: Path) -> None:
+    ha = _FakeHA()
+    with pytest.raises(AlarmError):
+        _publish_v1(tmp_path, ha, [_plan(_nyc(2026, 10, 15, 8, 0), error="no route")])
+    assert ha.calls == []
+
+
+def test_v1_publisher_never_emits_none_kind(tmp_path: Path) -> None:
+    """No events → fallback ``legacy`` wake; ``none`` is only built deliberately."""
+    from commutecompass.alarm import build_schedule
+    from commutecompass.alarm_contract import new_schedule, parse_schedule
+
+    cfg = _config(tmp_path)
+    for plans in ([], [_plan(_nyc(2026, 10, 15, 8, 0))],
+                  [_commute_plan(_nyc(2026, 10, 15, 9, 0))]):
+        r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0),
+                         _provider({date(2026, 10, 15): plans}))
+        assert build_schedule(r, cfg, issued_at=_nyc(2026, 10, 15, 5, 0)).kind != "none"
+    # The manual/test helper can still build a deliberate clear.
+    clear = new_schedule(issued_at=_nyc(2026, 10, 15, 5, 0), kind="none",
+                         wake_at=None, deadline_at=None, next_prep_at=None)
+    assert parse_schedule(build_payload_v1_snapshot(clear)).kind == "none"
+
+
+def build_payload_v1_snapshot(schedule: Any) -> str:
+    from commutecompass.alarm_contract import serialize_schedule
+
+    return serialize_schedule(schedule)
+
+
+def test_v1_next_prep_is_effective_first_alarm(tmp_path: Path) -> None:
+    """``next_prep_at`` carries the window start (leave - lead), not raw prep_at."""
+    from commutecompass.alarm_contract import parse_schedule
+
+    ha = _FakeHA()
+    plan = _commute_plan(_nyc(2026, 10, 15, 9, 0))
+    assert plan.leave_at is not None and plan.prep_at is not None
+    _publish_v1(tmp_path, ha, [plan])
+    snap = parse_schedule(ha.calls[0][1]["data"]["snapshot"])
+    first = plan.leave_at - timedelta(minutes=37)
+    assert snap.next_prep_at == first == snap.wake_at
+    assert snap.next_prep_at != plan.prep_at
+
+
+_US = timedelta(microseconds=123456)
+
+
+@pytest.mark.parametrize(("kind", "prep", "micro", "length"), [
+    ("commute", False, False, 189), ("commute", False, True, 210),
+    ("commute", True, False, 207), ("commute", True, True, 235),
+    ("legacy", False, False, 170), ("legacy", False, True, 184),
+    ("legacy", True, False, 188), ("legacy", True, True, 209),
+    ("none", False, False, 150), ("none", False, True, 157),
+])
+def test_v1_received_snapshot_length_per_kind(
+    tmp_path: Path, kind: str, prep: bool, micro: bool, length: int,
+) -> None:
+    """Length of the raw string the mocked HA script receives, every variant."""
+    from commutecompass.alarm import publish_v1
+    from commutecompass.alarm_contract import new_schedule, parse_schedule
+
+    m = _US if micro else timedelta(0)
+    deadline = datetime(2026, 11, 4, 13, 0, tzinfo=UTC) + m
+    sched = new_schedule(
+        issued_at=datetime(2026, 11, 4, 1, 0, tzinfo=UTC) + m,
+        kind=kind,  # type: ignore[arg-type]
+        wake_at=None if kind == "none" else deadline - timedelta(minutes=37),
+        deadline_at=deadline if kind == "commute" else None,
+        next_prep_at=datetime(2026, 11, 4, 12, 0, tzinfo=UTC) + m if prep else None,
+        schedule_id="6b6e9c724ace4c81a350ef144a7ef39b",
+    )
+    ha = _FakeHA()
+    cfg = _config(tmp_path, schedule_contract="v1")
+    with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service), patch(
+        "commutecompass.alarm.fetch_entity_state", side_effect=ha.fetch,
+    ):
+        returned = publish_v1(cfg, sched, "Example event")
+    received = ha.calls[0][1]["data"]["snapshot"]
+    assert isinstance(received, str)
+    assert len(received) == length <= 255
+    assert received == returned == ha.helper
+    assert ("." in received) is micro
+    assert parse_schedule(received) == sched
