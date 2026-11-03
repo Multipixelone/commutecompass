@@ -6,7 +6,9 @@ logic and the final "next alarm" selection, and ``alarm daemon`` rings it.
 
 Wake rule (Q2/Q8)::
 
-    wake = min(first_event.prep_at - wake_lead, fallback_time on that day)
+    wake = min(first_alarm(first_event), fallback_time on that day)
+    first_alarm = D - window.first_alarm_lead   (wake window: departure D known)
+                = prep_at - wake_lead           (window disabled / no D)
     no plan-able events -> fallback_time
 
 Target logical day: today's wake if it is still in the future, else
@@ -53,20 +55,63 @@ class WakeResult:
     # Plan whose prep_at drove the wake (None for fallback).
     plan: Plan | None
     # Earliest future prep_at across today/tomorrow, minus wake lead — HA nap cap.
+    # For wake-window plans this is the first window alarm instead.
     next_prep_at: datetime | None
     next_event: str
+    # Planned departure D when the wake opens a commute wake window
+    # (``wake_at == D - first_alarm_lead``); None for fallback/prep wakes.
+    departure_at: datetime | None = None
 
 
-def _earliest_prep_plan(plans: list[Plan], *, after: datetime | None = None) -> Plan | None:
-    """Plan with the smallest prep_at (non-errored), optionally strictly after ``after``."""
-    best: Plan | None = None
+def plan_departure(plan: Plan) -> datetime | None:
+    """Real (unbuffered) departure of ``plan``, or None when unknown.
+
+    Plans written before ``depart_at`` existed recover it from ``leave_at``
+    plus the buffer recorded with them; neither field means no departure.
+    """
+    if plan.depart_at is not None:
+        return plan.depart_at
+    if plan.leave_at is None or plan.leave_buffer_minutes is None:
+        return None
+    return (
+        plan.leave_at.astimezone(UTC) + timedelta(minutes=plan.leave_buffer_minutes)
+    ).astimezone(NYC_TZ)
+
+
+def _window_departure(plan: Plan, config: Config) -> datetime | None:
+    """Departure anchoring a wake window for ``plan``; None = plain prep wake."""
+    if not config.alarm.window.enabled or plan.error is not None:
+        return None
+    return plan_departure(plan)
+
+
+def _first_alarm(plan: Plan, config: Config) -> datetime | None:
+    """First alarm a healthy plan needs: window start, else prep minus lead."""
+    departure = _window_departure(plan, config)
+    if departure is not None:
+        lead = timedelta(minutes=config.alarm.window.first_alarm_lead_minutes)
+        return (departure.astimezone(UTC) - lead).astimezone(NYC_TZ)
+    if plan.prep_at is None:
+        return None
+    lead = timedelta(minutes=config.alarm.wake_lead_minutes)
+    return (plan.prep_at.astimezone(UTC) - lead).astimezone(NYC_TZ)
+
+
+def _earliest_alarm_plan(
+    plans: list[Plan], config: Config, *, after: datetime | None = None,
+) -> tuple[Plan, datetime] | None:
+    """Non-errored plan with the earliest first alarm, prep strictly after ``after``."""
+    best: tuple[Plan, datetime] | None = None
     for p in plans:
         if p.prep_at is None or p.error is not None:
             continue
         if after is not None and p.prep_at.astimezone(UTC) <= after.astimezone(UTC):
             continue
-        if best is None or best.prep_at is None or p.prep_at.astimezone(UTC) < best.prep_at.astimezone(UTC):
-            best = p
+        alarm = _first_alarm(p, config)
+        if alarm is None:
+            continue
+        if best is None or alarm.astimezone(UTC) < best[1].astimezone(UTC):
+            best = (p, alarm)
     return best
 
 
@@ -115,7 +160,9 @@ def wake_for_day(
                 raise AlarmError(f"incomplete planning for {day_start.date()}")
         assert prep is not None
         # Absolute arithmetic: same-zone datetime subtraction is wall-clock.
-        candidate = (prep.astimezone(UTC) - lead).astimezone(NYC_TZ)
+        candidate = _first_alarm(p, config) if p.error is None else None
+        if candidate is None:
+            candidate = (prep.astimezone(UTC) - lead).astimezone(NYC_TZ)
         if candidate.astimezone(UTC) < wake.astimezone(UTC):
             wake, first = candidate, p
     return wake, first
@@ -148,21 +195,26 @@ def compute_wake(
     if wake.astimezone(UTC) <= now_utc:
         raise AlarmError("no future wake in today's or tomorrow's plans")
 
-    nxt = _earliest_prep_plan([*today_plans, *tomorrow_plans], after=now)
+    # Nap cap: the next first alarm (window start or prep minus lead).
+    nxt = _earliest_alarm_plan([*today_plans, *tomorrow_plans], config, after=now)
     from commutecompass.format import _sanitize_text
 
+    departure: datetime | None = None
+    if plan is not None and _same_instant(_first_alarm(plan, config), wake):
+        departure = _window_departure(plan, config)
     return WakeResult(
         wake_at=to_nyc(wake),
         day=to_nyc(day_start).date(),
         source="event" if plan is not None else "fallback",
         plan=plan,
-        next_prep_at=(
-            (nxt.prep_at.astimezone(UTC) - timedelta(minutes=config.alarm.wake_lead_minutes))
-            .astimezone(NYC_TZ)
-            if nxt is not None and nxt.prep_at is not None else None
-        ),
-        next_event=_sanitize_text(nxt.event.title) if nxt is not None else "",
+        next_prep_at=nxt[1] if nxt is not None else None,
+        next_event=_sanitize_text(nxt[0].event.title) if nxt is not None else "",
+        departure_at=to_nyc(departure) if departure is not None else None,
     )
+
+
+def _same_instant(a: datetime | None, b: datetime) -> bool:
+    return a is not None and a.astimezone(UTC) == b.astimezone(UTC)
 
 
 def split_service(service: str) -> tuple[str, str]:
@@ -210,13 +262,22 @@ def _default_provider(
     return provider
 
 
-def build_payload(result: WakeResult) -> dict[str, object]:
-    """HA script fields for ``publish_script``."""
-    return {
+def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, object]:
+    """HA script fields for ``publish_script``.
+
+    ``window`` adds ``departure_at`` (empty = this wake opens no window), so
+    HA scripts without the field keep working while the window is disabled.
+    """
+    payload: dict[str, object] = {
         "wake_at": result.wake_at.isoformat(),
         "next_prep_at": result.next_prep_at.isoformat() if result.next_prep_at else "",
         "next_event": result.next_event,
     }
+    if window:
+        payload["departure_at"] = (
+            result.departure_at.isoformat() if result.departure_at else ""
+        )
+    return payload
 
 
 def publish(
@@ -248,14 +309,16 @@ def publish(
     provider = plans_for_day or _default_provider(config, planned or {}, store, _now)
     result = compute_wake(config, _now, provider)
     logger.info(
-        "alarm: wake_at=%s (%s) next_prep_at=%s",
+        "alarm: wake_at=%s (%s) next_prep_at=%s departure_at=%s",
         result.wake_at.isoformat(),
         result.source,
         result.next_prep_at.isoformat() if result.next_prep_at else "-",
+        result.departure_at.isoformat() if result.departure_at else "-",
     )
     if dry_run:
         return result, False
-    ok = call_service(base_url, token, domain, name, data=build_payload(result))
+    payload = build_payload(result, window=config.alarm.window.enabled)
+    ok = call_service(base_url, token, domain, name, data=payload)
     if not ok:
         logger.warning("alarm: publish to %s failed", config.alarm.publish_script)
     elif store is not None:

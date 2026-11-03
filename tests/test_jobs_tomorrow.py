@@ -484,4 +484,5 @@ def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> 
         "wake_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
         "next_prep_at": "",
         "next_event": "",
+        "departure_at": "",
     }

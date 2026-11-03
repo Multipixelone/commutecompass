@@ -237,8 +237,83 @@ def test_publish_calls_ha_script(tmp_path: Path) -> None:
         "wake_at": prep.isoformat(),
         "next_prep_at": prep.isoformat(),
         "next_event": "Class",
+        # Legacy plan without a departure opens no wake window.
+        "departure_at": "",
     }
     assert result.wake_at == prep
+
+
+def _commute_plan(depart: datetime, *, buffer: int = 13, prep: int = 20) -> Plan:
+    leave = depart - timedelta(minutes=buffer)
+    plan = _plan(leave - timedelta(minutes=prep))
+    return plan.model_copy(update={
+        "leave_at": leave, "depart_at": depart, "leave_buffer_minutes": buffer,
+    })
+
+
+def test_window_wake_is_departure_minus_first_lead(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=7)
+    depart = _nyc(2026, 10, 15, 9, 0)
+    r = compute_wake(
+        cfg, _nyc(2026, 10, 15, 5, 0),
+        _provider({date(2026, 10, 15): [_commute_plan(depart)]}),
+    )
+    assert r.wake_at == depart - timedelta(minutes=50)
+    assert r.departure_at == depart
+    # The nap cap follows the same first alarm.
+    assert r.next_prep_at == r.wake_at
+    payload = build_payload(r, window=True)
+    assert payload["departure_at"] == depart.isoformat()
+    assert payload["wake_at"] == (depart - timedelta(minutes=50)).isoformat()
+
+
+def test_window_recovers_departure_from_legacy_buffer(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    depart = _nyc(2026, 10, 15, 9, 0)
+    plan = _commute_plan(depart).model_copy(update={"depart_at": None})
+    r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
+    assert r.departure_at == depart
+    assert r.wake_at == depart - timedelta(minutes=50)
+
+
+def test_window_disabled_keeps_prep_wake_and_payload(tmp_path: Path) -> None:
+    from commutecompass.config import AlarmWindowConfig
+
+    cfg = _config(tmp_path, window=AlarmWindowConfig(enabled=False))
+    depart = _nyc(2026, 10, 15, 9, 0)
+    plan = _commute_plan(depart)
+    r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
+    assert r.wake_at == plan.prep_at
+    assert r.departure_at is None
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+        publish(
+            cfg, now=_nyc(2026, 10, 15, 5, 0),
+            plans_for_day=_provider({date(2026, 10, 15): [plan]}),
+        )
+    assert "departure_at" not in cs.call_args.kwargs["data"]
+
+
+def test_fallback_wake_opens_no_window(tmp_path: Path) -> None:
+    """A fallback earlier than D-50 wins and carries no departure."""
+    cfg = _config(tmp_path, fallback_time="07:00")
+    plan = _commute_plan(_nyc(2026, 10, 15, 9, 0))
+    r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
+    assert r.source == "fallback"
+    assert r.departure_at is None
+    assert build_payload(r, window=True)["departure_at"] == ""
+
+
+def test_window_wake_across_dst_fall_back(tmp_path: Path) -> None:
+    """D-50 is absolute: 50 real minutes before 02:10 EST is 01:20 EST, not EDT."""
+    cfg = _config(tmp_path)
+    depart = datetime(2026, 11, 1, 7, 10, tzinfo=UTC).astimezone(NYC_TZ)  # 02:10 EST
+    r = compute_wake(
+        cfg, datetime(2026, 11, 1, 5, 0, tzinfo=UTC),  # 01:00 EDT, logical Oct 31
+        _provider({date(2026, 11, 1): [_commute_plan(depart)]}),
+    )
+    assert r.departure_at == depart
+    assert r.wake_at.astimezone(UTC) == datetime(2026, 11, 1, 6, 20, tzinfo=UTC)
+    assert r.wake_at.utcoffset() == timedelta(hours=-5)
 
 
 def test_publish_dry_run_skips_ha(tmp_path: Path) -> None:
