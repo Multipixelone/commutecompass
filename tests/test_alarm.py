@@ -63,7 +63,8 @@ def _plan(prep_at: datetime, title: str = "Class", *, error: str | None = None) 
     )
     if error:
         return Plan(event=ev, error=error)
-    return Plan(event=ev, prep_at=prep_at, leave_at=prep_at + timedelta(minutes=20))
+    # Prep-only plan (e.g. a virtual event); commute tests supply leave_at below.
+    return Plan(event=ev, prep_at=prep_at)
 
 
 def _nyc(y: int, mo: int, d: int, h: int = 0, mi: int = 0) -> datetime:
@@ -237,43 +238,93 @@ def test_publish_calls_ha_script(tmp_path: Path) -> None:
         "wake_at": prep.isoformat(),
         "next_prep_at": prep.isoformat(),
         "next_event": "Class",
-        # Legacy plan without a departure opens no wake window.
-        "departure_at": "",
+        # Prep-only plan without a leave deadline opens no wake window.
+        "deadline_at": "",
     }
     assert result.wake_at == prep
 
 
 def _commute_plan(depart: datetime, *, buffer: int = 13, prep: int = 20) -> Plan:
-    leave = depart - timedelta(minutes=buffer)
-    plan = _plan(leave - timedelta(minutes=prep))
+    leave = (depart.astimezone(UTC) - timedelta(minutes=buffer)).astimezone(NYC_TZ)
+    prep_at = (leave.astimezone(UTC) - timedelta(minutes=prep)).astimezone(NYC_TZ)
+    plan = _plan(prep_at)
     return plan.model_copy(update={
         "leave_at": leave, "depart_at": depart, "leave_buffer_minutes": buffer,
     })
 
 
-def test_window_wake_is_departure_minus_first_lead(tmp_path: Path) -> None:
+def test_window_wake_is_leave_deadline_minus_first_lead(tmp_path: Path) -> None:
     cfg = _config(tmp_path, wake_lead_minutes=7)
     depart = _nyc(2026, 10, 15, 9, 0)
+    plan = _commute_plan(depart)
     r = compute_wake(
         cfg, _nyc(2026, 10, 15, 5, 0),
-        _provider({date(2026, 10, 15): [_commute_plan(depart)]}),
+        _provider({date(2026, 10, 15): [plan]}),
     )
-    assert r.wake_at == depart - timedelta(minutes=50)
-    assert r.departure_at == depart
+    assert plan.leave_at is not None
+    assert r.wake_at == plan.leave_at - timedelta(minutes=37)
+    assert r.deadline_at == plan.leave_at
     # The nap cap follows the same first alarm.
     assert r.next_prep_at == r.wake_at
     payload = build_payload(r, window=True)
-    assert payload["departure_at"] == depart.isoformat()
-    assert payload["wake_at"] == (depart - timedelta(minutes=50)).isoformat()
+    assert payload["deadline_at"] == plan.leave_at.isoformat()
+    assert payload["wake_at"] == (plan.leave_at - timedelta(minutes=37)).isoformat()
+    assert "departure_at" not in payload
 
 
-def test_window_recovers_departure_from_legacy_buffer(tmp_path: Path) -> None:
+def test_window_uses_leave_without_departure_or_buffer_metadata(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     depart = _nyc(2026, 10, 15, 9, 0)
-    plan = _commute_plan(depart).model_copy(update={"depart_at": None})
+    plan = _commute_plan(depart).model_copy(update={
+        "depart_at": None, "leave_buffer_minutes": None,
+    })
     r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
-    assert r.departure_at == depart
-    assert r.wake_at == depart - timedelta(minutes=50)
+    assert plan.leave_at is not None
+    assert r.deadline_at == plan.leave_at
+    assert r.wake_at == plan.leave_at - timedelta(minutes=37)
+
+
+@pytest.mark.parametrize("buffer_kind,extra_minutes", [
+    ("safety", 5), ("weather", 10), ("realtime", 6),
+])
+def test_buffer_shift_moves_published_window_with_fixed_departure(
+    tmp_path: Path, buffer_kind: str, extra_minutes: int,
+) -> None:
+    cfg = _config(tmp_path)
+    depart = _nyc(2026, 10, 15, 9, 0)
+    baseline = _commute_plan(depart)
+    assert baseline.leave_at is not None
+    shifted = baseline.model_copy(update={
+        "leave_at": baseline.leave_at - timedelta(minutes=extra_minutes),
+        "leave_buffer_minutes": 13 + extra_minutes,
+        **({f"{buffer_kind}_buffer_minutes": extra_minutes} if buffer_kind != "safety" else {}),
+    })
+    assert shifted.depart_at == baseline.depart_at == depart
+    # Leave is authoritative even when prep/depart metadata has not changed.
+    assert shifted.prep_at == baseline.prep_at
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+        for plan in (baseline, shifted):
+            publish(
+                cfg, now=_nyc(2026, 10, 15, 5, 0),
+                plans_for_day=_provider({date(2026, 10, 15): [plan]}),
+            )
+    before, after = [call.kwargs["data"] for call in cs.call_args_list]
+    for field in ("wake_at", "next_prep_at", "deadline_at"):
+        assert datetime.fromisoformat(after[field]) == (
+            datetime.fromisoformat(before[field]) - timedelta(minutes=extra_minutes)
+        )
+    assert shifted.leave_at is not None
+    assert after["deadline_at"] == shifted.leave_at.isoformat()
+    assert "departure_at" not in after
+
+
+def test_departure_without_leave_deadline_keeps_prep_wake(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    plan = _commute_plan(_nyc(2026, 10, 15, 9, 0)).model_copy(update={"leave_at": None})
+    r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
+    assert r.wake_at == plan.prep_at
+    assert r.deadline_at is None
+    assert build_payload(r, window=True)["deadline_at"] == ""
 
 
 def test_window_disabled_keeps_prep_wake_and_payload(tmp_path: Path) -> None:
@@ -284,34 +335,34 @@ def test_window_disabled_keeps_prep_wake_and_payload(tmp_path: Path) -> None:
     plan = _commute_plan(depart)
     r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
     assert r.wake_at == plan.prep_at
-    assert r.departure_at is None
+    assert r.deadline_at is None
     with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
         publish(
             cfg, now=_nyc(2026, 10, 15, 5, 0),
             plans_for_day=_provider({date(2026, 10, 15): [plan]}),
         )
-    assert "departure_at" not in cs.call_args.kwargs["data"]
+    assert "deadline_at" not in cs.call_args.kwargs["data"]
 
 
 def test_fallback_wake_opens_no_window(tmp_path: Path) -> None:
-    """A fallback earlier than D-50 wins and carries no departure."""
+    """A fallback earlier than leave_at-37m wins and carries no deadline."""
     cfg = _config(tmp_path, fallback_time="07:00")
     plan = _commute_plan(_nyc(2026, 10, 15, 9, 0))
     r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [plan]}))
     assert r.source == "fallback"
-    assert r.departure_at is None
-    assert build_payload(r, window=True)["departure_at"] == ""
+    assert r.deadline_at is None
+    assert build_payload(r, window=True)["deadline_at"] == ""
 
 
 def test_window_wake_across_dst_fall_back(tmp_path: Path) -> None:
-    """D-50 is absolute: 50 real minutes before 02:10 EST is 01:20 EST, not EDT."""
+    """leave_at-37m is absolute: 01:57 EST minus 37m is 01:20 EST, not EDT."""
     cfg = _config(tmp_path)
     depart = datetime(2026, 11, 1, 7, 10, tzinfo=UTC).astimezone(NYC_TZ)  # 02:10 EST
     r = compute_wake(
         cfg, datetime(2026, 11, 1, 5, 0, tzinfo=UTC),  # 01:00 EDT, logical Oct 31
         _provider({date(2026, 11, 1): [_commute_plan(depart)]}),
     )
-    assert r.departure_at == depart
+    assert r.deadline_at == depart - timedelta(minutes=13)
     assert r.wake_at.astimezone(UTC) == datetime(2026, 11, 1, 6, 20, tzinfo=UTC)
     assert r.wake_at.utcoffset() == timedelta(hours=-5)
 

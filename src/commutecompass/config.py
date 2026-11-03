@@ -279,21 +279,23 @@ class MonitoringConfig(BaseModel):
 class AlarmWindowConfig(BaseModel):
     """Commute wake window — see docs/alarm-design.md "Wake window".
 
-    Applies only to wake alarms anchored on a planned departure ``D``: the
-    first alarm rings at ``D - first_alarm_lead_minutes``, snoozes are
-    unlimited until ``D - deadline_lead_minutes``, and the final alarm then
-    rings without snooze or timeout until desktop activity dismisses it.
+    Applies only to wake alarms anchored on a healthy plan's buffered
+    ``leave_at`` deadline: the first alarm rings at
+    ``leave_at - first_alarm_lead_minutes``, snoozes are unlimited until
+    ``leave_at - deadline_lead_minutes``, and the final alarm then rings
+    without snooze or timeout until desktop activity dismisses it.
+    Both leads are relative to ``leave_at``, never unbuffered ``depart_at``.
     Naps and fallback wakes keep the plain alarm settings.
     """
 
     enabled: bool = True
-    # Written by the publish script from the payload's ``departure_at``.
-    departure_utc_entity: str = "input_text.commute_departure_utc"
+    # Written by the publish script from the payload's buffered ``deadline_at``.
+    deadline_utc_entity: str = "input_text.commute_alarm_deadline_utc"
     # The daemon writes the UTC instant a window was dismissed at the desk;
     # empty disables the publish.
     window_done_entity: str = "input_text.commute_alarm_window_done_utc"
-    first_alarm_lead_minutes: int = Field(default=50, ge=1, le=24 * 60)
-    deadline_lead_minutes: int = Field(default=13, ge=0, le=24 * 60)
+    first_alarm_lead_minutes: int = Field(default=37, ge=1, le=24 * 60)
+    deadline_lead_minutes: int = Field(default=0, ge=0, le=24 * 60)
     snooze_minutes: int = Field(default=5, ge=1, le=240)
     # Re-rings after a snooze: hold at an absolute sink level, then ramp.
     rering_start_percent: int = Field(default=20, ge=0, le=100)

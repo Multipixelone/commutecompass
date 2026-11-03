@@ -19,12 +19,12 @@ State machine::
     *       → idle      master switch off
 
 Commute wake window (``[alarm.window]``; only wakes whose published
-departure D satisfies ``wake == D - first_alarm_lead``)::
+deadline D satisfies ``wake == D - first_alarm_lead``)::
 
-    window  ringing → snoozed   snooze or HA stop: min(now + 5 min, D - 13)
-    window  ringing → snoozed   15 min unanswered: quiet until D - 13
+    window  ringing → snoozed   snooze, HA stop, or 15 min timeout: min(now + 5 min, D)
     window  snoozed → ringing   snooze elapsed: re-ring 20%, hold 30 s, 60 s ramp
-    window  *       → final     D - 13 reached (stale limit ignored until D)
+    window  *       → final     buffered door deadline D reached (first ring D - 37)
+    restart *       → final     missed final recovered through D + 10 min inclusive
     final   ringing             snooze/HA stop ignored, no timeout
     any     *       → idle      desktop activity (publishes window_done_entity),
                                 master switch off, explicit skip/clear
@@ -96,9 +96,9 @@ class Inputs:
     nap_known: bool = False
     prep_threshold: datetime | None = None
     prep_known: bool = False
-    # Real departure D for the published commute wake (window mode only).
-    departure_at: datetime | None = None
-    departure_known: bool = False
+    # Real deadline D for the published commute wake (window mode only).
+    deadline_at: datetime | None = None
+    deadline_known: bool = False
     # Local desktop activity (never from HA): the only final-alarm dismissal.
     activity_at: datetime | None = None
 
@@ -177,10 +177,10 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> I
     wake, wake_known = _helper_time(states, cfg.wake_utc_entity)
     nap, nap_known = _helper_time(states, cfg.nap_utc_entity)
     skipped, _ = _helper_time(states, cfg.skipped_utc_entity)
-    departure: datetime | None = None
-    departure_known = False
-    if cfg.window.enabled and cfg.window.departure_utc_entity:
-        departure, departure_known = _helper_time(states, cfg.window.departure_utc_entity)
+    deadline: datetime | None = None
+    deadline_known = False
+    if cfg.window.enabled and cfg.window.deadline_utc_entity:
+        deadline, deadline_known = _helper_time(states, cfg.window.deadline_utc_entity)
     return Inputs(
         ha_ok=True,
         next_alarm=parse_ha_datetime(nxt.get("state")),
@@ -193,8 +193,8 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> I
         nap_known=nap_known,
         prep_threshold=threshold,
         prep_known=prep_known,
-        departure_at=departure,
-        departure_known=departure_known,
+        deadline_at=deadline,
+        deadline_known=deadline_known,
         stop_pressed_at=parse_ha_datetime(states.get(cfg.stop_button, {}).get("state")),
         snooze_pressed_at=parse_ha_datetime(states.get(cfg.snooze_button, {}).get("state")),
     )
@@ -225,6 +225,7 @@ class DaemonState:
     enabled: bool = True
     active_kind: str = ""
     audio_failed: bool = False
+    window_done_pending: datetime | None = None
     prep_threshold: datetime | None = None
     # Latest known alarm instant (from HA, or the cache while HA is down).
     pending: datetime | None = None
@@ -235,9 +236,9 @@ class DaemonState:
     snooze_until: datetime | None = None
     snoozes: int = 0
     # Commute wake window: D locked at first ring; phase '' = legacy alarm.
-    departure: datetime | None = None
+    deadline: datetime | None = None
     phase: Phase = ""
-    pending_departure: datetime | None = None
+    pending_deadline: datetime | None = None
     # ISO-UTC instants already rung (or skipped as stale) — never re-ring.
     done: tuple[str, ...] = ()
 
@@ -284,10 +285,10 @@ class AlarmCache:
             elif mode == "ringing" and ring_started is not None:
                 restored_mode = "ringing"
         snoozes = raw.get("snoozes", 0)
-        departure = parse_ha_datetime(raw.get("departure"))
+        deadline = parse_ha_datetime(raw.get("deadline"))
         raw_phase = raw.get("phase")
         phase: Phase = (
-            raw_phase if raw_phase in ("window", "final") and departure is not None
+            raw_phase if raw_phase in ("window", "final") and deadline is not None
             and restored_mode != "idle" else ""
         )
         return DaemonState(
@@ -299,12 +300,13 @@ class AlarmCache:
             snooze_until=snooze_until,
             snoozes=max(0, snoozes) if isinstance(snoozes, int) else 0,
             audio_failed=raw.get("audio_failed") is True,
+            window_done_pending=parse_ha_datetime(raw.get("window_done_pending")),
             prep_threshold=parse_ha_datetime(raw.get("prep_threshold")),
             pending=pending,
             pending_kind=str(raw.get("pending_kind") or ""),
-            departure=departure if phase else None,
+            deadline=deadline if phase else None,
             phase=phase,
-            pending_departure=parse_ha_datetime(raw.get("pending_departure")),
+            pending_deadline=parse_ha_datetime(raw.get("pending_deadline")),
             done=tuple(str(d) for d in done)[-_DONE_MAX:] if isinstance(done, list) else (),
         )
 
@@ -321,11 +323,13 @@ class AlarmCache:
             "snooze_until": state.snooze_until.isoformat() if state.snooze_until else None,
             "snoozes": state.snoozes,
             "audio_failed": state.audio_failed,
+            "window_done_pending": (state.window_done_pending.isoformat()
+                                    if state.window_done_pending else None),
             "prep_threshold": state.prep_threshold.isoformat() if state.prep_threshold else None,
-            "departure": state.departure.isoformat() if state.departure else None,
+            "deadline": state.deadline.isoformat() if state.deadline else None,
             "phase": state.phase,
-            "pending_departure": (
-                state.pending_departure.isoformat() if state.pending_departure else None
+            "pending_deadline": (
+                state.pending_deadline.isoformat() if state.pending_deadline else None
             ),
         }
         try:
@@ -378,10 +382,10 @@ Action = StartRing | StopRing | PublishState | PublishWindowDone
 
 @dataclass(frozen=True)
 class WindowSettings:
-    """Commute wake window, relative to the real departure time D."""
+    """Commute wake window, relative to the real deadline time D."""
 
-    first_lead: timedelta = timedelta(minutes=50)
-    deadline_lead: timedelta = timedelta(minutes=13)
+    first_lead: timedelta = timedelta(minutes=37)
+    deadline_lead: timedelta = timedelta(0)
     snooze: timedelta = timedelta(minutes=5)
     rering: RingProfile = RingProfile(0.2, 30.0, 60.0)
 
@@ -445,28 +449,28 @@ def _cancelled(
 
 def _idle(state: DaemonState) -> DaemonState:
     return replace(state, mode="idle", active=None, active_kind="", ring_started=None,
-                   snooze_until=None, snoozes=0, departure=None, phase="")
+                   snooze_until=None, snoozes=0, deadline=None, phase="")
 
 def _minus(instant: datetime, delta: timedelta) -> datetime:
     """Absolute-time subtraction (DST-safe), returned in ``instant``'s zone."""
     return (instant.astimezone(UTC) - delta).astimezone(instant.tzinfo)
 
-def _commute_departure(
+def _commute_deadline(
     instant: datetime, kind: str, inputs: Inputs, state: DaemonState, settings: Settings,
 ) -> datetime | None:
     """D for a commute wake, or None (nap, fallback, window off, helpers disagree).
 
     Only an exact ``D - first_alarm_lead == wake`` match counts, so a stale or
-    half-written departure helper degrades to the legacy alarm, never a window.
+    half-written deadline helper degrades to the legacy alarm, never a window.
     """
     if settings.window is None or kind != "wake":
         return None
-    sources = [state.pending_departure]
-    if inputs.ha_ok and inputs.departure_known:
-        sources.insert(0, inputs.departure_at)
-    for departure in sources:
-        if departure is not None and _key(_minus(departure, settings.window.first_lead)) == _key(instant):
-            return departure
+    sources = [state.pending_deadline]
+    if inputs.ha_ok and inputs.deadline_known:
+        sources.insert(0, inputs.deadline_at)
+    for deadline in sources:
+        if deadline is not None and _key(_minus(deadline, settings.window.first_lead)) == _key(instant):
+            return deadline
     return None
 
 def _window_cancelled(state: DaemonState, inputs: Inputs) -> bool:
@@ -488,18 +492,18 @@ def _window_step(
 ) -> DaemonState:
     """Commute wake window: unlimited short snoozes, then an undismissable final."""
     window = settings.window or WindowSettings()
-    departure = state.departure
+    deadline = state.deadline
     active = state.active
-    assert departure is not None and active is not None
+    assert deadline is not None and active is not None
     # A replan may pull D earlier (same day) but never push the deadline later.
     if (
-        inputs.ha_ok and inputs.departure_known and inputs.departure_at is not None
-        and not _le(departure, inputs.departure_at)
-        and to_nyc(inputs.departure_at).date() == to_nyc(departure).date()
+        inputs.ha_ok and inputs.deadline_known and inputs.deadline_at is not None
+        and not _le(deadline, inputs.deadline_at)
+        and to_nyc(inputs.deadline_at).date() == to_nyc(deadline).date()
     ):
-        departure = inputs.departure_at
-        state = replace(state, departure=departure)
-    deadline = _minus(departure, window.deadline_lead)
+        deadline = inputs.deadline_at
+        state = replace(state, deadline=deadline)
+    deadline = _minus(deadline, window.deadline_lead)
     if state.snooze_until is not None and _le(deadline, state.snooze_until):
         state = replace(state, snooze_until=deadline)
 
@@ -508,17 +512,17 @@ def _window_step(
         if state.mode == "ringing":
             actions.append(StopRing("activity"))
         actions += [PublishState("idle"), PublishWindowDone(now)]
-        return _idle(state)
+        return replace(_idle(state), window_done_pending=now)
     if state.phase == "final":
         # No snooze, no HA stop, no timeout: ring until the desktop dismisses.
         return state
     if _le(deadline, now):
         if state.mode == "ringing":
-            # Keep the current (already loud) ring; just stop honouring snooze.
+            # Keep the current sound; just stop honouring snooze.
             return replace(state, phase="final")
-        if _le(departure, now):
-            logger.warning("alarm daemon: commute window for %s missed (departure passed)",
-                           departure.isoformat())
+        if now.astimezone(UTC) - deadline.astimezone(UTC) > settings.stale_limit:
+            logger.warning("alarm daemon: commute window for %s missed (final recovery expired)",
+                           deadline.isoformat())
             actions.append(PublishState("idle"))
             return _idle(state)
         actions += [StartRing(active, state.active_kind), PublishState("ringing")]
@@ -536,9 +540,10 @@ def _window_step(
         if state.ring_started is not None and (
             now.astimezone(UTC) - state.ring_started.astimezone(UTC) >= settings.max_ring
         ):
-            # Go quiet, but the final alarm stays armed.
+            # Auto-snooze briefly, then re-ring even without a button press.
+            until = min(_minus(now, -window.snooze), deadline, key=lambda d: d.astimezone(UTC))
             actions += [StopRing("timeout"), PublishState("snoozed")]
-            return replace(state, mode="snoozed", snooze_until=deadline,
+            return replace(state, mode="snoozed", snooze_until=until,
                            snoozes=state.snoozes + 1)
         return state
     if state.mode == "snoozed" and state.snooze_until is not None and _le(state.snooze_until, now):
@@ -579,8 +584,9 @@ def step(
         state.pending, state.pending_kind, inputs,
         preserve_rollover=_le(state.pending, now) and (
             now.astimezone(UTC) - state.pending.astimezone(UTC) <= settings.stale_limit
-            # A due commute wake stays recoverable until its departure.
-            or (state.pending_departure is not None and not _le(state.pending_departure, now))
+            # Let the anchored recovery branch ring or log expiry, even when
+            # HA has rolled over to tomorrow. Explicit clear/skip still cancels.
+            or state.pending_deadline is not None
         ),
     ):
         state = _mark_done(state, state.pending)
@@ -645,26 +651,24 @@ def step(
     # The sensor cannot add/withdraw alarms: only UTC helpers supply new
     # deadlines. Unknown authority preserves existing cached candidates.
     pending, kind = future[0] if future else (None, "")
-    pending_departure = (
-        _commute_departure(pending, kind, inputs, state, settings) if pending is not None else None
+    pending_deadline = (
+        _commute_deadline(pending, kind, inputs, state, settings) if pending is not None else None
     )
-    departures = {_key(t): _commute_departure(t, k, inputs, state, settings) for t, k in due}
-    state = replace(state, pending=pending, pending_kind=kind, pending_departure=pending_departure)
+    deadlines = {_key(t): _commute_deadline(t, k, inputs, state, settings) for t, k in due}
+    state = replace(state, pending=pending, pending_kind=kind, pending_deadline=pending_deadline)
     for instant, kind in due:
         state = _mark_done(state, instant)
-        departure = departures[_key(instant)]
-        if departure is not None:
-            # Window alarms are bounded by D, not the stale limit, so a
-            # restart can never skip the final alarm.
-            if _le(departure, now):
-                logger.warning("alarm daemon: skipping commute wake %s (departure passed)",
+        anchor = deadlines[_key(instant)]
+        if anchor is not None:
+            final_at = _minus(anchor, (settings.window or WindowSettings()).deadline_lead)
+            if now.astimezone(UTC) - final_at.astimezone(UTC) > settings.stale_limit:
+                logger.warning("alarm daemon: skipping commute wake %s (final recovery expired)",
                                instant.isoformat())
             elif state.mode == "idle":
-                deadline = _minus(departure, (settings.window or WindowSettings()).deadline_lead)
                 actions += [StartRing(instant, kind), PublishState("ringing")]
                 state = replace(state, mode="ringing", active=instant, active_kind=kind,
-                                ring_started=now, snoozes=0, departure=departure,
-                                phase="final" if _le(deadline, now) else "window")
+                                ring_started=now, snoozes=0, deadline=anchor,
+                                phase="final" if _le(final_at, now) else "window")
             continue
         if now.astimezone(UTC) - instant.astimezone(UTC) > settings.stale_limit:
             logger.warning("alarm daemon: skipping stale alarm %s", instant.isoformat())
@@ -1092,6 +1096,7 @@ class AlarmDaemon:
     _audio_reported: bool | None = None
     _activity_pressed: datetime | None = None
     _resume_audio: bool = False
+    _restoring_window: bool = False
     _handled_pending: datetime | None = None
     _published_mode: Mode | None = None
     _window_done_pending: datetime | None = None
@@ -1099,7 +1104,9 @@ class AlarmDaemon:
     def __post_init__(self) -> None:
         self.state = self.cache.load()
         self._audio_healthy = not self.state.audio_failed
+        self._window_done_pending = self.state.window_done_pending
         self._resume_audio = self.state.mode == "ringing" and not self.state.audio_failed
+        self._restoring_window = bool(self.state.phase and self.state.mode == "ringing")
         # Do not clear HA's failure latch merely because a process restarted.
         self._audio_reported = False if self._audio_healthy else None
 
@@ -1113,6 +1120,20 @@ class AlarmDaemon:
         if self.activity_monitor is not None:
             self.activity_monitor.tick()
         before = self.state
+        if self._restoring_window:
+            # A cached ring is not currently audible. Apply missed-final bounds,
+            # unlike a live ring which must continue indefinitely in final phase.
+            deadline = self.state.deadline
+            if (inputs.ha_ok and inputs.deadline_known
+                    and inputs.deadline_at is not None and deadline is not None
+                    and to_nyc(inputs.deadline_at).date() == to_nyc(deadline).date()):
+                deadline = min(deadline, inputs.deadline_at, key=lambda d: d.astimezone(UTC))
+            if deadline is not None:
+                final_at = _minus(deadline, (self.settings.window or WindowSettings()).deadline_lead)
+                expired = now.astimezone(UTC) - final_at.astimezone(UTC) > self.settings.stale_limit
+                if _le(final_at, now) and (self._resume_audio or expired):
+                    self.state = replace(self.state, mode="snoozed", phase="window", snooze_until=now)
+            self._restoring_window = False
         self.state, actions = step(self.state, now, inputs, self.settings)
         # Persist before playback so a restart can resume the same bounded
         # ring/snooze window rather than consume or extend it.
@@ -1143,6 +1164,7 @@ class AlarmDaemon:
             and self.publish_window_done(self._window_done_pending)
         ):
             self._window_done_pending = None
+            self.state = replace(self.state, window_done_pending=None)
         if self.state.active != self._handled_pending or not self._audio_healthy:
             self._handled_pending = None
         if (
@@ -1271,10 +1293,9 @@ def build_daemon(config: Config) -> AlarmDaemon:
         return call_service(base_url, token, "input_text", "set_value",
                             {"entity_id": cfg.handled_entity, "value": _key(instant)})
 
-    if cfg.window.enabled and not cfg.stop_on_activity:
-        logger.warning("alarm daemon: wake window final alarm can only be dismissed by "
-                       "desktop activity, but stop_on_activity is off; it will ring until "
-                       "the master switch is turned off or the wake is skipped")
+    if cfg.window.enabled and (not cfg.stop_on_activity or shutil.which("hypridle") is None):
+        logger.warning("alarm daemon: wake window has no desktop activity monitor; "
+                       "final will ring until master-off or explicit skip/clear")
 
     def publish_window_done(instant: datetime) -> bool:
         # Empty entity disables the hook (HA restores lights / clears notifications).

@@ -468,6 +468,37 @@ def test_evening_job_publishes_despite_historical_too_imminent(tomorrow_config: 
     assert alarm.call_args.kwargs["data"]["wake_at"] == future.prep_at.isoformat()
 
 
+@pytest.mark.parametrize("buffer_minutes", [5, 15, 21], ids=["safety", "weather", "realtime"])
+def test_evening_job_publishes_buffered_leave_deadline(
+    tomorrow_config: Config, buffer_minutes: int,
+) -> None:
+    from commutecompass.config import AlarmConfig
+
+    tomorrow_config.alarm = AlarmConfig(enabled=True)
+    now = datetime(2026, 10, 15, 20, tzinfo=NYC_TZ)
+    depart = datetime(2026, 10, 16, 9, tzinfo=NYC_TZ)
+    leave = depart - timedelta(minutes=buffer_minutes)
+    event = _tomorrow_events()[1].model_copy(update={
+        "start": depart + timedelta(hours=1), "end": depart + timedelta(hours=2),
+    })
+    plan = Plan(
+        event=event, depart_at=depart, leave_at=leave,
+        prep_at=leave - timedelta(minutes=20), leave_buffer_minutes=buffer_minutes,
+    )
+    with patch("commutecompass.jobs.tomorrow.now_nyc", return_value=now), patch(
+        "commutecompass.alarm.now_nyc", return_value=now
+    ), patch("commutecompass.jobs.tomorrow.plan_window", side_effect=[[plan], []]), patch(
+        "commutecompass.jobs.tomorrow.push_tomorrow_alarm", return_value=True
+    ), patch("commutecompass.ha_client.call_service", return_value=True) as alarm:
+        assert tomorrow_run(tomorrow_config) == plan
+    alarm.assert_called_once()
+    payload = alarm.call_args.kwargs["data"]
+    assert payload["deadline_at"] == leave.isoformat()
+    assert payload["wake_at"] == (leave - timedelta(minutes=37)).isoformat()
+    assert payload["next_prep_at"] == payload["wake_at"]
+    assert "departure_at" not in payload
+
+
 def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> None:
     from commutecompass.config import AlarmConfig
 
@@ -484,5 +515,5 @@ def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> 
         "wake_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
         "next_prep_at": "",
         "next_event": "",
-        "departure_at": "",
+        "deadline_at": "",
     }

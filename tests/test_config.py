@@ -915,13 +915,13 @@ class TestAlarmConfig:
 
         w = AlarmConfig().window
         assert w.enabled is True
-        assert w.first_alarm_lead_minutes == 50
-        assert w.deadline_lead_minutes == 13
+        assert w.first_alarm_lead_minutes == 37
+        assert w.deadline_lead_minutes == 0
         assert w.snooze_minutes == 5
         assert (w.rering_start_percent, w.rering_hold_seconds, w.rering_ramp_seconds) == (
             20, 30, 60,
         )
-        assert w.departure_utc_entity == "input_text.commute_departure_utc"
+        assert w.deadline_utc_entity == "input_text.commute_alarm_deadline_utc"
         assert w.window_done_entity == "input_text.commute_alarm_window_done_utc"
 
     def test_window_loads_from_toml_table(
@@ -937,7 +937,9 @@ class TestAlarmConfig:
         )
         cfg = load_config(p)
         assert cfg.alarm.window.snooze_minutes == 4
-        assert cfg.alarm.window.first_alarm_lead_minutes == 50
+        assert cfg.alarm.window.first_alarm_lead_minutes == 37
+        assert cfg.alarm.window.deadline_lead_minutes == 0
+        assert cfg.alarm.window.deadline_utc_entity == "input_text.commute_alarm_deadline_utc"
 
     def test_window_deadline_must_precede_first_alarm(self) -> None:
         from pydantic import ValidationError

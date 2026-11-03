@@ -7,8 +7,8 @@ logic and the final "next alarm" selection, and ``alarm daemon`` rings it.
 Wake rule (Q2/Q8)::
 
     wake = min(first_alarm(first_event), fallback_time on that day)
-    first_alarm = D - window.first_alarm_lead   (wake window: departure D known)
-                = prep_at - wake_lead           (window disabled / no D)
+    first_alarm = leave_at - window.first_alarm_lead   (healthy wake window)
+                = prep_at - wake_lead                  (window disabled / no leave_at)
     no plan-able events -> fallback_time
 
 Target logical day: today's wake if it is still in the future, else
@@ -58,39 +58,28 @@ class WakeResult:
     # For wake-window plans this is the first window alarm instead.
     next_prep_at: datetime | None
     next_event: str
-    # Planned departure D when the wake opens a commute wake window
-    # (``wake_at == D - first_alarm_lead``); None for fallback/prep wakes.
-    departure_at: datetime | None = None
+    # Buffered leave deadline anchoring a commute wake window
+    # (``wake_at == deadline_at - first_alarm_lead``); None for fallback/prep wakes.
+    deadline_at: datetime | None = None
 
 
-def plan_departure(plan: Plan) -> datetime | None:
-    """Real (unbuffered) departure of ``plan``, or None when unknown.
+def _window_deadline(plan: Plan, config: Config) -> datetime | None:
+    """Healthy plan's buffered leave deadline; None = plain prep wake.
 
-    Plans written before ``depart_at`` existed recover it from ``leave_at``
-    plus the buffer recorded with them; neither field means no departure.
+    ``depart_at`` is informational only: safety, weather and realtime buffers
+    are already included in ``leave_at`` and must move the entire wake window.
     """
-    if plan.depart_at is not None:
-        return plan.depart_at
-    if plan.leave_at is None or plan.leave_buffer_minutes is None:
-        return None
-    return (
-        plan.leave_at.astimezone(UTC) + timedelta(minutes=plan.leave_buffer_minutes)
-    ).astimezone(NYC_TZ)
-
-
-def _window_departure(plan: Plan, config: Config) -> datetime | None:
-    """Departure anchoring a wake window for ``plan``; None = plain prep wake."""
     if not config.alarm.window.enabled or plan.error is not None:
         return None
-    return plan_departure(plan)
+    return plan.leave_at
 
 
 def _first_alarm(plan: Plan, config: Config) -> datetime | None:
     """First alarm a healthy plan needs: window start, else prep minus lead."""
-    departure = _window_departure(plan, config)
-    if departure is not None:
+    deadline = _window_deadline(plan, config)
+    if deadline is not None:
         lead = timedelta(minutes=config.alarm.window.first_alarm_lead_minutes)
-        return (departure.astimezone(UTC) - lead).astimezone(NYC_TZ)
+        return (deadline.astimezone(UTC) - lead).astimezone(NYC_TZ)
     if plan.prep_at is None:
         return None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
@@ -199,9 +188,9 @@ def compute_wake(
     nxt = _earliest_alarm_plan([*today_plans, *tomorrow_plans], config, after=now)
     from commutecompass.format import _sanitize_text
 
-    departure: datetime | None = None
+    deadline: datetime | None = None
     if plan is not None and _same_instant(_first_alarm(plan, config), wake):
-        departure = _window_departure(plan, config)
+        deadline = _window_deadline(plan, config)
     return WakeResult(
         wake_at=to_nyc(wake),
         day=to_nyc(day_start).date(),
@@ -209,7 +198,7 @@ def compute_wake(
         plan=plan,
         next_prep_at=nxt[1] if nxt is not None else None,
         next_event=_sanitize_text(nxt[0].event.title) if nxt is not None else "",
-        departure_at=to_nyc(departure) if departure is not None else None,
+        deadline_at=to_nyc(deadline) if deadline is not None else None,
     )
 
 
@@ -265,7 +254,7 @@ def _default_provider(
 def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, object]:
     """HA script fields for ``publish_script``.
 
-    ``window`` adds ``departure_at`` (empty = this wake opens no window), so
+    ``window`` adds ``deadline_at`` (empty = this wake opens no window), so
     HA scripts without the field keep working while the window is disabled.
     """
     payload: dict[str, object] = {
@@ -274,8 +263,8 @@ def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, obje
         "next_event": result.next_event,
     }
     if window:
-        payload["departure_at"] = (
-            result.departure_at.isoformat() if result.departure_at else ""
+        payload["deadline_at"] = (
+            result.deadline_at.isoformat() if result.deadline_at else ""
         )
     return payload
 
@@ -309,11 +298,11 @@ def publish(
     provider = plans_for_day or _default_provider(config, planned or {}, store, _now)
     result = compute_wake(config, _now, provider)
     logger.info(
-        "alarm: wake_at=%s (%s) next_prep_at=%s departure_at=%s",
+        "alarm: wake_at=%s (%s) next_prep_at=%s deadline_at=%s",
         result.wake_at.isoformat(),
         result.source,
         result.next_prep_at.isoformat() if result.next_prep_at else "-",
-        result.departure_at.isoformat() if result.departure_at else "-",
+        result.deadline_at.isoformat() if result.deadline_at else "-",
     )
     if dry_run:
         return result, False
