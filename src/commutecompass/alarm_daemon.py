@@ -37,6 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -485,8 +486,8 @@ class AudioPlayer(Protocol):
     def start(self) -> None:
         """Begin (looping) playback; must save prior volume/mute first."""
 
-    def tick(self, volume: float) -> None:
-        """Set volume (0..1) and restart the loop if playback ended."""
+    def tick(self) -> None:
+        """Report local playback/worker failures without driving audio timing."""
 
     def stop(self) -> None:
         """Stop playback and restore saved volume/mute.  Idempotent."""
@@ -496,7 +497,16 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 def _default_run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
+    # In-flight volume commands must not hold stop/restoration for ten seconds.
+    timeout = 0.5 if args[:2] == ["wpctl", "set-volume"] else 10
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+_AUDIO_TICK_SECONDS = 0.05  # 20 Hz; serial commands, never a catch-up burst
+
+
+def _audio_wait(stop: Event, delay: float) -> bool:
+    return stop.wait(delay)
 
 
 def find_sink(pw_dump: object, needle: str) -> tuple[int, str] | None:
@@ -541,12 +551,22 @@ class PipeWirePlayer:
         run: Runner = _default_run,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         initial_volume: float = 0.3,
+        ramp_seconds: int = 120,
+        monotonic: Callable[[], float] = _time.monotonic,
+        wait: Callable[[Event, float], bool] = _audio_wait,
     ) -> None:
         self._sink = sink
         self._sound = sound
         self._runner = run
         self._popen = popen
         self._initial_volume = max(0.0, min(1.0, initial_volume))
+        self._ramp_seconds = ramp_seconds
+        self._monotonic = monotonic
+        self._wait = wait
+        self._stop = Event()
+        self._worker: Thread | None = None
+        self._error: Exception | None = None
+        self._ramp_origin = 0.0
         self._node: tuple[int, str] | None = None
         self._saved: tuple[float, bool] | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -578,7 +598,7 @@ class PipeWirePlayer:
             args += ["--target", self._node[1]]
         args.append(str(self._sound))
         self._proc = self._popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._spawned_at = _time.monotonic()
+        self._spawned_at = self._monotonic()
         try:
             rc = self._proc.wait(timeout=0.1)
         except subprocess.TimeoutExpired:
@@ -587,33 +607,74 @@ class PipeWirePlayer:
 
     def start(self) -> None:
         self.stop()
+        self._error = None
+        self._stop.clear()
         self._node = self._resolve()
         target = self._target()
         # Refuse to change audio without a restorable snapshot.
         self._saved = parse_wpctl_volume(self._run(["wpctl", "get-volume", target]).stdout or "")
+        if self._saved is None:
+            raise RuntimeError("cannot snapshot sink volume")
         try:
-            self._run(["wpctl", "set-volume", target, f"{self._initial_volume:.2f}"])
-            self._volume = self._initial_volume
+            initial = 1.0 if self._ramp_seconds <= 0 else self._initial_volume
+            self._run(["wpctl", "set-volume", target, f"{initial:.2f}"])
+            self._volume = initial
             self._run(["wpctl", "set-mute", target, "0"])
             self._spawn()
+            # First launch, not setup/network time or later file-loop launches.
+            self._ramp_origin = self._spawned_at
+            worker = Thread(target=self._audio_loop, name="alarm-audio", daemon=True)
+            worker.start()
+            self._worker = worker
         except Exception:
             self.stop()
             raise
 
-    def tick(self, volume: float) -> None:
-        if self._proc is None:
-            return
-        v = round(max(0.0, min(1.0, volume)), 2)
-        if v != self._volume:
-            self._run(["wpctl", "set-volume", self._target(), f"{v:.2f}"])
-            self._volume = v
-        rc = self._proc.poll()
-        if rc is not None:
-            if rc != 0 or _time.monotonic() - self._spawned_at < 0.25:
-                raise RuntimeError(f"pw-play failed/ended prematurely ({rc})")
-            self._spawn()
+    def tick(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("alarm audio worker failed") from self._error
+
+    def _audio_loop(self) -> None:
+        # Sole audio owner until stop joins us. Serial commands, no queued volumes.
+        try:
+            while not self._stop.is_set():
+                now = self._monotonic()
+                elapsed = max(0.0, now - self._ramp_origin)
+                fraction = 1.0 if self._ramp_seconds <= 0 else min(1.0, elapsed / self._ramp_seconds)
+                v = round(self._initial_volume + (1.0 - self._initial_volume) * fraction, 4)
+                if self._volume != v:
+                    self._run(["wpctl", "set-volume", self._target(), f"{v:.4f}"])
+                    self._volume = v
+                if self._stop.is_set():
+                    break
+                if self._proc is not None:
+                    rc = self._proc.poll()
+                    if rc is not None:
+                        if rc != 0 or now - self._spawned_at < 0.25:
+                            raise RuntimeError(f"pw-play failed/ended prematurely ({rc})")
+                        self._spawn()
+                # Slow commands skip slots instead of causing catch-up bursts.
+                # Actual monotonic elapsed time, not a tick count, determines gain.
+                if self._wait(self._stop, _AUDIO_TICK_SECONDS):
+                    break
+        except Exception as exc:
+            logger.exception("alarm local audio failed")
+            self._error = exc
+            try:
+                # Restore even if the HA thread is blocked in a request.
+                self._restore()
+            except Exception:
+                logger.exception("alarm audio restoration failed")
 
     def stop(self) -> None:
+        self._stop.set()
+        if self._worker is not None:
+            self._worker.join()
+            self._worker = None
+        # No stale volume writes after restoration or during the next ring.
+        self._restore()
+
+    def _restore(self) -> None:
         proc, self._proc = self._proc, None
         if proc is not None:
             if proc.poll() is None:
@@ -765,8 +826,6 @@ class AlarmDaemon:
     player: AudioPlayer
     cache: AlarmCache
     settings: Settings
-    ramp_start_percent: int = 30
-    ramp_seconds: int = 120
     poll_seconds: float = 30.0
     # Side-effect callbacks to HA (best-effort, return success).
     publish_state: Callable[[Mode], bool] = lambda _m: True
@@ -821,8 +880,7 @@ class AlarmDaemon:
             self._reconcile_mode()
         if self._audio_healthy and self.state.mode == "ringing" and self.state.ring_started is not None:
             try:
-                elapsed = now.astimezone(UTC) - self.state.ring_started.astimezone(UTC)
-                self.player.tick(ramp_fraction(elapsed, self.ramp_start_percent, self.ramp_seconds))
+                self.player.tick()
             except Exception as exc:  # noqa: BLE001 — let HA's dead-man fallback fire
                 self._audio_healthy = False
                 logger.error("alarm daemon: audio tick failed: %s", exc)
@@ -951,11 +1009,10 @@ def build_daemon(config: Config) -> AlarmDaemon:
 
     return AlarmDaemon(
         reader=HAReader(base_url, token, cfg).read,
-        player=PipeWirePlayer(cfg.sink, sound, initial_volume=cfg.ramp_start_percent / 100),
+        player=PipeWirePlayer(cfg.sink, sound, initial_volume=cfg.ramp_start_percent / 100,
+                              ramp_seconds=cfg.ramp_seconds),
         cache=AlarmCache(cache_path),
         settings=Settings.from_config(cfg),
-        ramp_start_percent=cfg.ramp_start_percent,
-        ramp_seconds=cfg.ramp_seconds,
         poll_seconds=float(cfg.poll_seconds),
         publish_state=publish_state,
         heartbeat=heartbeat,

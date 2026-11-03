@@ -343,14 +343,10 @@ def test_pipewire_player_saves_ramps_restores(tmp_path: Path) -> None:
     p.start()
     assert ["wpctl", "set-mute", "52", "0"] in calls
     assert ["pw-play", "--target", "alsa.analog", str(tmp_path / "t.wav")] in calls
-    p.tick(0.3)
+    p.tick()
     assert ["wpctl", "set-volume", "52", "0.30"] in calls
-    procs[0].done = True
-    p._spawned_at -= 2  # normal end of the ~2 second tone, not immediate failure
-    p.tick(0.5)
-    assert len(procs) == 2  # looped
     p.stop()
-    assert procs[1].terminated
+    assert procs[0].terminated
     assert calls[-2:] == [["wpctl", "set-volume", "52", "0.20"], ["wpctl", "set-mute", "52", "1"]]
     n = len(calls)
     p.stop()  # idempotent
@@ -384,8 +380,8 @@ class FakePlayer:
     def start(self) -> None:
         self.events.append("start")
 
-    def tick(self, volume: float) -> None:
-        self.events.append(round(volume, 2))
+    def tick(self) -> None:
+        pass
 
     def stop(self) -> None:
         self.events.append("stop")
@@ -410,10 +406,10 @@ def test_daemon_loop_end_to_end(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "c.json").read_text())["pending"] == T0.isoformat()
     clock[0] = at(0)
     assert d.run_once() == 2.0
-    assert player.events == ["start", 0.3]
+    assert player.events == ["start"]
     clock[0] = at(1)
     d.run_once()
-    assert player.events[-1] == pytest.approx(0.65)
+    assert player.events == ["start"]  # HA polls no longer drive volume
     feed[0] = inp(stop_pressed_at=at(0.9))
     clock[0] = at(1.1)
     assert d.run_once() == 30.0
@@ -631,8 +627,11 @@ def test_pwplay_nonzero_tick_is_not_respawned(tmp_path: Path) -> None:
     p = PipeWirePlayer("analog", tmp_path / "tone.wav", run=run, popen=lambda *a, **kw: proc)  # type: ignore[arg-type]
     p.start()
     proc.done = True
-    with pytest.raises(RuntimeError, match="prematurely"):
-        p.tick(0.5)
+    assert p._worker is not None
+    p._worker.join(timeout=2)
+    assert not p._worker.is_alive()
+    with pytest.raises(RuntimeError, match="audio worker"):
+        p.tick()
     p.stop()
 
 
