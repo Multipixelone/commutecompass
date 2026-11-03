@@ -235,7 +235,7 @@ class DaemonState:
     ring_started: datetime | None = None
     snooze_until: datetime | None = None
     snoozes: int = 0
-    # Commute wake window: D locked at first ring; phase '' = legacy alarm.
+    # Commute wake window: L locked at first ring; phase '' = legacy alarm.
     deadline: datetime | None = None
     phase: Phase = ""
     pending_deadline: datetime | None = None
