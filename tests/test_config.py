@@ -910,6 +910,43 @@ class TestAlarmConfig:
         with pytest.raises(ValidationError):
             AlarmConfig(fallback_time="25:00")
 
+    def test_window_defaults(self) -> None:
+        from commutecompass.config import AlarmConfig
+
+        w = AlarmConfig().window
+        assert w.enabled is True
+        assert w.first_alarm_lead_minutes == 50
+        assert w.deadline_lead_minutes == 13
+        assert w.snooze_minutes == 5
+        assert (w.rering_start_percent, w.rering_hold_seconds, w.rering_ramp_seconds) == (
+            20, 30, 60,
+        )
+        assert w.departure_utc_entity == "input_text.commute_departure_utc"
+        assert w.window_done_entity == "input_text.commute_alarm_window_done_utc"
+
+    def test_window_loads_from_toml_table(
+        self, tmp_path: Path, minimal_toml: Path, required_env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for key, val in required_env.items():
+            monkeypatch.setenv(key, val)
+        p = tmp_path / "w.toml"
+        p.write_text(
+            minimal_toml.read_text()
+            + "\n[alarm]\nenabled = true\n\n[alarm.window]\nsnooze_minutes = 4\n"
+        )
+        cfg = load_config(p)
+        assert cfg.alarm.window.snooze_minutes == 4
+        assert cfg.alarm.window.first_alarm_lead_minutes == 50
+
+    def test_window_deadline_must_precede_first_alarm(self) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import AlarmWindowConfig
+
+        with pytest.raises(ValidationError):
+            AlarmWindowConfig(first_alarm_lead_minutes=13, deadline_lead_minutes=13)
+
     def test_alarm_keys_allowlisted(self) -> None:
         assert "alarm.fallback_time" in CONFIG_SET_ALLOWLIST
         assert "alarm.wake_lead_minutes" in CONFIG_SET_ALLOWLIST

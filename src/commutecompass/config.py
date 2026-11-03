@@ -276,6 +276,40 @@ class MonitoringConfig(BaseModel):
         return v
 
 
+class AlarmWindowConfig(BaseModel):
+    """Commute wake window — see docs/alarm-design.md "Wake window".
+
+    Applies only to wake alarms anchored on a planned departure ``D``: the
+    first alarm rings at ``D - first_alarm_lead_minutes``, snoozes are
+    unlimited until ``D - deadline_lead_minutes``, and the final alarm then
+    rings without snooze or timeout until desktop activity dismisses it.
+    Naps and fallback wakes keep the plain alarm settings.
+    """
+
+    enabled: bool = True
+    # Written by the publish script from the payload's ``departure_at``.
+    departure_utc_entity: str = "input_text.commute_departure_utc"
+    # The daemon writes the UTC instant a window was dismissed at the desk;
+    # empty disables the publish.
+    window_done_entity: str = "input_text.commute_alarm_window_done_utc"
+    first_alarm_lead_minutes: int = Field(default=50, ge=1, le=24 * 60)
+    deadline_lead_minutes: int = Field(default=13, ge=0, le=24 * 60)
+    snooze_minutes: int = Field(default=5, ge=1, le=240)
+    # Re-rings after a snooze: hold at an absolute sink level, then ramp.
+    rering_start_percent: int = Field(default=20, ge=0, le=100)
+    rering_hold_seconds: int = Field(default=30, ge=0, le=3600)
+    rering_ramp_seconds: int = Field(default=60, ge=0, le=3600)
+
+    @model_validator(mode="after")
+    def _validate_leads(self) -> AlarmWindowConfig:
+        if self.deadline_lead_minutes >= self.first_alarm_lead_minutes:
+            raise ValueError(
+                "alarm.window.deadline_lead_minutes must be less than "
+                "first_alarm_lead_minutes"
+            )
+        return self
+
+
 class AlarmConfig(BaseModel):
     """Wake & nap alarm — see docs/alarm-design.md.
 
@@ -323,6 +357,7 @@ class AlarmConfig(BaseModel):
     poll_seconds: int = Field(default=30, ge=1, le=3600)
     # Empty = <db dir>/alarm-cache.json
     cache_path: str = ""
+    window: AlarmWindowConfig = AlarmWindowConfig()
 
     @field_validator("fallback_time")
     @classmethod
