@@ -482,9 +482,21 @@ def ramp_fraction(elapsed: timedelta, start_percent: int, ramp_seconds: int) -> 
 # ─────────── Audio ────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class RingProfile:
+    """Per-ring volume curve: hold ``start`` then ramp linearly to 100%."""
+
+    start: float
+    hold_seconds: float = 0.0
+    ramp_seconds: float = 0.0
+
+
 class AudioPlayer(Protocol):
-    def start(self) -> None:
-        """Begin (looping) playback; must save prior volume/mute first."""
+    def start(self, profile: RingProfile | None = None) -> None:
+        """Begin (looping) playback; must save prior volume/mute first.
+
+        ``profile=None`` keeps the player's configured first-alarm ramp.
+        """
 
     def tick(self) -> None:
         """Report local playback/worker failures without driving audio timing."""
@@ -567,6 +579,7 @@ class PipeWirePlayer:
         self._worker: Thread | None = None
         self._error: Exception | None = None
         self._ramp_origin = 0.0
+        self._curve = RingProfile(self._initial_volume, 0.0, float(ramp_seconds))
         self._node: tuple[int, str] | None = None
         self._saved: tuple[float, bool] | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -605,8 +618,23 @@ class PipeWirePlayer:
             return
         raise RuntimeError(f"pw-play exited immediately ({rc})")
 
-    def start(self) -> None:
+    def _level(self, elapsed: float) -> float:
+        curve = self._curve
+        if curve.ramp_seconds <= 0:
+            return 1.0 if elapsed >= curve.hold_seconds else curve.start
+        fraction = min(1.0, max(0.0, elapsed - curve.hold_seconds) / curve.ramp_seconds)
+        return round(curve.start + (1.0 - curve.start) * fraction, 4)
+
+    def start(self, profile: RingProfile | None = None) -> None:
         self.stop()
+        if profile is None:
+            self._curve = RingProfile(self._initial_volume, 0.0, float(self._ramp_seconds))
+        else:
+            self._curve = RingProfile(
+                max(0.0, min(1.0, profile.start)),
+                max(0.0, profile.hold_seconds),
+                max(0.0, profile.ramp_seconds),
+            )
         self._error = None
         self._stop.clear()
         self._node = self._resolve()
@@ -616,7 +644,7 @@ class PipeWirePlayer:
         if self._saved is None:
             raise RuntimeError("cannot snapshot sink volume")
         try:
-            initial = 1.0 if self._ramp_seconds <= 0 else self._initial_volume
+            initial = self._level(0.0)
             self._run(["wpctl", "set-volume", target, f"{initial:.2f}"])
             self._volume = initial
             self._run(["wpctl", "set-mute", target, "0"])
@@ -640,8 +668,7 @@ class PipeWirePlayer:
             while not self._stop.is_set():
                 now = self._monotonic()
                 elapsed = max(0.0, now - self._ramp_origin)
-                fraction = 1.0 if self._ramp_seconds <= 0 else min(1.0, elapsed / self._ramp_seconds)
-                v = round(self._initial_volume + (1.0 - self._initial_volume) * fraction, 4)
+                v = self._level(elapsed)
                 if self._volume != v:
                     self._run(["wpctl", "set-volume", self._target(), f"{v:.4f}"])
                     self._volume = v

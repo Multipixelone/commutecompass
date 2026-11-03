@@ -20,6 +20,7 @@ from commutecompass.alarm_daemon import (
     Inputs,
     PipeWirePlayer,
     PublishState,
+    RingProfile,
     Settings,
     StartRing,
     StopRing,
@@ -377,7 +378,7 @@ class FakePlayer:
     def __init__(self) -> None:
         self.events: list[Any] = []
 
-    def start(self) -> None:
+    def start(self, profile: RingProfile | None = None) -> None:
         self.events.append("start")
 
     def tick(self) -> None:
@@ -445,7 +446,7 @@ def test_daemon_restores_audio_on_exit(tmp_path: Path) -> None:
 
 def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
     class BrokenPlayer(FakePlayer):
-        def start(self) -> None:
+        def start(self, profile: RingProfile | None = None) -> None:
             raise RuntimeError("sink missing")
 
     beats: list[Any] = []
@@ -576,7 +577,7 @@ def test_reader_effective_prep_cap_does_not_subtract_lead_twice() -> None:
 
 def test_failure_latch_published_once_success_clears(tmp_path: Path) -> None:
     class Broken(FakePlayer):
-        def start(self) -> None:
+        def start(self, profile: RingProfile | None = None) -> None:
             raise RuntimeError("missing sink")
     clock = [at(0)]
     feed = [inp()]
@@ -741,7 +742,7 @@ def test_restart_expired_ring_does_not_start_audio(tmp_path: Path) -> None:
 
 def test_restart_failed_resume_latches_without_ack(tmp_path: Path) -> None:
     class Broken(FakePlayer):
-        def start(self) -> None:
+        def start(self, profile: RingProfile | None = None) -> None:
             raise RuntimeError("audio unavailable")
     cache = AlarmCache(tmp_path / "c.json")
     st, _ = step(DaemonState(), at(0), inp(), S)

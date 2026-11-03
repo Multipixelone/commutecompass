@@ -483,3 +483,42 @@ def test_ramp_progresses_during_slow_ha_without_more_network_polls(
         h.player.stop()
     assert not thread.is_alive()
     assert not errors
+
+
+def test_rering_profile_holds_then_ramps_slowly(tmp_path: Path) -> None:
+    from commutecompass.alarm_daemon import RingProfile
+
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start(RingProfile(0.2, hold_seconds=30, ramp_seconds=60))
+    try:
+        h.ready()
+        assert h.volumes == [0.2]
+        h.advance(29.9)
+        assert h.volumes == [0.2]
+        h.advance(30.1)  # 60s elapsed: halfway through the 60s ramp
+        assert h.volumes[-1] == pytest.approx(0.6)
+        h.advance(30)
+        assert h.volumes[-1] == 1.0
+        h.advance(30)
+        assert h.volumes[-1] == 1.0
+    finally:
+        h.player.stop()
+    assert h.volumes[-1] == 0.2  # restored snapshot
+
+
+def test_profile_is_per_ring_and_default_restores_first_alarm_ramp(tmp_path: Path) -> None:
+    from commutecompass.alarm_daemon import RingProfile
+
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start(RingProfile(0.2, hold_seconds=30, ramp_seconds=60))
+    h.ready()
+    h.player.stop()
+    h.calls.clear()
+    h.player.start()
+    try:
+        h.ready()
+        assert h.volumes == [0.3]
+        h.advance(5)
+        assert h.volumes[-1] == pytest.approx(0.65)
+    finally:
+        h.player.stop()
