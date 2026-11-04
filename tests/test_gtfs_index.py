@@ -5,6 +5,7 @@ from __future__ import annotations
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -488,6 +489,26 @@ def test_open_stale_future_and_out_of_coverage(tmp_path: Path) -> None:
 
 
 # ─────────── refresh(): supplemented → regular fallback ───────────
+
+
+@pytest.mark.parametrize("failure", [zipfile.BadZipFile, ValueError, RuntimeError])
+def test_refresh_falls_back_after_unexpected_import_error(
+    tmp_path: Path, failure: type[Exception],
+) -> None:
+    src = _build_zip(tmp_path / "src.zip")
+
+    def fetch(url: str, dest: Path) -> None:
+        dest.write_bytes(src.read_bytes())
+
+    def import_attempt(*args: object, **kwargs: object) -> object:
+        if kwargs["feed_kind"] == "supplemented":
+            raise failure("malformed supplemented feed")
+        return import_feed(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch("commutecompass.gtfs_index.import_feed", side_effect=import_attempt):
+        stats = refresh(tmp_path / "gtfs.db", allowlist=[ENTRY], fetch=fetch)
+    assert stats.feed_kind == "regular"
+    assert not list(tmp_path.glob(".gtfs-dl-*"))
 
 
 def test_refresh_prefers_supplemented(tmp_path: Path) -> None:

@@ -719,12 +719,11 @@ def refresh(
                     zip_path, db_path, feed_kind=kind, allowlist=entries,
                     source_url=url, now=now,
                 )
-            except AllowlistMismatchError as exc:
-                allowlist_failed = True
-                errors.append(f"{kind}: {exc}")
-            except (GtfsImportError, OSError, sqlite3.Error) as exc:
-                errors.append(f"{kind}: {exc}")
-            _logger.warning("gtfs refresh: %s feed failed: %s", kind, errors[-1])
+            except Exception as exc:  # noqa: BLE001 - each feed attempt must fail open
+                if isinstance(exc, AllowlistMismatchError):
+                    allowlist_failed = True
+                errors.append(f"{kind}: {type(exc).__name__}")
+                _logger.warning("gtfs refresh: %s feed failed: %s", kind, type(exc).__name__)
     raise GtfsRefreshError(
         "gtfs refresh failed; previous index kept: " + " | ".join(errors),
         config_error=allowlist_failed,
