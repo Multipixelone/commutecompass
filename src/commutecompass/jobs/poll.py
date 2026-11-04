@@ -291,7 +291,12 @@ def run(
                 )
                 continue
 
-            sent_ok = _notifier.send(ping.message)
+            try:
+                sent_ok = _notifier.send(ping.message)
+            except Exception as exc:
+                # Do not log exception text: a notifier may embed message content.
+                logger.warning("Notifier raised %s for ping %s", type(exc).__name__, ping.id)
+                sent_ok = False
             now = _now_fn()
             if sent_ok:
                 logger.info("Fired ping %s (%s)", ping.id, ping.kind)
