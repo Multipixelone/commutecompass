@@ -50,10 +50,9 @@ _send_one() {
       --channel "$OPENCLAW_CHANNEL" \
       --target "$OPENCLAW_TARGET" \
       --message "$body"; then
-    # Show a preview (truncated) so journal / cron mail surfaces the failed
-    # message without dumping multi-KB bodies.
-    local preview=${body:0:80}
-    echo "openclaw-send: send failed for message ${preview//$'\n'/ }…" >&2
+    # Never put event titles or locations in the journal.
+    local LC_ALL=C
+    echo "openclaw-send: send failed for message $sends (${#body} bytes)" >&2
     failures=$((failures + 1))
   fi
 }
