@@ -1398,7 +1398,11 @@ class AlarmDaemon:
     def run_once(self) -> float:
         """One poll; returns seconds to sleep before the next."""
         now = self.clock()
-        inputs = self.reader()
+        try:
+            inputs = self.reader()
+        except Exception as exc:  # noqa: BLE001 — cached alarms survive reader failures
+            logger.warning("alarm daemon: reader failed: %s", type(exc).__name__)
+            inputs = Inputs(ha_ok=False)
         if self._activity_pressed is not None:
             inputs = replace(inputs, activity_at=self._activity_pressed)
             self._activity_pressed = None

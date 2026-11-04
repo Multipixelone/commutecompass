@@ -444,6 +444,53 @@ def test_daemon_restores_audio_on_exit(tmp_path: Path) -> None:
     assert published[-1] == "ringing"
 
 
+def test_reader_failure_rings_cached_alarm_and_recovers(tmp_path: Path) -> None:
+    cache = AlarmCache(tmp_path / "c.json")
+    cache.save(DaemonState(pending=T0))
+    player = FakePlayer()
+    reads = 0
+    sleeps = 0
+    clock = [at(0)]
+    modes: list[str] = []
+
+    def reader() -> Inputs:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("HA unavailable")
+        return inp(stop_pressed_at=at(0.1))
+
+    def sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            assert daemon.state.mode == "ringing"
+            assert player.events == ["start"]
+        clock[0] = at(0.2)
+        if reads == 2:
+            daemon.request_stop()
+
+    daemon = AlarmDaemon(
+        reader=reader, player=player, cache=cache, settings=S,
+        clock=lambda: clock[0], sleep=sleep, publish_state=_recorder(modes),
+    )
+    daemon.run_forever()
+    assert reads == 2
+    assert daemon.state.mode == "idle"
+    assert modes == ["idle"]  # Ringing publication waits for HA recovery.
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_reader_process_exit_propagates(tmp_path: Path, error: type[BaseException]) -> None:
+    def reader() -> Inputs:
+        raise error()
+
+    daemon = AlarmDaemon(reader=reader, player=FakePlayer(),
+                         cache=AlarmCache(tmp_path / "c.json"), settings=S)
+    with pytest.raises(error):
+        daemon.run_once()
+
+
 def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
     class BrokenPlayer(FakePlayer):
         def start(self, profile: RingProfile | None = None) -> None:
