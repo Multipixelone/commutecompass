@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -46,6 +46,20 @@ def _today_anchor() -> datetime:
 
     day_start, _day_end = logical_day_bounds_nyc()
     return day_start + timedelta(hours=8)  # ~10am NYC
+
+
+@pytest.mark.parametrize("selector", ["next", "today:1", ""])
+def test_naive_now_is_rejected(tmp_db_path: Path, selector: str) -> None:
+    store = _seeded_store(tmp_db_path, [])
+    with pytest.raises(ValueError, match="timezone-aware"):
+        resolve_event_selector(selector, store, now=datetime(2026, 11, 4, 10))
+
+
+def test_utc_now_selects_same_upcoming_event(tmp_db_path: Path) -> None:
+    now = _today_anchor()
+    event = _make_event("upcoming", title="Grand Central visit", start=now + timedelta(hours=1))
+    store = _seeded_store(tmp_db_path, [Plan(event=event, status="planned")])
+    assert resolve_event_selector("next", store, now=now.astimezone(UTC)) == event.id
 
 
 def test_next_picks_earliest_upcoming(tmp_db_path: Path) -> None:

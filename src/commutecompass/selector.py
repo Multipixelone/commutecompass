@@ -22,6 +22,8 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from commutecompass.timeutil import to_nyc
+
 if TYPE_CHECKING:
     from commutecompass.store import Store
 
@@ -65,6 +67,9 @@ def resolve_event_selector(
     step inspects today's plans (``store.today_plans()``) so off-day refs
     naturally fail rather than mutating yesterday's state.
     """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    now = to_nyc(now)
     if not selector or not selector.strip():
         raise SelectorError(_EXIT_NOT_FOUND, "empty selector")
     sel = selector.strip()
