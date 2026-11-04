@@ -54,7 +54,7 @@ def test_inverted_stored_period_does_not_overlap() -> None:
     alert = Alert(
         id="inverted", affected_routes={"C"}, affected_systems={"MTA Subway"},
         header="bad period", description="", severity="WARNING",
-        active_periods=[(start, start - timedelta(minutes=10))], raw={},
+        active_periods=[(start, start - timedelta(minutes=10))],
     )
     leg = subway_leg("C", depart_at=start - timedelta(hours=1), arrive_at=start + timedelta(hours=1))
     assert not _time_overlaps(alert, sample_route([leg]), start)
