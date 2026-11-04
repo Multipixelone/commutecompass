@@ -214,6 +214,36 @@ def test_store_init_schema_creates_tables(tmp_db_path: Path) -> None:
             assert result is not None, f"Table {table} not created"
 
 
+def test_init_schema_migrates_only_unfired_duplicates(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    conn = sqlite3.connect(tmp_db_path)
+    conn.execute("DROP INDEX idx_ping_event_kind_unfired")
+    rows = [
+        ("fired", "fired-event", "2026-11-01T01:00:00-04:00", 1),
+        ("latest", "event", "2026-11-01T01:45:00-05:00", 0),
+        ("older", "event", "2026-11-01T01:50:00-04:00", 0),
+        ("tie", "event", "2026-11-01T06:45:00+00:00", 0),
+        ("older-last", "event", "2026-11-01T01:55:00-04:00", 0),
+        ("fired-same-group", "event", "2026-11-01T00:00:00-04:00", 1),
+    ]
+    conn.executemany(
+        "INSERT INTO pings(id, event_id, kind, fire_at, message, fired) "
+        "VALUES (?, ?, 'leave', ?, 'message', ?)",
+        rows,
+    )
+    conn.commit()
+
+    store.init_schema()
+    assert {row[0] for row in conn.execute("SELECT id FROM pings")} == {
+        "fired", "fired-same-group", "tie",
+    }
+    store.init_schema()
+    store.init_schema()
+    assert conn.execute("SELECT COUNT(*) FROM pings").fetchone()[0] == 3
+    conn.close()
+
+
 def test_store_init_schema_idempotent(tmp_db_path: Path) -> None:
     """Calling init_schema twice does not raise."""
     store = Store(tmp_db_path)

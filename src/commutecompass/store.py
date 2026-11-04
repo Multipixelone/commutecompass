@@ -196,21 +196,27 @@ class Store:
                 conn.execute(
                     "ALTER TABLE adjust_log ADD COLUMN undone INTEGER NOT NULL DEFAULT 0"
                 )
-            # Ensure only one unfired ping per (event_id, kind).
-            # Migrate existing duplicates first, keeping the row with the latest fire_at.
-            cursor = conn.execute("PRAGMA table_info(pings)")
-            columns = {row[1] for row in cursor.fetchall()}
-            if "event_id" in columns and "kind" in columns:
+            # Serialize the one-time dedupe and index creation. Preserve fired
+            # history and keep the latest pending instant (then highest rowid).
+            conn.execute("BEGIN IMMEDIATE")
+            index_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                ("idx_ping_event_kind_unfired",),
+            ).fetchone()
+            if not index_exists:
                 conn.execute("""
-                    DELETE FROM pings WHERE rowid NOT IN (
-                        SELECT MAX(rowid)
-                        FROM pings
-                        WHERE fired = 0
-                        GROUP BY event_id, kind
+                    DELETE FROM pings WHERE fired = 0 AND rowid IN (
+                        SELECT rowid FROM (
+                            SELECT rowid, ROW_NUMBER() OVER (
+                                PARTITION BY event_id, kind
+                                ORDER BY julianday(fire_at) DESC, rowid DESC
+                            ) AS rank
+                            FROM pings WHERE fired = 0
+                        ) WHERE rank > 1
                     )
                 """)
                 conn.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_ping_event_kind_unfired
+                    CREATE UNIQUE INDEX idx_ping_event_kind_unfired
                     ON pings(event_id, kind) WHERE fired = 0
                 """)
             # Phase 1: add gps_accuracy column to current_location if missing.
