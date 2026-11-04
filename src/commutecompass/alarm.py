@@ -12,7 +12,8 @@ Wake rule (Q2/Q8)::
     no plan-able events -> fallback_time
 
 Target logical day: today's wake if it is still in the future, else
-tomorrow's.  All arithmetic is done in absolute (UTC) time so DST transition
+tomorrow's, then the following day's if both have elapsed. All arithmetic is done
+in absolute (UTC) time so DST transition
 days stay correct; wall-clock values are rendered in America/New_York.
 """
 
@@ -171,8 +172,10 @@ def compute_wake(
     """Compute the next morning wake.
 
     Both days are planned: today's wake wins while future, and the nap cap
-    considers the earliest future prep across today and tomorrow. Incomplete
-    planning raises rather than publishing a potentially unsafe later fallback.
+    considers the earliest future prep across today and tomorrow, extending to
+    the third logical day only when both wakes have elapsed (possible with an
+    early event and a large lead). Incomplete planning in any fetched day raises
+    rather than publishing a potentially unsafe later fallback.
     """
     now_utc = now.astimezone(UTC)
     today_start, _ = logical_day_bounds_nyc(now)
@@ -187,11 +190,19 @@ def compute_wake(
     if wake.astimezone(UTC) <= now_utc:
         wake, plan = tomorrow_wake, tomorrow_plan
         day_start = tomorrow_start
+    all_plans = [*today_plans, *tomorrow_plans]
     if wake.astimezone(UTC) <= now_utc:
-        raise AlarmError("no future wake in today's or tomorrow's plans")
+        # An early tomorrow event minus a large lead can already be past tonight.
+        # Search one more logical day, still validating every fetched snapshot.
+        day_start, _ = logical_day_bounds_nyc(tomorrow_start + timedelta(hours=36))
+        later_plans = plans_for_day(day_start)
+        wake, plan = wake_for_day(day_start, later_plans, config, now=now)
+        all_plans.extend(later_plans)
+    if wake.astimezone(UTC) <= now_utc:
+        raise AlarmError("no future wake in three logical days")
 
     # Nap cap: the next first alarm (window start or prep minus lead).
-    nxt = _earliest_alarm_plan([*today_plans, *tomorrow_plans], config, after=now)
+    nxt = _earliest_alarm_plan(all_plans, config, after=now)
     from commutecompass.format import _sanitize_text
 
     deadline: datetime | None = None
