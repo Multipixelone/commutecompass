@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from commutecompass.cli import cli
+from commutecompass.config import CONFIG_SET_ALLOWLIST
 
 SKILL = Path(__file__).resolve().parents[1] / "skills/commutecompass"
 
@@ -20,6 +21,12 @@ def test_documented_scripts_exist_and_are_executable() -> None:
         script = SKILL / "scripts" / name
         assert script.is_file(), name
         assert os.access(script, os.X_OK), name
+
+
+def test_config_allowlist_documentation_matches_code() -> None:
+    document = (SKILL / "references/config-allowlist.md").read_text()
+    documented = set(re.findall(r"^\|\s*`([a-z_]+(?:\.[a-z_]+)+)`\s*\|", document, re.MULTILINE))
+    assert documented == set(CONFIG_SET_ALLOWLIST)
 
 
 def test_wrapper_subcommands_exist() -> None:
