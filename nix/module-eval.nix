@@ -34,6 +34,13 @@ assert lib.assertMsg (lib.all (item: item.assertion) config.assertions)
   (lib.concatMapStringsSep "\n" (item: item.message)
     (builtins.filter (item: !item.assertion) config.assertions));
 assert services.commutecompass-poll.serviceConfig.Type == "oneshot";
+assert services.commutecompass-poll.serviceConfig.TimeoutStartSec == "2min";
+assert services.commutecompass-morning.serviceConfig.TimeoutStartSec == "10min";
+assert services.commutecompass-tomorrow.serviceConfig.TimeoutStartSec == "10min";
+assert services.commutecompass-gtfs-refresh.serviceConfig.TimeoutStartSec == "30min";
+assert services.commutecompass-alarm-publish.serviceConfig.TimeoutStartSec == "10min";
+assert (evaluate { services.commutecompass.jobTimeouts.poll = "3min"; })
+  .systemd.services.commutecompass-poll.serviceConfig.TimeoutStartSec == "3min";
 assert services.commutecompass-alarm.serviceConfig.Type == "simple";
 assert services.commutecompass-alarm.serviceConfig.Restart == "always";
 assert timers.commutecompass-poll.timerConfig.OnUnitActiveSec == "1min";

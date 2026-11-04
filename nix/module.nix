@@ -87,6 +87,7 @@ let
   mkService = subcommand: description:
     lib.recursiveUpdate serviceDefaults {
       inherit description;
+      serviceConfig.TimeoutStartSec = cfg.jobTimeouts.${subcommand};
       serviceConfig.ExecStart =
         "${pkgs.bash}/bin/bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'";
     };
@@ -96,6 +97,7 @@ let
   mkPlainService = subcommand: description:
     lib.recursiveUpdate serviceDefaults {
       inherit description;
+      serviceConfig.TimeoutStartSec = cfg.jobTimeouts.${subcommand} or "10min";
       serviceConfig.ExecStart = "${exe} ${subcommand}";
     };
 in {
@@ -205,6 +207,17 @@ in {
         '';
       };
     };
+
+    jobTimeouts = lib.genAttrs [ "poll" "morning" "tomorrow" "gtfs-refresh" "alarm publish" ] (job:
+      lib.mkOption {
+        type = lib.types.str;
+        default = if job == "poll" then "2min" else if job == "gtfs-refresh" then "30min" else "10min";
+        description = ''
+          systemd TimeoutStartSec for the ${job} oneshot job, including init-db.
+          Keep application HTTP timeouts below this limit. A timeout terminates
+          a hung run so the next timer activation can retry.
+        '';
+      });
 
     gtfsRefreshTime = lib.mkOption {
       type = lib.types.str;
