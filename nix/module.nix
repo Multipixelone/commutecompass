@@ -316,6 +316,11 @@ in {
             `environment.systemPackages` that sources the env file, sets
             `COMMUTECOMPASS_CONFIG=${configPath}`, and execs `commutecompass`.
 
+        Security boundary: every listed user can read the entire service
+        environmentFile, not just skill-specific credentials. This grants
+        access to all configured API keys and Telegram/Home Assistant tokens.
+        Add only users trusted with every service secret.
+
         The wrapper requires `services.commutecompass.environmentFile` to be
         group-readable (mode 0440 or wider). The default agenix mode `0400`
         is not enough; set `age.secrets.<name>.mode = "0440"` to match.

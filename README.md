@@ -145,6 +145,14 @@ OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.t
 
 Point your OpenClaw instance at `skills/commutecompass/`, and the chat commands are live. The scripts shell out to `commutecompass-skill`, a wrapper the NixOS module installs when `services.commutecompass.skill.users` is set; it sources the secrets env file and points at `/etc/commutecompass/config.toml`, so the calling session needs no preamble. Outside NixOS, ship an equivalent wrapper on PATH. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
 
+**Skill-user trust boundary:** every user listed in
+`services.commutecompass.skill.users` joins the service group and can read the
+**entire** `services.commutecompass.environmentFile` (which must be group-readable,
+e.g. mode `0440`). This exposes all configured API keys, Telegram bot tokens and
+Home Assistant tokens, not merely the credentials needed for a particular skill
+command. Add only users trusted with every service secret; the default shared-file
+behavior is unchanged.
+
 ## Already at the destination
 
 With Home Assistant location enabled, `poll` defers prep and leave reminders
