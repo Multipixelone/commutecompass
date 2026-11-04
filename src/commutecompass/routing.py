@@ -383,14 +383,19 @@ def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Route |
         return None
 
     routes = response.get("routes", [])
-    if not routes:
+    if not isinstance(routes, list) or not routes:
         return None
 
     best_route = None
     best_score = math.inf
 
     for route_index, route in enumerate(routes):
-        legs = route.get("legs", [])
+        if not isinstance(route, dict):
+            continue
+        raw_legs = route.get("legs", [])
+        if not isinstance(raw_legs, list):
+            continue
+        legs = [leg for leg in raw_legs if isinstance(leg, dict)]
         if not legs:
             continue
 
@@ -401,7 +406,11 @@ def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Route |
 
         for leg in legs:
             steps = leg.get("steps", [])
+            if not isinstance(steps, list):
+                continue
             for step in steps:
+                if not isinstance(step, dict):
+                    continue
                 transit_leg = _parse_step(step, NYC_TZ)
                 if transit_leg is None:
                     continue

@@ -600,6 +600,20 @@ class TestParseRoute:
         assert route.legs[0].line == "C"
 
 
+@pytest.mark.parametrize("malformed", [None, [], "invalid"])
+def test_parse_route_skips_malformed_shapes(malformed: Any) -> None:
+    valid_leg = {
+        "departure_time": {"value": 1000}, "arrival_time": {"value": 5000},
+        "duration": {"value": 4000}, "steps": [malformed, _walk_step()],
+    }
+    response = {"status": "OK", "routes": [malformed, {"legs": [malformed, valid_leg]}]}
+    route = _parse_route(response)
+    assert route is not None
+    assert len(route.legs) == 1
+    assert route.provider_route_index == 1
+    assert _parse_route({"status": "OK", "routes": [malformed]}) is None
+
+
 @pytest.mark.parametrize("body", [b"not json", b'{"status": "OK", "routes": [null]}'])
 def test_plan_route_rejects_malformed_response(
     body: bytes, origin: Origin, destination: ResolvedLocation, arrival_time: datetime,
