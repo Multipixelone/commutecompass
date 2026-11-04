@@ -667,7 +667,7 @@ def test_plan_event_applies_weather_buffer(
          patch("commutecompass.weather._fetch_forecast") as mock_fetch, \
          patch("commutecompass.planner.now_nyc", return_value=nyc_now):
         # Forecast hour matching event.start (14:00) shows likely rain.
-        hour = event.start.strftime("%Y-%m-%dT%H:00")
+        hour = int(event.start.replace(minute=0, second=0, microsecond=0).timestamp())
         mock_fetch.return_value = {
             "time": [hour],
             "precipitation": [1.0],
