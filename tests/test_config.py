@@ -689,6 +689,21 @@ def test_explicit_secret_paths_do_not_depend_on_heuristics(monkeypatch: pytest.M
     assert set(redact_for_display(secrets).values()) == {"***REDACTED***"}
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("scheduling.morning_run_time", "07:15"),
+    ("scheduling.poll_interval_seconds", "30"),
+])
+def test_externally_scheduled_updates_warn(minimal_toml: Path, key: str, value: str) -> None:
+    from click.testing import CliRunner
+
+    from commutecompass.cli import cli
+
+    result = CliRunner().invoke(cli, ["--config", str(minimal_toml), "config", "set", key, value])
+    assert result.exit_code == 0, result.output
+    assert "not read at runtime" in result.output
+    assert "systemd timer" in result.output
+
+
 class TestUpdateConfigField:
     def _write_toml(self, tmp_path: Path) -> Path:
         p = minimal_toml.__wrapped__(tmp_path)
