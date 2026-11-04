@@ -23,6 +23,45 @@ def _mock_get_response(status: int, payload: object) -> httpx.Response:
     return httpx.Response(status_code=status, json=payload)
 
 
+@pytest.mark.parametrize("operation", ["location", "zones", "service", "tomorrow"])
+@pytest.mark.parametrize("failure", ["timeout", "http", "json"])
+def test_failure_paths_do_not_log_bearer_token(
+    operation: str, failure: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "private-test-bearer-token"
+    with patch("httpx.Client") as client:
+        instance = client.return_value.__enter__.return_value
+        if failure == "timeout":
+            instance.get.side_effect = httpx.TimeoutException(f"timeout with {token}")
+            instance.post.side_effect = httpx.TimeoutException(f"timeout with {token}")
+        else:
+            response = httpx.Response(503 if failure == "http" else 200, text=token)
+            instance.get.return_value = response
+            instance.post.return_value = response
+        if operation == "location":
+            result = fetch_location("http://ha", "person.test", token)
+            assert result is None
+        elif operation == "zones":
+            assert fetch_zones("http://ha", token) == {}
+        elif operation == "service":
+            assert call_service("http://ha", token, "script", "test") is (failure == "json")
+        else:
+            assert push_tomorrow_alarm(
+                "http://ha", token, "script.test", datetime.now(ZoneInfo("America/New_York")),
+            ) is (failure == "json")
+    assert token not in caplog.text
+    assert all(token not in str(record.args) for record in caplog.records)
+
+
+@pytest.mark.parametrize("service", ["a.b.c", ".x", "x.", "no_dot"])
+def test_tomorrow_service_must_have_exactly_two_components(service: str) -> None:
+    with patch("commutecompass.ha_client.call_service") as call:
+        assert not push_tomorrow_alarm(
+            "http://ha", "tok", service, datetime.now(ZoneInfo("America/New_York")),
+        )
+    call.assert_not_called()
+
+
 class TestFetchLocation:
     @pytest.mark.parametrize("timestamp", [None, "", "bad", 123, "2026-05-09T12:34:56"])
     def test_invalid_timestamp_never_manufactures_fresh_fix(self, timestamp: object) -> None:
