@@ -212,8 +212,8 @@ failure modes without parsing log output:
 | Code | Meaning                                                    |
 |------|------------------------------------------------------------|
 | 0    | Success.                                                   |
-| 64   | Usage / bad arguments (Click already uses 2; we use 64 for `config set` rejects). |
+| 64   | Usage / bad arguments (Click already uses 2; `config set` uses 64 for non-allowlisted keys or values that cannot be parsed). |
 | 65   | Subject not found (no plan / event / location row).        |
 | 66   | Data could not be resolved (no current location, no route, prep/leave missing). |
 | 75   | Transient failure: job lock held by another process, a morning/poll SQLite operation failed, or an external API/feed is down (e.g. `gtfs-refresh` could fetch neither the supplemented nor the regular subway GTFS); retry next cycle. |
-| 78   | Config error (missing env var, malformed TOML; for `gtfs-refresh`, the vendored stop allowlist does not match the feed — needs a reviewed allowlist change, do not retry). |
+| 78   | Config error (missing env var, malformed TOML, or a `config set` edit that would leave an invalid config; for `gtfs-refresh`, the vendored stop allowlist does not match the feed — needs a reviewed allowlist change, do not retry). |

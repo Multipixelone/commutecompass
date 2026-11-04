@@ -949,12 +949,16 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
     from commutecompass.config import (
         EXTERNALLY_SCHEDULED_KEYS,
         ConfigSetError,
+        ConfigSetValidationError,
         update_config_field,
     )
 
     config_path: Path = ctx.obj["config_path"]
     try:
         coerced = update_config_field(config_path, key, value)
+    except ConfigSetValidationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(EXIT_CONFIG)
     except ConfigSetError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(EXIT_USAGE)

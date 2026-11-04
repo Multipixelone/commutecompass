@@ -707,9 +707,32 @@ class TestConfigSet:
         result = runner.invoke(
             cli, ["--config", str(p), "config", "set", "telegram_bot_token", "x"]
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 64
         # Error message should name the allowlist
         assert "prep.prep_minutes" in result.output
+
+    @pytest.mark.parametrize("invalid_document", [False, True])
+    def test_invalid_config_edit_exits_config_without_writing(
+        self, runner: CliRunner, minimal_toml: Path, invalid_document: bool,
+    ) -> None:
+        if invalid_document:
+            minimal_toml.write_text(minimal_toml.read_text().replace("lat = 40.6950", "lat = 999"))
+        before = minimal_toml.read_bytes()
+        value = "30" if invalid_document else "-1"
+        result = runner.invoke(
+            cli, ["--config", str(minimal_toml), "config", "set", "--", "prep.prep_minutes", value]
+        )
+        assert result.exit_code == 78, result.output
+        assert "Invalid config" in result.output
+        assert minimal_toml.read_bytes() == before
+
+    def test_uncoercible_value_exits_usage(self, runner: CliRunner, minimal_toml: Path) -> None:
+        before = minimal_toml.read_bytes()
+        result = runner.invoke(
+            cli, ["--config", str(minimal_toml), "config", "set", "prep.prep_minutes", "abc"]
+        )
+        assert result.exit_code == 64, result.output
+        assert minimal_toml.read_bytes() == before
 
     def test_set_externally_scheduled_key_warns(
         self, runner: CliRunner, minimal_toml: Path

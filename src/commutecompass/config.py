@@ -628,6 +628,10 @@ class ConfigSetError(Exception):
     """Raised by ``update_config_field`` for an invalid key or value."""
 
 
+class ConfigSetValidationError(ConfigSetError):
+    """Raised when an edit would leave the complete config invalid."""
+
+
 def _split_dotted(dotted_key: str) -> tuple[list[str], str]:
     """Split a dotted key into (intermediate_tables, leaf_key).
 
@@ -721,7 +725,7 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     try:
         Config.model_validate(doc.unwrap())
     except ValueError as exc:
-        raise ConfigSetError(f"Invalid config: {exc}") from exc
+        raise ConfigSetValidationError(f"Invalid config: {exc}") from exc
 
     _atomic_write_config(toml_path, tomlkit.dumps(doc))
 
