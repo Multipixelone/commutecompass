@@ -2756,6 +2756,32 @@ def test_poll_releases_leave_ping_for_retry_when_send_fails(
     assert failing.sent == ["leave now", "leave now"]
 
 
+def test_poll_notifier_exception_releases_and_continues(
+    minimal_config: Config,
+    today_events: list[Event],
+    sample_route: Route,
+) -> None:
+    now = now_nyc()
+    store = _seed_due_leave_plan(minimal_config, today_events[0], sample_route, now)
+    plan = store.get_plan(today_events[0].id)
+    assert plan is not None
+    store.schedule_ping(PingEntry(
+        id="second", event_id="second-event", kind="leave",
+        fire_at=now - timedelta(minutes=1), message="second message",
+    ))
+    notifier = MagicMock()
+    notifier.send.side_effect = [RuntimeError("private message"), True]
+
+    _poll_at(minimal_config, store, plan, notifier, now)
+
+    assert [call.args[0] for call in notifier.send.call_args_list] == [
+        "leave now", "second message",
+    ]
+    pending = store.pending_pings(before=now)
+    assert [(ping.id, ping.send_attempts) for ping in pending] == [("ping-flaky", 1)]
+    assert utc(store.get_job_heartbeat("poll")) == utc(now)
+
+
 def test_poll_stops_retrying_once_send_succeeds(
     minimal_config: Config,
     today_events: list[Event],
@@ -2797,6 +2823,10 @@ def test_poll_gives_up_after_attempt_cap(
 
     assert len(failing.sent) == _MAX_SEND_ATTEMPTS
     assert store.pending_pings(before=now + timedelta(minutes=10)) == []
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT fired, send_attempts FROM pings WHERE id = 'ping-flaky'",
+        ).fetchone() == (1, _MAX_SEND_ATTEMPTS - 1)
 
 
 def test_poll_records_heartbeat(

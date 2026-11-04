@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -43,6 +45,27 @@ def test_lock_path_for_under_db_dir(tmp_path: Path) -> None:
     path = lock_path_for(db, "morning")
     assert path.parent == db.parent
     assert path.name == ".morning.lock"
+
+
+@pytest.mark.parametrize("operation", ["fcntl.flock", "os.close"])
+def test_release_failure_preserves_body_exception(tmp_path: Path, operation: str) -> None:
+    lock = JobLock(tmp_path / ".test.lock", job_name="test")
+    lock.acquire()
+    fd = lock._fd
+    assert fd is not None
+    try:
+        with patch(f"commutecompass.joblock.{operation}", side_effect=OSError("release failed")):
+            with pytest.raises(ValueError, match="body failed"):
+                try:
+                    raise ValueError("body failed")
+                finally:
+                    lock.release()
+            lock.release()  # Already released, even when the OS operation failed.
+        assert lock._fd is None
+    finally:
+        # A mocked close left the actual descriptor open; avoid leaking the lock.
+        if operation == "os.close":
+            os.close(fd)
 
 
 def test_lock_context_manager_releases_on_exception(tmp_path: Path) -> None:
