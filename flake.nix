@@ -69,6 +69,10 @@
 
         checks = {
           inherit pre-commit-check;
+          module-eval = import ./nix/module-eval.nix {
+            inherit pkgs nixpkgs;
+            module = self.nixosModules.default;
+          };
         };
 
         devShells.default = pkgs.mkShell {
