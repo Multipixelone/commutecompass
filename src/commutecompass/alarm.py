@@ -412,11 +412,13 @@ def publish(
     provider = plans_for_day or _default_provider(config, planned or {}, store, _now)
     result = compute_wake(config, _now, provider)
     logger.info(
-        "alarm: wake_at=%s (%s) next_prep_at=%s deadline_at=%s",
+        "alarm: wake_at=%s (%s) next_prep_at=%s deadline_at=%s computed_at=%s day=%s",
         result.wake_at.isoformat(),
         result.source,
         result.next_prep_at.isoformat() if result.next_prep_at else "-",
         result.deadline_at.isoformat() if result.deadline_at else "-",
+        _now.isoformat(),
+        result.day.isoformat(),
     )
     if dry_run:
         return result, False

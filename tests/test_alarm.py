@@ -608,6 +608,30 @@ def test_historical_too_imminent_does_not_hide_afternoon_cap(tmp_path: Path) -> 
     assert result.next_event == "Afternoon"
 
 
+@pytest.mark.parametrize("historical", [False, True])
+def test_started_window_rolls_to_next_morning_not_evening(
+    tmp_path: Path, historical: bool,
+) -> None:
+    from commutecompass.config import AlarmWindowConfig
+
+    cfg = _config(tmp_path, window=AlarmWindowConfig(first_alarm_lead_minutes=60))
+    prep, leave = (_nyc(2026, 11, 4, 7, 10), _nyc(2026, 11, 4, 7, 40)) if historical else (
+        datetime(2026, 11, 4, 8, 15, 47, tzinfo=NYC_TZ),
+        datetime(2026, 11, 4, 8, 45, 47, tzinfo=NYC_TZ))
+    morning = _plan(_nyc(2026, 11, 4, 9), "Morning").model_copy(update={
+        "prep_at": prep, "leave_at": leave, "error": "too_imminent" if historical else None})
+    evening = _plan(datetime(2026, 11, 4, 18, 30, tzinfo=NYC_TZ), "Evening").model_copy(update={
+        "prep_at": datetime(2026, 11, 4, 17, 33, 57, tzinfo=NYC_TZ),
+        "leave_at": datetime(2026, 11, 4, 18, 3, 57, tzinfo=NYC_TZ)})
+    tomorrow = _plan(_nyc(2026, 11, 5, 8)).model_copy(update={"leave_at": _nyc(2026, 11, 5, 8, 30)})
+    r = compute_wake(cfg, _nyc(2026, 11, 4, 8), _provider({
+        date(2026, 11, 4): [morning, evening], date(2026, 11, 5): [tomorrow],
+    }))
+    assert (r.day, r.wake_at, r.plan) == (date(2026, 11, 5), _nyc(2026, 11, 5, 7, 30), tomorrow)
+    if not historical:  # Nap cap stays on the started window, not the evening.
+        assert r.next_prep_at == datetime(2026, 11, 4, 7, 45, 47, tzinfo=NYC_TZ)
+
+
 @pytest.mark.parametrize("error", ["no_route", "location_unresolved", "internal_error"])
 def test_past_unresolved_start_bounds_elapsed_wake(tmp_path: Path, error: str) -> None:
     cfg = _config(tmp_path)
