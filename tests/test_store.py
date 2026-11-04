@@ -431,6 +431,21 @@ def test_delete_old_plans(tmp_db_path: Path) -> None:
 
 # ── Ping CRUD tests ────────────────────────────────────────────────────────────
 
+def test_schedule_ping_preserves_send_attempts(tmp_db_path: Path) -> None:
+    store = Store(tmp_db_path)
+    store.init_schema()
+    now = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    ping = PingEntry(
+        id="retry", event_id="event", kind="leave", fire_at=now,
+        message="retry message", send_attempts=3,
+    )
+    store.schedule_ping(ping)
+    assert store.pending_pings(before=now) == [ping]
+    claimed = store.claim_ping_entry(ping.id, now, due_only=True)
+    assert claimed is not None
+    assert claimed.send_attempts == 3
+
+
 def test_schedule_ping_insert(tmp_db_path: Path) -> None:
     """schedule_ping inserts a ping entry."""
     store = Store(tmp_db_path)

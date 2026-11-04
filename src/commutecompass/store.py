@@ -500,8 +500,10 @@ class Store:
             )
             conn.execute(
                 """
-                INSERT INTO pings (id, event_id, kind, fire_at, fired, fired_at, message)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pings (
+                    id, event_id, kind, fire_at, fired, fired_at, message, send_attempts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ping.id,
@@ -511,6 +513,7 @@ class Store:
                     1 if ping.fired else 0,
                     ping.fired_at.isoformat() if ping.fired_at else None,
                     ping.message,
+                    ping.send_attempts,
                 ),
             )
 
