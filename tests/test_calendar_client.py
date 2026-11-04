@@ -160,6 +160,43 @@ def _build_mock_service(items: list[dict[str, Any]]) -> MagicMock:
     return service
 
 
+@pytest.mark.parametrize("invalid_fields", [
+    {"id": None},
+    {"id": ""},
+    {"start": {"dateTime": "private-invalid-time"}},
+    {"end": {}},
+    {"end": {"dateTime": 123}},
+    {"start": None},
+    {"start": {"dateTime": "2026-05-08T10:00:00", "timeZone": "Invalid/Zone"}},
+])
+def test_fetch_events_skips_malformed_items_in_mixed_batch(
+    client_secret_json: str, token_path: Path, caplog: pytest.LogCaptureFixture,
+    invalid_fields: dict[str, Any],
+) -> None:
+    times = {
+        "start": {"dateTime": "2026-05-08T10:00:00+00:00"},
+        "end": {"dateTime": "2026-05-08T11:00:00+00:00"},
+    }
+    malformed = {
+        **times, "id": "bad-event", "summary": "private-title",
+        "location": "private-location", **invalid_fields,
+    }
+    if invalid_fields == {"id": None}:
+        del malformed["id"]
+    items = [{**times, "id": "valid-before"}, malformed, {**times, "id": "valid-after"}]
+    client = CalendarClient(client_secret_json, token_path)
+    with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
+        events = client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            start=make_aware(datetime(2026, 5, 8)),
+            end=make_aware(datetime(2026, 5, 9)),
+        )
+    assert [event.id for event in events] == ["valid-before", "valid-after"]
+    assert "Skipping malformed calendar event at index=1" in caplog.text
+    for private_value in ("private-title", "private-location", "private-invalid-time", "Invalid/Zone"):
+        assert private_value not in caplog.text
+
+
 def test_fetch_events_skips_cancelled(
     client_secret_json: str,
     token_path: Path,
