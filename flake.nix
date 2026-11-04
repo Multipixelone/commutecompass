@@ -69,6 +69,7 @@
 
         checks = {
           inherit pre-commit-check;
+          renovate-policy = import ./nix/renovate-policy.nix { inherit pkgs; };
           module-eval = import ./nix/module-eval.nix {
             inherit pkgs nixpkgs;
             module = self.nixosModules.default;

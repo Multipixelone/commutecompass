@@ -4,7 +4,30 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
-  "automerge": true,
+  "automerge": false,
+  "packageRules": [
+    {
+      "description": "Automerge only non-major development-tool updates",
+      "matchDepNames": ["pytest", "pytest-cov", "ruff", "mypy", "hatchling", "pip"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    {
+      "description": "Review workflow and flake input updates manually",
+      "matchManagers": ["github-actions", "nix"],
+      "automerge": false
+    },
+    {
+      "description": "Review HTTP and Google authentication dependency changes manually",
+      "matchDepNames": ["httpx", "/^google-auth/"],
+      "automerge": false
+    },
+    {
+      "description": "Review every major update manually",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ],
   "automergeType": "pr",
   "automergeStrategy": "squash",
   "platformAutomerge": true,
