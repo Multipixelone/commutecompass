@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import wave
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -510,6 +511,57 @@ def test_cleanup_monitor_failure_still_stops_audio_and_publishes(tmp_path: Path)
     daemon.run_forever()
     assert player.events == ["stop"]
     assert modes == ["ringing"]
+
+
+def test_registered_signals_stop_cleanup_and_dismiss_only_active_alarm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commutecompass import alarm_daemon
+
+    handlers: dict[int, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
+    monkeypatch.setattr("commutecompass.alarm_daemon.shutil.which", lambda _tool: "/fake/tool")
+    cfg = Config.model_construct(
+        home_assistant=HomeAssistantConfig(enabled=True, base_url="http://ha"),
+        home_assistant_token="tok",
+        alarm=AlarmConfig(cache_path=str(tmp_path / "c.json"), sound="fake.wav",
+                          stop_on_activity=False),
+    )
+    daemon = build_daemon(cfg)
+    monkeypatch.setattr(alarm_daemon, "build_daemon", lambda _config: daemon)
+    with monkeypatch.context() as context:
+        context.setattr(daemon, "run_forever", lambda: None)
+        alarm_daemon.run_daemon(cfg)
+    assert set(handlers) == {signal.SIGTERM, signal.SIGINT, signal.SIGUSR1}
+    clock = [at(0)]
+    daemon.clock = lambda: clock[0]
+    player = FakePlayer()
+    daemon.player = player
+    daemon.reader = lambda: inp()
+    modes: list[str] = []
+    daemon.publish_state = _recorder(modes)
+    daemon.heartbeat = lambda _now: True
+    daemon.publish_audio_failed = lambda _failed: True
+    daemon.publish_handled = lambda _instant: True
+
+    handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+    assert daemon._activity_pressed is None
+    daemon.run_once()
+    assert daemon.state.mode == "ringing"
+    clock[0] = at(0.1)
+    handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+    daemon.run_once()
+    assert str(daemon.state.mode) == "idle"
+    assert player.events == ["start", "stop"]
+
+    def sleep(_seconds: float) -> None:
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    daemon.sleep = sleep
+    daemon.run_forever()
+    assert not daemon._running
+    assert player.events[-1] == "stop"
+    assert modes == ["ringing", "idle"]
 
 
 def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
