@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from commutecompass.alarm_daemon import (
+    ActivityMonitor,
     AlarmCache,
     AlarmDaemon,
     DaemonState,
@@ -489,6 +490,26 @@ def test_reader_process_exit_propagates(tmp_path: Path, error: type[BaseExceptio
                          cache=AlarmCache(tmp_path / "c.json"), settings=S)
     with pytest.raises(error):
         daemon.run_once()
+
+
+def test_cleanup_monitor_failure_still_stops_audio_and_publishes(tmp_path: Path) -> None:
+    class BrokenMonitor(ActivityMonitor):
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            raise RuntimeError("monitor stop failed")
+
+    player = FakePlayer()
+    modes: list[str] = []
+    daemon = AlarmDaemon(reader=lambda: inp(), player=player,
+                         cache=AlarmCache(tmp_path / "c.json"), settings=S,
+                         activity_monitor=BrokenMonitor(), publish_state=_recorder(modes))
+    daemon.state = DaemonState(mode="ringing", active=T0)
+    daemon.request_stop()
+    daemon.run_forever()
+    assert player.events == ["stop"]
+    assert modes == ["ringing"]
 
 
 def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
