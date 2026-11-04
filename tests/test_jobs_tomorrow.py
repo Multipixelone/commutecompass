@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -219,6 +219,22 @@ def test_fetch_window_is_next_logical_day(
     call_kwargs = mock_cal.return_value.fetch_events.call_args.kwargs
     assert call_kwargs["start"].isoformat() == expected_start
     assert call_kwargs["end"].isoformat() == expected_end
+
+
+@pytest.mark.parametrize("contract", ["legacy", "v1"])
+def test_warns_when_legacy_tomorrow_push_and_v1_publisher_are_enabled(
+    tomorrow_config: Config, caplog: pytest.LogCaptureFixture, contract: Literal["legacy", "v1"],
+) -> None:
+    from commutecompass.config import AlarmConfig
+
+    config = tomorrow_config.model_copy(update={
+        "alarm": AlarmConfig(enabled=True, schedule_contract=contract),
+    })
+    with patch("commutecompass.jobs.tomorrow.plan_window", return_value=[]), patch(
+        "commutecompass.jobs.tomorrow._publish_alarm_safe"
+    ):
+        tomorrow_run(config)
+    assert ("legacy alarm_at payload" in caplog.text) is (contract == "v1")
 
 
 def test_no_events_skips_push(tomorrow_config: Config) -> None:
