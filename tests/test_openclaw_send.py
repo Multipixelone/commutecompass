@@ -1,6 +1,7 @@
 """Integration tests for the stdout-to-OpenClaw bridge."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -45,6 +46,21 @@ def test_framing_errors_warn_and_preserve_valid_messages(tmp_path: Path, bad: st
     assert warning in result.stderr
     assert "private text" not in result.stderr
     assert [call[-1] for call in calls] == ["good"]
+
+
+def test_stdout_notifier_end_to_end(tmp_path: Path) -> None:
+    from commutecompass.notify import StdoutNotifier
+
+    stream = io.StringIO()
+    notifier = StdoutNotifier(stream=stream)
+    messages = ["First 🚆\nsecond line", f"Before\n{START}\n{END}\nAfter", "Third"]
+    for message in messages:
+        assert notifier.send(message)
+    result, calls = run_bridge(tmp_path, stream.getvalue())
+    assert result.returncode == 0
+    expected = [messages[0], f"Before\n\u200b{START}\n\u200b{END}\nAfter", messages[2]]
+    assert calls == [["message", "send", "--channel", "telegram", "--target", "test-chat",
+                      "--message", body] for body in expected]
 
 
 def test_send_failure_logs_metadata_not_message(tmp_path: Path) -> None:
