@@ -638,21 +638,33 @@ class TestRenderConfig:
 # ─────────── update_config_field ─────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("scheduling.poll_interval_seconds", "0"),
+    ("prep.prep_minutes", "-1"),
+    ("prep.prep_minutes", "1441"),
+])
+def test_invalid_update_leaves_document_unchanged(minimal_toml: Path, key: str, value: str) -> None:
+    before = minimal_toml.read_bytes()
+    with pytest.raises(ConfigSetError, match="Invalid config"):
+        update_config_field(minimal_toml, key, value)
+    assert minimal_toml.read_bytes() == before
+
+
+def test_update_validates_entire_document(minimal_toml: Path) -> None:
+    minimal_toml.write_text(minimal_toml.read_text().replace('lat = 40.6950', 'lat = 999'))
+    before = minimal_toml.read_bytes()
+    with pytest.raises(ConfigSetError, match="Invalid config"):
+        update_config_field(minimal_toml, "prep.prep_minutes", "30")
+    assert minimal_toml.read_bytes() == before
+
+
 class TestUpdateConfigField:
     def _write_toml(self, tmp_path: Path) -> Path:
-        p = tmp_path / "config.toml"
-        p.write_text(
-            """\
-# Top-level comment that must survive
-[prep]
-prep_minutes = 20  # inline comment
-safety_buffer_minutes = 5
-
-[scheduling]
-morning_run_time = "06:00"
-poll_interval_seconds = 60
-"""
-        )
+        p = minimal_toml.__wrapped__(tmp_path)
+        original = p.read_text()
+        p.write_text("# Top-level comment that must survive\n" + original.replace(
+            "prep_minutes = 20", "prep_minutes = 20  # inline comment"
+        ))
         return p
 
     def test_allowlist_unknown_key_rejected(self, tmp_path: Path) -> None:
@@ -862,8 +874,8 @@ class TestExpandedAllowlist:
     """The HA toggle keys added for OpenClaw chat tweaks must round-trip."""
 
     def _write(self, tmp_path: Path) -> Path:
-        p = tmp_path / "config.toml"
-        p.write_text("[home_assistant]\n")
+        p = minimal_toml.__wrapped__(tmp_path)
+        p.write_text(p.read_text() + "\n[home_assistant]\n")
         return p
 
     def test_ha_replan_window_int(self, tmp_path: Path) -> None:

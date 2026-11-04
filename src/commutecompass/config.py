@@ -686,6 +686,13 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     node = _walk_or_create(doc, path_parts)
     node[leaf] = coerced
 
+    # Validate the entire edited document before touching disk. Credentials are
+    # environment-only and default empty here; editing does not require them.
+    try:
+        Config.model_validate(doc.unwrap())
+    except ValueError as exc:
+        raise ConfigSetError(f"Invalid config: {exc}") from exc
+
     with open(toml_path, "w", encoding="utf-8") as fh:
         fh.write(tomlkit.dumps(doc))
 
