@@ -554,6 +554,7 @@ def _le(a: datetime, b: datetime) -> bool:
 
 def _cancelled(
     instant: datetime, kind: str, inputs: Inputs, *, preserve_rollover: bool = False,
+    preserve_active_wake: bool = False,
 ) -> bool:
     """Backing helpers, not the future-only sensor, authoritatively cancel."""
     if not inputs.ha_ok:
@@ -562,13 +563,15 @@ def _cancelled(
         return True
     known = inputs.nap_known if kind == "nap" else inputs.wake_known
     helper = inputs.nap_at if kind == "nap" else inputs.wake_at
-    # Publishing tomorrow is housekeeping, not cancellation of today's due
-    # or active alarm. Same-day reschedules and clears remain explicit.
+    # A publication owns pending scheduling, not an already active wake.
+    # Explicit skip (above), clear and master-off still end active sessions.
+    # Retain next-day rollover protection for cached elapsed pending wakes too.
     if (
-        preserve_rollover
-        and kind == "wake"
+        kind == "wake"
         and helper is not None
-        and to_nyc(helper).date() > to_nyc(instant).date()
+        and (preserve_active_wake or (
+            preserve_rollover and to_nyc(helper).date() > to_nyc(instant).date()
+        ))
     ):
         return False
     return known and (helper is None or _key(helper) != _key(instant))
@@ -697,10 +700,11 @@ def _step(
             actions.append(PublishState("idle"))
         return replace(_idle(state), pending=None, pending_kind=""), actions
 
-    # Explicit skips, clears and reschedules cancel active as well as pending.
+    # Explicit skips/clears cancel active wakes; replacement publications do not.
+    # Nap rescheduling retains its existing cancellation behavior.
     if state.active is not None and (
         _window_cancelled(state, inputs) if state.phase
-        else _cancelled(state.active, state.active_kind, inputs, preserve_rollover=True)
+        else _cancelled(state.active, state.active_kind, inputs, preserve_active_wake=True)
     ):
         if state.mode == "ringing":
             actions.append(StopRing("cancelled"))
@@ -855,7 +859,7 @@ def step(
         if not state.enabled:
             reason = "master_off"
         elif (_window_cancelled(previous, inputs) if previous.phase else _cancelled(
-            previous.active, previous.active_kind, inputs, preserve_rollover=True,
+            previous.active, previous.active_kind, inputs, preserve_active_wake=True,
         )):
             reason = _cancellation_reason(previous.active, previous.active_kind, inputs)
         elif (any(isinstance(a, PublishWindowDone) for a in actions)
@@ -937,12 +941,14 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 def _default_run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    # In-flight volume commands must not hold stop/restoration for ten seconds.
-    timeout = 0.5 if args[:2] == ["wpctl", "set-volume"] else 10
+    # Allow PipeWire's slow first call without an unbounded stop/restore delay.
+    timeout = 3 if args[:2] == ["wpctl", "set-volume"] else 10
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
 
 
 _AUDIO_TICK_SECONDS = 0.05  # 20 Hz; serial commands, never a catch-up burst
+_MAX_VOLUME_FAILURES = 3
+_PLAYBACK_RETRY_DELAYS = (0.25, 0.5, 1.0)
 
 
 def _audio_wait(stop: Event, delay: float) -> bool:
@@ -1013,6 +1019,9 @@ class PipeWirePlayer:
         self._proc: subprocess.Popen[bytes] | None = None
         self._volume: float | None = None
         self._spawned_at = 0.0
+        self._volume_failures = 0
+        self._volume_degraded = False
+        self._playback_retries = 0
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         result = self._runner(args)
@@ -1046,6 +1055,48 @@ class PipeWirePlayer:
             return
         raise RuntimeError(f"pw-play exited immediately ({rc})")
 
+    def _spawn_with_retries(self) -> bool:
+        """Share a finite abnormal-start budget across the entire ring."""
+        while not self._stop.is_set():
+            try:
+                self._spawn()
+                return True
+            except Exception as exc:  # noqa: BLE001 — bounded recovery at playback boundary
+                self._playback_retry(exc)
+        return False
+
+    def _playback_retry(self, error: Exception) -> None:
+        if self._stop.is_set():
+            return
+        if self._playback_retries >= len(_PLAYBACK_RETRY_DELAYS):
+            raise RuntimeError("pw-play recovery exhausted") from error
+        delay = _PLAYBACK_RETRY_DELAYS[self._playback_retries]
+        self._playback_retries += 1
+        logger.warning("alarm playback retry %d: %s", self._playback_retries, error)
+        self._wait(self._stop, delay)
+
+    def _set_volume(self, volume: float) -> None:
+        """Volume control is best effort; it must never terminate playback."""
+        if self._volume_degraded or self._stop.is_set():
+            return
+        try:
+            self._run(["wpctl", "set-volume", self._target(), f"{volume:.4f}"])
+        except Exception as exc:  # noqa: BLE001 — gain failure must not stop playback
+            self._volume_failures += 1
+            logger.warning("alarm volume step failed (%d): %s", self._volume_failures, exc)
+            if self._volume_failures >= _MAX_VOLUME_FAILURES:
+                self._volume_degraded = True
+                logger.warning("alarm volume control degraded; attempting full volume once")
+                if not self._stop.is_set():
+                    try:
+                        self._run(["wpctl", "set-volume", self._target(), "1.0000"])
+                        self._volume = 1.0
+                    except Exception as fallback_exc:  # noqa: BLE001 — best-effort gain only
+                        logger.warning("alarm full-volume fallback failed: %s", fallback_exc)
+            return
+        self._volume = volume
+        self._volume_failures = 0
+
     def _level(self, elapsed: float) -> float:
         curve = self._curve
         if curve.ramp_seconds <= 0:
@@ -1071,12 +1122,15 @@ class PipeWirePlayer:
         self._saved = parse_wpctl_volume(self._run(["wpctl", "get-volume", target]).stdout or "")
         if self._saved is None:
             raise RuntimeError("cannot snapshot sink volume")
+        self._volume = None
+        self._volume_failures = 0
+        self._volume_degraded = False
+        self._playback_retries = 0
         try:
-            initial = self._level(0.0)
-            self._run(["wpctl", "set-volume", target, f"{initial:.2f}"])
-            self._volume = initial
+            self._set_volume(self._level(0.0))
             self._run(["wpctl", "set-mute", target, "0"])
-            self._spawn()
+            if not self._spawn_with_retries():
+                return
             # First launch, not setup/network time or later file-loop launches.
             self._ramp_origin = self._spawned_at
             worker = Thread(target=self._audio_loop, name="alarm-audio", daemon=True)
@@ -1098,16 +1152,18 @@ class PipeWirePlayer:
                 elapsed = max(0.0, now - self._ramp_origin)
                 v = self._level(elapsed)
                 if self._volume != v:
-                    self._run(["wpctl", "set-volume", self._target(), f"{v:.4f}"])
-                    self._volume = v
+                    self._set_volume(v)
                 if self._stop.is_set():
                     break
                 if self._proc is not None:
                     rc = self._proc.poll()
                     if rc is not None:
-                        if rc != 0 or now - self._spawned_at < 0.25:
-                            raise RuntimeError(f"pw-play failed/ended prematurely ({rc})")
-                        self._spawn()
+                        if rc != 0 or self._monotonic() - self._spawned_at < 0.25:
+                            self._playback_retry(
+                                RuntimeError(f"pw-play failed/ended prematurely ({rc})"),
+                            )
+                        if not self._spawn_with_retries():
+                            break
                 # Slow commands skip slots instead of causing catch-up bursts.
                 # Actual monotonic elapsed time, not a tick count, determines gain.
                 if self._wait(self._stop, _AUDIO_TICK_SECONDS):

@@ -19,10 +19,15 @@ buffered leave-deadline window below overrides commute mornings only.
 | Q7 | commutecompass **publishes** times to HA; HA owns nap logic + final "next alarm" selection. |
 | Q9 | `commutecompass alarm daemon` long-running on link, polls HA every 30 s, caches last known alarm locally, heartbeats to HA. |
 | Q10 | Configurable sink (substring match; default = analog, not snapcast "Living Room"). Legacy stop via HA (button/Shortcut) or keyboard/mouse activity on link (desktop out of reach of bed). Legacy snooze 9 min, max 2. |
-| Q11 | link follows latest plan always; phone keeps last confirmed; mismatch warning only at 23:30. |
+| Q11 | link follows the latest plan for pending wakes; a ringing/snoozed wake keeps its active identity across replacement publications (earlier, later, or next day). Phone keeps last confirmed; mismatch warning only at 23:30. |
 | Q12 | `input_boolean.commute_alarm_enabled` master switch; "Skip next alarm" auto-resets. CLI `alarm on/off/skip`. |
 | Q13 | Configurable sound; default synthesized tone (generated in cache on first start). |
 | Q14 | HA lights fade starting 10 min before wake; link audio at wake. Commute timing is L−47 → L−37, defined below. |
+
+Replacement wake publications are not dismissals: explicit clear, master-off,
+skip, and desktop activity still end an active wake; legacy stop/timeout still
+apply. Commute replans may tighten but never postpone the active window deadline.
+Pre-ring rescheduling and nap behavior are unchanged.
 
 Existing iOS Clock and critical-alert behavior is unchanged by this contract
 revision. Compatibility with the new **silent notification intent is OPEN for
@@ -115,7 +120,14 @@ a previous day's deadline.
   no stale worker write may follow restoration. HA polling defaults to 30 s
   idle / **2 s non-idle** (`RINGING_POLL_SECONDS`, including snoozed), with
   bounded HTTP calls; it does not clock the ramp or file loop.
-- Audio failures suppress heartbeat, latch `audio_failed`, and cause HA's
+- Volume writes have a 3 s timeout and are best effort: a failed step retries
+  at the current monotonic ramp position, never as a catch-up burst. Three
+  consecutive failures disable ramp writes after one best-effort 100% attempt;
+  playback continues even if that attempt fails. Snapshot/unmute and final
+  restoration still report failures. Abnormal player exits/launch failures share
+  three recovery retries per ring (0.25/0.5/1 s interruptible backoff); normal
+  file looping does not consume that budget or reset the ramp.
+- Unrecovered audio failures suppress heartbeat, latch `audio_failed`, and cause HA's
   dead-man fallback to fire once. Heartbeat indicates connectivity, not sound;
   playback acknowledgement is per wake and only follows successful start.
 - Cached audio failure is not cleared by process restart or healthy idle HTTP:

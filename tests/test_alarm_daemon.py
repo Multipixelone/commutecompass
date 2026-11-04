@@ -345,7 +345,7 @@ def test_pipewire_player_saves_ramps_restores(tmp_path: Path) -> None:
     assert ["wpctl", "set-mute", "52", "0"] in calls
     assert ["pw-play", "--target", "alsa.analog", str(tmp_path / "t.wav")] in calls
     p.tick()
-    assert ["wpctl", "set-volume", "52", "0.30"] in calls
+    assert ["wpctl", "set-volume", "52", "0.3000"] in calls
     p.stop()
     assert procs[0].terminated
     assert calls[-2:] == [["wpctl", "set-volume", "52", "0.20"], ["wpctl", "set-mute", "52", "1"]]
@@ -610,9 +610,17 @@ def test_pwplay_failure_restores_partial_start(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(args, 0, stdout=dump if args[0] == "pw-dump" else "Volume: 0.20 [MUTED]")
     proc = _Proc()
     proc.done = True
-    p = PipeWirePlayer("analog", tmp_path / "tone.wav", run=run, popen=lambda *a, **kw: proc)  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="immediately"):
+    waits: list[float] = []
+
+    def wait(_stop: Any, delay: float) -> bool:
+        waits.append(delay)
+        return False
+
+    p = PipeWirePlayer("analog", tmp_path / "tone.wav", run=run,
+                       popen=lambda *a, **kw: proc, wait=wait)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="pw-play recovery exhausted"):
         p.start()
+    assert waits == [0.25, 0.5, 1.0]
     assert calls[-2:] == [["wpctl", "set-volume", "52", "0.20"], ["wpctl", "set-mute", "52", "1"]]
 
 
@@ -738,6 +746,83 @@ def test_restart_expired_ring_does_not_start_audio(tmp_path: Path) -> None:
                     clock=lambda: at(16), publish_handled=_recorder(ack))
     d.run_once()
     assert "start" not in player.events and not ack and d.state.mode == "idle"
+
+
+@pytest.mark.parametrize("snoozed", [False, True])
+@pytest.mark.parametrize("replacement", [at(-5), at(60), at(1440)])
+def test_replacement_wake_preserves_active_legacy_alarm(
+    snoozed: bool, replacement: datetime,
+) -> None:
+    st, _ = step(DaemonState(), T0, helper_inputs(), S)
+    if snoozed:
+        st, _ = step(st, at(1), helper_inputs(snooze_pressed_at=at(0.5)), S)
+    original = st
+    st, acts = step(st, at(2), helper_inputs(wake=replacement, sensor=replacement), S)
+    assert st.mode == original.mode and acts == []
+    assert st.active == T0 and st.active_kind == "wake"
+    assert st.session is not None and original.session is not None
+    assert st.session.id == original.session.id and st.session.original_at == T0
+    assert st.session.locked_deadline_at == original.session.locked_deadline_at
+    assert st.ring is not None and original.ring is not None
+    assert st.ring.id == original.ring.id and st.ring.started_at == original.ring.started_at
+    assert st.ring_started == original.ring_started
+    assert st.snooze_until == original.snooze_until and st.snoozes == original.snoozes
+    assert st.ended_wake is None
+    if snoozed:
+        assert st.snooze_until is not None
+        st, acts = step(st, st.snooze_until, helper_inputs(wake=replacement), S)
+        assert st.mode == "ringing" and st.active == T0
+        assert kinds(acts) == ["start", "state:ringing"]
+        assert st.session is not None and original.session is not None
+        assert st.session.id == original.session.id
+
+
+@pytest.mark.parametrize("snoozed", [False, True])
+@pytest.mark.parametrize("window", [False, True])
+@pytest.mark.parametrize("replacement", [at(-5), at(60), at(1440)])
+def test_cached_active_wake_survives_replacement_publication(
+    tmp_path: Path, snoozed: bool, window: bool, replacement: datetime,
+) -> None:
+    from commutecompass.alarm_daemon import WindowSettings
+
+    settings = Settings(window=WindowSettings()) if window else S
+    deadline = at(37) if window else None
+    original_inputs = helper_inputs(deadline_at=deadline, deadline_known=window)
+    st, _ = step(DaemonState(), T0, original_inputs, settings)
+    if snoozed:
+        st, _ = step(st, at(1), replace(original_inputs, snooze_pressed_at=at(0.5)), settings)
+    assert st.session is not None and st.ring is not None
+    original = st
+    cache = AlarmCache(tmp_path / "active.json")
+    cache.save(st)
+    # A genuine earlier commute replan may tighten D, but never postpone it.
+    replacement_deadline = replacement + timedelta(minutes=37) if window else None
+    feed = helper_inputs(wake=replacement, sensor=replacement,
+                         deadline_at=replacement_deadline, deadline_known=window)
+    player = FakePlayer()
+    daemon = AlarmDaemon(lambda: feed, player, cache, settings, clock=lambda: at(2))
+    daemon.run_once()
+    resumed = daemon.state
+    assert resumed.mode == original.mode and resumed.active == T0
+    assert resumed.session is not None and resumed.session.id == st.session.id
+    assert resumed.session.original_at == T0 and resumed.active_kind == "wake"
+    assert resumed.ring is not None and resumed.ring.id == st.ring.id
+    assert resumed.ring.started_at == st.ring.started_at
+    assert resumed.ring_started == st.ring_started
+    assert resumed.snooze_until == original.snooze_until
+    assert resumed.snoozes == original.snoozes and resumed.phase == original.phase
+    expected_deadline = min(at(37), replacement_deadline) if replacement_deadline else None
+    assert resumed.deadline == expected_deadline
+    assert resumed.ended_wake is None
+    assert player.events == ([] if snoozed else ["start"])
+    persisted = cache.load()
+    assert persisted.session is not None and persisted.ring is not None
+    assert persisted.session.id == resumed.session.id
+    assert persisted.session.original_at == T0
+    assert persisted.session.locked_deadline_at == expected_deadline
+    assert persisted.ring.id == resumed.ring.id
+    assert persisted.ring.started_at == resumed.ring.started_at
+    assert persisted.deadline == resumed.deadline
 
 
 def test_restart_failed_resume_latches_without_ack(tmp_path: Path) -> None:

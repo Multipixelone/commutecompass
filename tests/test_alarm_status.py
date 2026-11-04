@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -380,16 +380,35 @@ def test_restart_preserves_identity_but_not_running_health(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("control,reason", [("skip", "skip"), ("clear", "schedule_cleared"),
                                              ("timeout", "legacy_timeout"), ("stop", "legacy_stop"),
-                                             ("activity", "desktop_activity"), ("replace", "schedule_replaced")])
+                                             ("activity", "desktop_activity")])
 def test_legacy_terminal_records(control: str, reason: str) -> None:
     active, _ = step(DaemonState(), T0, inp(), Settings())
     controls = {"skip": inp(skipped_at=T0), "clear": inp(None),
                 "timeout": inp(), "stop": inp(stop_pressed_at=at(1)),
-                "activity": inp(activity_at=at(1)), "replace": inp(at(2))}
+                "activity": inp(activity_at=at(1))}
     state, _ = step(active, at(16) if control == "timeout" else at(1), controls[control], Settings())
     assert state.ended_wake is not None and active.session is not None
     assert state.ended_wake.reason == reason and state.ended_wake.session_id == active.session.id
     assert state.ended_wake.phase == "legacy"
+
+
+@pytest.mark.parametrize("replacement", [at(-2), at(2), at(1440)])
+def test_active_wake_replacement_does_not_record_terminal(replacement: datetime) -> None:
+    active, _ = step(DaemonState(), T0, inp(), Settings())
+    state, actions = step(active, at(1), inp(replacement), Settings())
+    assert state.mode == "ringing" and state.active == T0 and actions == []
+    assert state.session is not None and active.session is not None
+    assert state.session.id == active.session.id and state.session.original_at == T0
+    assert state.session.locked_deadline_at == active.session.locked_deadline_at
+    assert state.ring is not None and active.ring is not None
+    assert state.ring.id == active.ring.id and state.ring.started_at == active.ring.started_at
+    assert state.ended_wake is None
+    # A real withdrawal still ends the original session, not the replacement.
+    cleared, _ = step(state, at(1.5), inp(None), Settings())
+    assert cleared.ended_wake is not None and active.session is not None
+    assert cleared.ended_wake.reason == "schedule_cleared"
+    assert cleared.ended_wake.session_id == active.session.id
+    assert cleared.ended_wake.original_at == T0
 
 
 def test_tomorrow_rollover_does_not_mask_desktop_activity_terminal() -> None:

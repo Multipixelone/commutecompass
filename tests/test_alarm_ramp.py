@@ -73,7 +73,7 @@ def test_volume_subprocess_has_short_timeout(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(subprocess, "run", run)
     _default_run(["wpctl", "set-volume", "52", "0.5"])
     _default_run(["pw-dump"])
-    assert timeouts == [0.5, 10]
+    assert timeouts == [3, 10]
 
 
 class RampHarness:
@@ -86,6 +86,9 @@ class RampHarness:
         self.waits: Queue[float] = Queue()
         self.resume = Event()
         self.fail_volume = False
+        self.volume_failures = 0
+        self.volume_error = "timeout"
+        self.spawn_failures = 0
         self.player = PipeWirePlayer(
             "analog", path, run=self.run, popen=self.popen,  # type: ignore[arg-type]
             initial_volume=start, ramp_seconds=seconds,
@@ -103,13 +106,19 @@ class RampHarness:
             }}}])
         elif args[1] == "get-volume":
             out = "Volume: 0.20 [MUTED]"
-        if self.fail_volume and args[1] == "set-volume":
+        if args[:2] == ["wpctl", "set-volume"] and (self.fail_volume or self.volume_failures):
             self.fail_volume = False
-            raise subprocess.TimeoutExpired(args, 0.5)
+            self.volume_failures = max(0, self.volume_failures - 1)
+            if self.volume_error == "returncode":
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="volume unavailable")
+            raise subprocess.TimeoutExpired(args, 3)
         return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
 
     def popen(self, args: list[str], **_: Any) -> _Proc:
         self.calls.append((self.now, args))
+        if self.spawn_failures:
+            self.spawn_failures -= 1
+            raise OSError("fake player launch failure")
         proc = _Proc()
         self.procs.append(proc)
         return proc
@@ -214,25 +223,177 @@ def test_stop_cancels_worker_before_restore_and_new_ring(tmp_path: Path) -> None
         assert h.calls[-1][1] == ["wpctl", "set-mute", "52", "1"]
 
 
-def test_worker_failure_restores_and_is_reported_on_health_check(tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial", [False, True])
+def test_volume_timeout_keeps_playing_and_ramp_recovers(tmp_path: Path, initial: bool) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.fail_volume = initial
+    h.player.start()
+    try:
+        h.ready()
+        h.fail_volume = True
+        h.advance(1)
+        h.player.tick()
+        assert not h.procs[0].terminated
+        h.advance(1)
+        assert h.volumes[-1] == 0.44
+        assert h.player._volume == 0.44
+        assert h.player._volume_failures == 0
+    finally:
+        h.player.stop()
+
+
+@pytest.mark.parametrize("error", ["timeout", "returncode"])
+@pytest.mark.parametrize("fallback_fails", [False, True])
+def test_repeated_volume_failure_attempts_full_once_and_keeps_playing(
+    tmp_path: Path, error: str, fallback_fails: bool,
+) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start()
+    try:
+        h.ready()
+        h.volume_error = error
+        h.volume_failures = 4 if fallback_fails else 3
+        for _ in range(3):
+            h.advance(1)
+        h.player.tick()
+        assert h.player._volume_degraded
+        assert not h.procs[0].terminated
+        assert h.volumes[-1] == 1.0
+        assert h.player._volume == (0.3 if fallback_fails else 1.0)
+        commands = len(h.calls)
+        h.advance(10)
+        assert len(h.calls) == commands
+    finally:
+        h.player.stop()
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_player_death_recovers_with_backoff_without_restarting_ramp(
+    tmp_path: Path, returncode: int,
+) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start()
+    try:
+        h.ready()
+        origin = h.player._ramp_origin
+        h.procs[-1].done = True  # premature completion is abnormal, even rc=0
+        h.procs[-1].poll = lambda: returncode  # type: ignore[method-assign]
+        h.resume.set()
+        assert h.ready() == 0.25
+        assert len(h.procs) == 1
+        h.now += 1
+        h.resume.set()
+        h.ready()
+        h.player.tick()
+        assert len(h.procs) == 2
+        assert h.player._ramp_origin == origin
+        assert h.player._playback_retries == 1
+    finally:
+        h.player.stop()
+
+
+def test_failed_respawns_exhaust_bounded_recovery_and_restore(tmp_path: Path) -> None:
     h = RampHarness(tmp_path / "alarm.opus")
     h.player.start()
     h.ready()
-    h.fail_volume = True
-    h.now += 1
+    h.spawn_failures = 10
+    h.procs[-1].done = True
     h.resume.set()
-    # stop joins the worker, including an in-flight failing volume command.
-    # Wait for termination without real-time sleeps.
+    for delay in (0.25, 0.5, 1.0):
+        assert h.ready() == delay
+        h.resume.set()
     assert h.player._worker is not None
     h.player._worker.join(timeout=2)
     assert not h.player._worker.is_alive()
     with pytest.raises(RuntimeError, match="audio worker"):
         h.player.tick()
+    assert h.player._playback_retries == 3
     assert h.calls[-2][1] == ["wpctl", "set-volume", "52", "0.20"]
     assert h.calls[-1][1] == ["wpctl", "set-mute", "52", "1"]
-    calls = list(h.calls)
     h.player.stop()
-    assert h.calls == calls
+
+
+def test_repeated_player_deaths_share_one_retry_budget(tmp_path: Path) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start()
+    h.ready()
+    for delay in (0.25, 0.5, 1.0):
+        h.procs[-1].done = True
+        h.resume.set()
+        assert h.ready() == delay
+        h.resume.set()
+        h.ready()
+    assert len(h.procs) == 4
+    h.procs[-1].done = True
+    h.resume.set()
+    assert h.player._worker is not None
+    h.player._worker.join(timeout=2)
+    assert not h.player._worker.is_alive()
+    with pytest.raises(RuntimeError, match="audio worker"):
+        h.player.tick()
+    h.player.stop()
+
+
+def test_initial_playback_launch_failure_is_retried(tmp_path: Path) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.spawn_failures = 1
+    errors: list[Exception] = []
+
+    def start() -> None:
+        try:
+            h.player.start()
+        except Exception as exc:  # noqa: BLE001 — surface thread failures to the test
+            errors.append(exc)
+
+    starter = Thread(target=start)
+    starter.start()
+    try:
+        assert h.ready() == 0.25
+        h.resume.set()
+        h.ready()
+        starter.join(timeout=2)
+        assert not starter.is_alive() and not errors
+        assert len(h.procs) == 1
+        h.player.tick()
+    finally:
+        h.player.stop()
+        starter.join(timeout=2)
+
+
+def test_volume_failure_does_not_latch_daemon_audio_failed(tmp_path: Path) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    failures: list[bool] = []
+    beats: list[Any] = []
+    daemon = AlarmDaemon(
+        reader=lambda: inp(), player=h.player, cache=AlarmCache(tmp_path / "cache.json"),
+        settings=Settings(), clock=lambda: T0, publish_audio_failed=_recorder(failures),
+        heartbeat=_recorder(beats),
+    )
+    daemon.run_once()
+    try:
+        h.ready()
+        h.volume_failures = 4
+        for _ in range(3):
+            h.advance(1)
+        daemon.run_once()
+        assert failures == [False]
+        assert beats == [T0]
+        assert not daemon.cache.load().audio_failed
+        assert not h.procs[-1].terminated
+    finally:
+        h.player.stop()
+
+
+def test_stop_interrupts_playback_backoff_without_respawn(tmp_path: Path) -> None:
+    h = RampHarness(tmp_path / "alarm.opus")
+    h.player.start()
+    h.ready()
+    h.procs[-1].done = True
+    h.resume.set()
+    assert h.ready() == 0.25
+    h.player.stop()
+    assert len(h.procs) == 1
+    h.player.tick()
 
 
 @pytest.mark.parametrize("action", ["stop", "snooze", "timeout", "shutdown", "failure"])
@@ -251,9 +412,12 @@ def test_daemon_quiesces_local_worker_on_all_exit_paths(tmp_path: Path, action: 
     daemon.run_once()
     h.ready()
     if action == "failure":
-        h.fail_volume = True
-        h.now += 1
+        h.spawn_failures = 10
+        h.procs[-1].done = True
         h.resume.set()
+        for delay in (0.25, 0.5, 1.0):
+            assert h.ready() == delay
+            h.resume.set()
         assert h.player._worker is not None
         h.player._worker.join(timeout=2)
         assert not h.player._worker.is_alive()
@@ -274,7 +438,7 @@ def test_daemon_quiesces_local_worker_on_all_exit_paths(tmp_path: Path, action: 
         daemon.run_once()
         assert daemon.state.mode == ("snoozed" if action == "snooze" else "idle")
     assert h.player._worker is None
-    assert h.procs[-1].terminated
+    assert h.procs[-1].done if action == "failure" else h.procs[-1].terminated
     assert h.volumes[-1] == 0.2
     calls = list(h.calls)
     h.now += 10
@@ -301,7 +465,7 @@ def test_stop_waits_only_for_inflight_command_before_restoring(
                 entered.set()
                 assert release.wait(2)
                 if command_fails:
-                    raise subprocess.TimeoutExpired(args, 0.5)
+                    raise subprocess.TimeoutExpired(args, 3)
             return original_run(args)
         finally:
             active -= 1

@@ -421,6 +421,74 @@ def test_publish_next_future_wake_at_any_hour(tmp_path: Path, hour: int) -> None
     assert cs.call_args.kwargs["data"]["wake_at"] == expected.isoformat()
 
 
+@pytest.mark.parametrize("snoozed", [False, True])
+@pytest.mark.parametrize("window", [False, True])
+@pytest.mark.parametrize("future_today", [False, True])
+def test_published_upcoming_schedule_preserves_active_wake(
+    tmp_path: Path, snoozed: bool, window: bool, future_today: bool,
+) -> None:
+    """Mock the publisher's HA write, then parse it through the real daemon reader."""
+    from dataclasses import replace
+
+    from commutecompass.alarm_daemon import DaemonState, Settings, inputs_from_states, step
+
+    cfg = _config(tmp_path, window={"enabled": window}, fallback_time="23:00")
+    now = _nyc(2026, 10, 15, 17, 3)
+    original_wake = now - timedelta(minutes=1)
+    original_deadline = original_wake + timedelta(minutes=37) if window else None
+    entities: dict[str, Any] = {
+        cfg.alarm.wake_utc_entity: {"state": original_wake.isoformat()},
+        cfg.alarm.window.deadline_utc_entity: {
+            "state": original_deadline.isoformat() if original_deadline else "unknown",
+        },
+    }
+    settings = Settings.from_config(cfg.alarm)
+    inputs = inputs_from_states(entities, cfg.alarm)
+    active, _ = step(DaemonState(), original_wake, inputs, settings)
+    if snoozed:
+        active, _ = step(active, original_wake + timedelta(seconds=30), replace(
+            inputs, snooze_pressed_at=original_wake + timedelta(seconds=15),
+        ), settings)
+    assert active.mode == ("snoozed" if snoozed else "ringing")
+    historical = _commute_plan(_nyc(2026, 10, 15, 17, 10))
+    historical.error = "too_imminent"
+    later = _commute_plan(_nyc(2026, 10, 15, 18))
+    # A removed morning event may leave a later upcoming plan; a retained
+    # historical too-imminent plan must still prevent a second wake today.
+    today = [later] if future_today else [historical]
+    tomorrow_prep = _nyc(2026, 10, 16, 8)
+    upcoming = _plan(tomorrow_prep, "Tomorrow")
+
+    def write_helpers(*_args: Any, **kwargs: Any) -> bool:
+        data = kwargs["data"]
+        entities[cfg.alarm.wake_utc_entity] = {"state": data["wake_at"]}
+        entities[cfg.alarm.window.deadline_utc_entity] = {
+            "state": data.get("deadline_at") or "unknown",
+        }
+        return True
+
+    with patch("commutecompass.ha_client.call_service", side_effect=write_helpers) as service:
+        result, accepted = publish(cfg, now=now, plans_for_day=_provider({
+            now.date(): today, tomorrow_prep.date(): [upcoming],
+        }))
+    assert accepted and service.call_count == 1
+    expected = tomorrow_prep
+    if future_today:
+        expected = _nyc(2026, 10, 15, 17, 10) if window else _nyc(2026, 10, 15, 17, 27)
+    assert result.wake_at == expected and result.plan is not historical
+    assert entities[cfg.alarm.wake_utc_entity]["state"] == result.wake_at.isoformat()
+    state, actions = step(active, now, inputs_from_states(entities, cfg.alarm), settings)
+    assert actions == [] and state.mode == active.mode and state.active == original_wake
+    assert state.session is not None and active.session is not None
+    assert state.session.id == active.session.id
+    assert state.session.original_at == original_wake
+    assert state.session.locked_deadline_at == original_deadline
+    assert state.ring is not None and active.ring is not None
+    assert state.ring.id == active.ring.id and state.ring.started_at == active.ring.started_at
+    assert state.snooze_until == active.snooze_until
+    assert state.deadline == original_deadline and state.ended_wake is None
+
+
 @pytest.mark.parametrize("bad_day", [15, 16])
 def test_partial_planning_never_posts_fallback(tmp_path: Path, bad_day: int) -> None:
     cfg = _config(tmp_path)
