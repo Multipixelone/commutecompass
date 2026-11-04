@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import wave
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ import httpx
 import pytest
 
 from commutecompass.alarm_daemon import (
+    ActivityMonitor,
     AlarmCache,
     AlarmDaemon,
     DaemonState,
@@ -444,6 +446,124 @@ def test_daemon_restores_audio_on_exit(tmp_path: Path) -> None:
     assert published[-1] == "ringing"
 
 
+def test_reader_failure_rings_cached_alarm_and_recovers(tmp_path: Path) -> None:
+    cache = AlarmCache(tmp_path / "c.json")
+    cache.save(DaemonState(pending=T0))
+    player = FakePlayer()
+    reads = 0
+    sleeps = 0
+    clock = [at(0)]
+    modes: list[str] = []
+
+    def reader() -> Inputs:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("HA unavailable")
+        return inp(stop_pressed_at=at(0.1))
+
+    def sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            assert daemon.state.mode == "ringing"
+            assert player.events == ["start"]
+        clock[0] = at(0.2)
+        if reads == 2:
+            daemon.request_stop()
+
+    daemon = AlarmDaemon(
+        reader=reader, player=player, cache=cache, settings=S,
+        clock=lambda: clock[0], sleep=sleep, publish_state=_recorder(modes),
+    )
+    daemon.run_forever()
+    assert reads == 2
+    assert daemon.state.mode == "idle"
+    assert modes == ["idle"]  # Ringing publication waits for HA recovery.
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_reader_process_exit_propagates(tmp_path: Path, error: type[BaseException]) -> None:
+    def reader() -> Inputs:
+        raise error()
+
+    daemon = AlarmDaemon(reader=reader, player=FakePlayer(),
+                         cache=AlarmCache(tmp_path / "c.json"), settings=S)
+    with pytest.raises(error):
+        daemon.run_once()
+
+
+def test_cleanup_monitor_failure_still_stops_audio_and_publishes(tmp_path: Path) -> None:
+    class BrokenMonitor(ActivityMonitor):
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            raise RuntimeError("monitor stop failed")
+
+    player = FakePlayer()
+    modes: list[str] = []
+    daemon = AlarmDaemon(reader=lambda: inp(), player=player,
+                         cache=AlarmCache(tmp_path / "c.json"), settings=S,
+                         activity_monitor=BrokenMonitor(), publish_state=_recorder(modes))
+    daemon.state = DaemonState(mode="ringing", active=T0)
+    daemon.request_stop()
+    daemon.run_forever()
+    assert player.events == ["stop"]
+    assert modes == ["ringing"]
+
+
+def test_registered_signals_stop_cleanup_and_dismiss_only_active_alarm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commutecompass import alarm_daemon
+
+    handlers: dict[int, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
+    monkeypatch.setattr("commutecompass.alarm_daemon.shutil.which", lambda _tool: "/fake/tool")
+    cfg = Config.model_construct(
+        home_assistant=HomeAssistantConfig(enabled=True, base_url="http://ha"),
+        home_assistant_token="tok",
+        alarm=AlarmConfig(cache_path=str(tmp_path / "c.json"), sound="fake.wav",
+                          stop_on_activity=False),
+    )
+    daemon = build_daemon(cfg)
+    monkeypatch.setattr(alarm_daemon, "build_daemon", lambda _config: daemon)
+    with monkeypatch.context() as context:
+        context.setattr(daemon, "run_forever", lambda: None)
+        alarm_daemon.run_daemon(cfg)
+    assert set(handlers) == {signal.SIGTERM, signal.SIGINT, signal.SIGUSR1}
+    clock = [at(0)]
+    daemon.clock = lambda: clock[0]
+    player = FakePlayer()
+    daemon.player = player
+    daemon.reader = lambda: inp()
+    modes: list[str] = []
+    daemon.publish_state = _recorder(modes)
+    daemon.heartbeat = lambda _now: True
+    daemon.publish_audio_failed = lambda _failed: True
+    daemon.publish_handled = lambda _instant: True
+
+    handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+    assert daemon._activity_pressed is None
+    daemon.run_once()
+    assert daemon.state.mode == "ringing"
+    clock[0] = at(0.1)
+    handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+    daemon.run_once()
+    assert str(daemon.state.mode) == "idle"
+    assert player.events == ["start", "stop"]
+
+    def sleep(_seconds: float) -> None:
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    daemon.sleep = sleep
+    daemon.run_forever()
+    assert not daemon._running
+    assert player.events[-1] == "stop"
+    assert modes == ["ringing", "idle"]
+
+
 def test_audio_failure_suppresses_healthy_heartbeat(tmp_path: Path) -> None:
     class BrokenPlayer(FakePlayer):
         def start(self, profile: RingProfile | None = None) -> None:
@@ -594,6 +714,8 @@ def test_failure_latch_published_once_success_clears(tmp_path: Path) -> None:
     feed[0] = inp(stop_pressed_at=at(1.5))
     clock[0] = at(2)
     d.run_once()
+    assert d.state.mode == "idle"
+    assert not beats  # Healthy HA and idle mode must not mask latched audio failure.
     d.player = FakePlayer()
     feed[0] = inp(at(3))
     clock[0] = at(3)

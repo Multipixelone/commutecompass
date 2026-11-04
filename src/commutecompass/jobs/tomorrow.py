@@ -54,8 +54,18 @@ def run(config: Config, *, dry_run: bool = False) -> Plan | None:
     When ``[alarm].enabled`` the wake alarm is re-published as well, reusing
     the plans computed here (never fatal; failures are logged).
     """
-    _now = now_nyc()
-    tomorrow_ref = _now + timedelta(days=1)
+    if (config.home_assistant.tomorrow.enabled and config.alarm.enabled
+            and config.alarm.schedule_contract == "v1"):
+        logger.warning(
+            "tomorrow: home_assistant.tomorrow sends a legacy alarm_at payload, "
+            "separate from the v1 snapshot publisher; use distinct compatible HA "
+            "scripts or disable the legacy tomorrow push"
+        )
+    today_start, _ = logical_day_bounds_nyc(now_nyc())
+    # Advance the NYC logical calendar date, not an elapsed 24-hour interval.
+    tomorrow_ref = datetime.combine(
+        today_start.date() + timedelta(days=1), today_start.timetz(),
+    )
     day_start, day_end = logical_day_bounds_nyc(tomorrow_ref)
 
     plans = plan_window(config, day_start, day_end)

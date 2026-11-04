@@ -13,6 +13,11 @@ from commutecompass.timeutil import NYC_TZ
 _logger = logging.getLogger(__name__)
 
 
+def _redact_error(value: object, token: str) -> str:
+    """Do not trust exception/response text to exclude the authorization token."""
+    return str(value).replace(token, "[REDACTED]") if token else str(value)
+
+
 def fetch_location(
     base_url: str,
     entity_id: str,
@@ -42,7 +47,7 @@ def fetch_location(
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, headers=headers)
     except httpx.HTTPError as exc:
-        _logger.warning("HA fetch failed for %s: %s", entity_id, exc)
+        _logger.warning("HA fetch failed for %s: %s", entity_id, _redact_error(exc, token))
         return None
 
     if response.status_code != 200:
@@ -50,14 +55,14 @@ def fetch_location(
             "HA fetch returned %d for %s: %s",
             response.status_code,
             entity_id,
-            response.text[:200],
+            _redact_error(response.text, token)[:200],
         )
         return None
 
     try:
         payload = response.json()
     except ValueError as exc:
-        _logger.warning("HA fetch: bad JSON for %s: %s", entity_id, exc)
+        _logger.warning("HA fetch: bad JSON for %s: %s", entity_id, _redact_error(exc, token))
         return None
 
     if not isinstance(payload, dict):
@@ -137,7 +142,7 @@ def call_service(
         with httpx.Client(timeout=timeout) as client:
             response = client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
-        _logger.warning("HA call_service %s.%s failed: %s", domain, service, exc)
+        _logger.warning("HA call_service %s.%s failed: %s", domain, service, _redact_error(exc, token))
         return False
 
     if not (200 <= response.status_code < 300):
@@ -146,7 +151,7 @@ def call_service(
             domain,
             service,
             response.status_code,
-            response.text[:200],
+            _redact_error(response.text, token)[:200],
         )
         return False
 
@@ -181,7 +186,7 @@ def push_tomorrow_alarm(
     if not (base_url and token and service):
         return False
     domain, sep, name = service.partition(".")
-    if not sep or not domain or not name:
+    if not sep or not domain or not name or "." in name:
         _logger.warning(
             "push_tomorrow_alarm: service %r is not 'domain.service' — skipping",
             service,
@@ -220,21 +225,21 @@ def fetch_zones(
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, headers=headers)
     except httpx.HTTPError as exc:
-        _logger.warning("HA fetch_zones failed: %s", exc)
+        _logger.warning("HA fetch_zones failed: %s", _redact_error(exc, token))
         return {}
 
     if response.status_code != 200:
         _logger.warning(
             "HA fetch_zones returned %d: %s",
             response.status_code,
-            response.text[:200],
+            _redact_error(response.text, token)[:200],
         )
         return {}
 
     try:
         payload = response.json()
     except ValueError as exc:
-        _logger.warning("HA fetch_zones: bad JSON: %s", exc)
+        _logger.warning("HA fetch_zones: bad JSON: %s", _redact_error(exc, token))
         return {}
 
     if not isinstance(payload, list):

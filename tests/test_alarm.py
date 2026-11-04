@@ -126,6 +126,36 @@ def test_custom_fallback_time(tmp_path: Path) -> None:
     assert r.wake_at == _nyc(2026, 10, 15, 10, 15)
 
 
+def test_elapsed_early_tomorrow_wake_searches_third_day(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=180)
+    early = _plan(datetime(2026, 10, 16, 2, 30, tzinfo=NYC_TZ))
+    seen: list[date] = []
+
+    def provider(day_start: datetime) -> list[Plan]:
+        seen.append(day_start.date())
+        return [early] if day_start.date() == date(2026, 10, 16) else []
+
+    result = compute_wake(cfg, datetime(2026, 10, 15, 23, 45, tzinfo=NYC_TZ), provider)
+    assert seen == [date(2026, 10, 15), date(2026, 10, 16), date(2026, 10, 17)]
+    assert result.day == date(2026, 10, 17)
+    assert result.wake_at == datetime(2026, 10, 17, 12, tzinfo=NYC_TZ)
+    assert result.source == "fallback"
+
+
+def test_extended_wake_horizon_still_rejects_incomplete_planning(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, wake_lead_minutes=180)
+    early = _plan(datetime(2026, 10, 16, 2, 30, tzinfo=NYC_TZ))
+    incomplete = _plan(datetime(2026, 10, 17, 9, tzinfo=NYC_TZ), error="unresolved")
+
+    def provider(day_start: datetime) -> list[Plan]:
+        return {date(2026, 10, 16): [early], date(2026, 10, 17): [incomplete]}.get(
+            day_start.date(), [],
+        )
+
+    with pytest.raises(AlarmError, match="incomplete planning"):
+        compute_wake(cfg, datetime(2026, 10, 15, 23, 45, tzinfo=NYC_TZ), provider)
+
+
 def test_wake_lead_subtracted(tmp_path: Path) -> None:
     cfg = _config(tmp_path, wake_lead_minutes=45)
     prep = _nyc(2026, 10, 15, 9, 0)
@@ -512,16 +542,15 @@ def test_calendar_failure_is_not_empty_day(tmp_path: Path) -> None:
     cs.assert_not_called()
 
 
-def test_no_future_wake_preserves_ha(tmp_path: Path) -> None:
+def test_elapsed_tomorrow_wake_publishes_following_day(tmp_path: Path) -> None:
     cfg = _config(tmp_path, wake_lead_minutes=180)
-    with patch("commutecompass.ha_client.call_service") as cs, pytest.raises(
-        AlarmError, match="no future wake"
-    ):
-        publish(
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs:
+        result = publish(
             cfg, now=_nyc(2026, 10, 16, 1, 30),
             plans_for_day=_provider({date(2026, 10, 16): [_plan(_nyc(2026, 10, 16, 3))]}),
         )
-    cs.assert_not_called()
+    assert result[0].wake_at == _nyc(2026, 10, 17, 12)
+    cs.assert_called_once()
 
 
 def test_future_prep_cap_can_be_already_due(tmp_path: Path) -> None:

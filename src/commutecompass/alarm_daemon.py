@@ -1398,7 +1398,11 @@ class AlarmDaemon:
     def run_once(self) -> float:
         """One poll; returns seconds to sleep before the next."""
         now = self.clock()
-        inputs = self.reader()
+        try:
+            inputs = self.reader()
+        except Exception as exc:  # noqa: BLE001 — cached alarms survive reader failures
+            logger.warning("alarm daemon: reader failed: %s", type(exc).__name__)
+            inputs = Inputs(ha_ok=False)
         if self._activity_pressed is not None:
             inputs = replace(inputs, activity_at=self._activity_pressed)
             self._activity_pressed = None
@@ -1551,11 +1555,17 @@ class AlarmDaemon:
                     remaining -= chunk
         finally:
             if self.activity_monitor is not None:
-                self.activity_monitor.stop()
-            self._stop_audio()
+                try:
+                    self.activity_monitor.stop()
+                except Exception as exc:  # noqa: BLE001 — cleanup steps are independent
+                    logger.warning("alarm daemon: activity cleanup failed: %s", type(exc).__name__)
+            self._stop_audio()  # Already guards player failures.
             # Process shutdown is not alarm completion. HA nap cleanup must
             # continue seeing the recoverable cached ringing/snoozed mode.
-            self._reconcile_mode()
+            try:
+                self._reconcile_mode()
+            except Exception as exc:  # noqa: BLE001 — do not mask shutdown's original error
+                logger.warning("alarm daemon: final mode publication failed: %s", type(exc).__name__)
 
 
 def status_snapshot(state: DaemonState, now: datetime) -> dict[str, Any]:

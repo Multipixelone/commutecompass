@@ -4,6 +4,31 @@ This is the relay contract for the infra owner, not production HA configuration.
 No activation, infra pin change, notification cadence change, or live-device
 verification is implied. Existing installations default to `legacy`.
 
+## Liveness and audio dead-man fallback
+
+Heartbeat loss on an unrecovered local audio failure is intentional. The daemon
+suppresses its heartbeat and latches `audio_failed` so HA's dead-man automation
+can send its one critical fallback alert. Healthy HA reads, idle mode, or a
+process restart must not resume that heartbeat while the failure remains latched;
+only a subsequent successful playback start clears it. Do not decouple heartbeat
+from audio health without replacing this fallback trigger in HA. Per-wake playback
+acknowledgement is separate from heartbeat and follows successful start only.
+
+## Legacy tomorrow job is a separate publisher
+
+`home_assistant.tomorrow.enabled` controls the legacy `tomorrow` job push to
+`home_assistant.tomorrow.service` (normally `script.commute_set_tomorrow_alarm`).
+It sends `{"alarm_at": "<NYC ISO datetime>"}` for the earliest prep time; it
+**does not** send the v1 `snapshot`/`next_event` payload documented below.
+
+When `alarm.enabled` and `alarm.schedule_contract = "v1"` are also enabled,
+the job separately invokes the wake snapshot publisher. Its preflight validation
+logs a warning about the two contracts, even when no plans are found. Keep the
+legacy service and `alarm.publish_v1_script` distinct and compatible with their
+respective payloads, or disable `home_assistant.tomorrow.enabled` if only v1 is
+wanted. Selecting v1 does not migrate or disable the legacy push. No payload
+migration or live HA automation change is part of this contract.
+
 ## Two records, separate authorities
 
 - `input_text.commute_alarm_schedule_v1`: one atomic **published schedule**.
