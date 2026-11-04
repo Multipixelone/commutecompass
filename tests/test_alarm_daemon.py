@@ -714,6 +714,8 @@ def test_failure_latch_published_once_success_clears(tmp_path: Path) -> None:
     feed[0] = inp(stop_pressed_at=at(1.5))
     clock[0] = at(2)
     d.run_once()
+    assert d.state.mode == "idle"
+    assert not beats  # Healthy HA and idle mode must not mask latched audio failure.
     d.player = FakePlayer()
     feed[0] = inp(at(3))
     clock[0] = at(3)

@@ -4,6 +4,16 @@ This is the relay contract for the infra owner, not production HA configuration.
 No activation, infra pin change, notification cadence change, or live-device
 verification is implied. Existing installations default to `legacy`.
 
+## Liveness and audio dead-man fallback
+
+Heartbeat loss on an unrecovered local audio failure is intentional. The daemon
+suppresses its heartbeat and latches `audio_failed` so HA's dead-man automation
+can send its one critical fallback alert. Healthy HA reads, idle mode, or a
+process restart must not resume that heartbeat while the failure remains latched;
+only a subsequent successful playback start clears it. Do not decouple heartbeat
+from audio health without replacing this fallback trigger in HA. Per-wake playback
+acknowledgement is separate from heartbeat and follows successful start only.
+
 ## Legacy tomorrow job is a separate publisher
 
 `home_assistant.tomorrow.enabled` controls the legacy `tomorrow` job push to
