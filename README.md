@@ -30,6 +30,9 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`realtime`](./src/commutecompass/cli.py) — read-only boarding-delay diagnostics for saved plans
 - [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
 - [`where`](./src/commutecompass/cli.py) — print the latest stored current location
+- [`alarm`](./src/commutecompass/cli.py) — wake and nap alarm controls: `publish`, `status`, `nap`, `skip`, `on`, `off`, `daemon`
+- [`gtfs-refresh`](./src/commutecompass/cli.py) — download static subway GTFS and rebuild the realtime identity index
+- [`bot`](./src/commutecompass/cli.py) — Telegram bot mode (stub)
 
 ## Configuration
 
