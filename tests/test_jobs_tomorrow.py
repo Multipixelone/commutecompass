@@ -187,22 +187,38 @@ def test_picks_earliest_prep_and_pushes(tomorrow_config: Config) -> None:
     assert args[3] == early_prep
 
 
-def test_fetch_window_is_next_logical_day(tomorrow_config: Config) -> None:
-    """Calendar fetch uses next-day logical bounds, not today's."""
-    from commutecompass.timeutil import logical_day_bounds_nyc
-
-    with patch("commutecompass.jobs.tomorrow.CalendarClient") as mock_cal, patch(
-        "commutecompass.jobs.tomorrow.push_tomorrow_alarm", return_value=True
-    ), patch("commutecompass.ha_client.fetch_zones", return_value={}):
+@pytest.mark.parametrize(
+    ("frozen", "expected_start", "expected_end"),
+    [
+        ("2026-03-07T21:00:00-05:00", "2026-03-08T02:00:00-05:00",
+         "2026-03-09T01:59:59.999999-04:00"),
+        ("2026-03-08T21:00:00-04:00", "2026-03-09T02:00:00-04:00",
+         "2026-03-10T01:59:59.999999-04:00"),
+        ("2026-10-31T21:00:00-04:00", "2026-11-01T02:00:00-05:00",
+         "2026-11-02T01:59:59.999999-05:00"),
+        ("2026-11-01T21:00:00-05:00", "2026-11-02T02:00:00-05:00",
+         "2026-11-03T01:59:59.999999-05:00"),
+        # Before the 02:00 boundary, tomorrow is still the current calendar date.
+        ("2026-11-01T01:30:00-04:00", "2026-11-01T02:00:00-05:00",
+         "2026-11-02T01:59:59.999999-05:00"),
+        ("2026-11-01T01:30:00-05:00", "2026-11-01T02:00:00-05:00",
+         "2026-11-02T01:59:59.999999-05:00"),
+    ],
+)
+def test_fetch_window_is_next_logical_day(
+    tomorrow_config: Config, frozen: str, expected_start: str, expected_end: str,
+) -> None:
+    """Pin NYC calendar boundaries across DST without mirroring job arithmetic."""
+    clock = datetime.fromisoformat(frozen).astimezone(NYC_TZ)
+    with patch("commutecompass.jobs.tomorrow.now_nyc", return_value=clock), patch(
+        "commutecompass.jobs.tomorrow.CalendarClient"
+    ) as mock_cal, patch("commutecompass.ha_client.fetch_zones", return_value={}):
         mock_cal.return_value.fetch_events.return_value = []
         tomorrow_run(tomorrow_config)
 
-    expected_start, expected_end = logical_day_bounds_nyc(
-        now_nyc() + timedelta(days=1)
-    )
     call_kwargs = mock_cal.return_value.fetch_events.call_args.kwargs
-    assert call_kwargs["start"] == expected_start
-    assert call_kwargs["end"] == expected_end
+    assert call_kwargs["start"].isoformat() == expected_start
+    assert call_kwargs["end"].isoformat() == expected_end
 
 
 def test_no_events_skips_push(tomorrow_config: Config) -> None:
