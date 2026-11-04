@@ -659,27 +659,16 @@ class TestConfigShow:
 
 
 class TestConfigSet:
-    def _toml_with_prep(self, tmp_path: Path) -> Path:
-        p = tmp_path / "config.toml"
-        p.write_text(
-            """\
-[prep]
-prep_minutes = 20
-safety_buffer_minutes = 5
-"""
-        )
-        return p
-
-    def test_set_allowed_key(self, runner: CliRunner, tmp_path: Path) -> None:
-        p = self._toml_with_prep(tmp_path)
+    def test_set_allowed_key(self, runner: CliRunner, minimal_toml: Path) -> None:
+        p = minimal_toml
         result = runner.invoke(cli, ["--config", str(p), "config", "set", "prep.prep_minutes", "33"])
         assert result.exit_code == 0, result.output
         assert "prep_minutes = 33" in p.read_text()
 
     def test_set_disallowed_key_exits_nonzero(
-        self, runner: CliRunner, tmp_path: Path
+        self, runner: CliRunner, minimal_toml: Path
     ) -> None:
-        p = self._toml_with_prep(tmp_path)
+        p = minimal_toml
         result = runner.invoke(
             cli, ["--config", str(p), "config", "set", "telegram_bot_token", "x"]
         )
@@ -688,10 +677,10 @@ safety_buffer_minutes = 5
         assert "prep.prep_minutes" in result.output
 
     def test_set_externally_scheduled_key_warns(
-        self, runner: CliRunner, tmp_path: Path
+        self, runner: CliRunner, minimal_toml: Path
     ) -> None:
         """Setting an inert scheduling key still writes it but warns it does nothing."""
-        p = self._toml_with_prep(tmp_path)
+        p = minimal_toml
         result = runner.invoke(
             cli, ["--config", str(p), "config", "set", "scheduling.poll_interval_seconds", "30"]
         )
