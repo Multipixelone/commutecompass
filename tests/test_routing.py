@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from commutecompass.config import RealtimeConfig
@@ -597,6 +598,16 @@ class TestParseRoute:
         route = _parse_route(response)
         assert route is not None
         assert route.legs[0].line == "C"
+
+
+@pytest.mark.parametrize("body", [b"not json", b'{"status": "OK", "routes": [null]}'])
+def test_plan_route_rejects_malformed_response(
+    body: bytes, origin: Origin, destination: ResolvedLocation, arrival_time: datetime,
+) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+    client = httpx.Client(transport=transport)
+    with patch("commutecompass.routing.httpx.Client", return_value=client):
+        assert plan_route(origin, destination, arrival_time, api_key="test") is None
 
 
 # ─── Test plan_route ──────────────────────────────────────────────────────────

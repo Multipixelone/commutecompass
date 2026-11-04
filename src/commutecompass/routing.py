@@ -525,9 +525,11 @@ def plan_route(
             )
             response.raise_for_status()
             data = response.json()
+        if not isinstance(data, dict):
+            return None
+        return _parse_route(data, gtfs_db_path=gtfs_db_path)
     except httpx.HTTPError:
         return None
-
-    if not isinstance(data, dict):
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        logger.warning("Directions response invalid: %s", type(exc).__name__)
         return None
-    return _parse_route(data, gtfs_db_path=gtfs_db_path)
