@@ -2823,6 +2823,10 @@ def test_poll_gives_up_after_attempt_cap(
 
     assert len(failing.sent) == _MAX_SEND_ATTEMPTS
     assert store.pending_pings(before=now + timedelta(minutes=10)) == []
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT fired, send_attempts FROM pings WHERE id = 'ping-flaky'",
+        ).fetchone() == (1, _MAX_SEND_ATTEMPTS - 1)
 
 
 def test_poll_records_heartbeat(

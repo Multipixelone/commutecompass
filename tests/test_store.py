@@ -1259,6 +1259,40 @@ def test_is_alert_seen_today_per_day(tmp_db_path: Path) -> None:
     assert store.is_alert_seen_today("alert-y") is False
 
 
+def test_concurrent_claim_payload_and_release_reclaim(tmp_db_path: Path) -> None:
+    """Separate connections return one live payload per claim/release cycle."""
+    import concurrent.futures
+    import threading
+
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    ping = make_ping("evt-concurrent-payload")
+    now = ping.fire_at + timedelta(seconds=1)
+    store.schedule_ping(ping)
+    snapshot = store.pending_pings(before=now)[0]
+
+    for attempts in range(3):
+        message = f"current payload {attempts}"
+        with other._connect() as conn:
+            conn.execute("UPDATE pings SET message = ? WHERE id = ?", (message, ping.id))
+        barrier = threading.Barrier(2)
+
+        def claim(connection: Store, barrier: threading.Barrier = barrier) -> PingEntry | None:
+            barrier.wait(timeout=5)
+            return connection.claim_ping_entry(snapshot.id, now, due_only=True)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, [store, other]))
+        winners = [result for result in results if result is not None]
+        assert len(winners) == 1
+        assert winners[0].message == message != snapshot.message
+        assert winners[0].send_attempts == attempts
+        assert store.claim_ping_entry(ping.id, now, due_only=True) is None
+        assert other.release_ping(ping.id)
+        assert not store.release_ping(ping.id)  # Cannot double-bump attempts.
+
+
 def test_claim_ping_concurrent_threads_only_one_wins(tmp_db_path: Path) -> None:
     """Two threads racing to claim the same ping: exactly one returns True."""
     import threading
