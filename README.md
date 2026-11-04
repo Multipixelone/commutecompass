@@ -30,6 +30,9 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`realtime`](./src/commutecompass/cli.py) — read-only boarding-delay diagnostics for saved plans
 - [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
 - [`where`](./src/commutecompass/cli.py) — print the latest stored current location
+- [`alarm`](./src/commutecompass/cli.py) — wake and nap alarm controls: `publish`, `status`, `nap`, `skip`, `on`, `off`, `daemon`
+- [`gtfs-refresh`](./src/commutecompass/cli.py) — download static subway GTFS and rebuild the realtime identity index
+- [`bot`](./src/commutecompass/cli.py) — Telegram bot mode (stub)
 
 ## Configuration
 
@@ -144,6 +147,14 @@ OpenClaw also owns the Telegram bot. Set `[notify].mode = "stdout"` in `config.t
 ```
 
 Point your OpenClaw instance at `skills/commutecompass/`, and the chat commands are live. The scripts shell out to `commutecompass-skill`, a wrapper the NixOS module installs when `services.commutecompass.skill.users` is set; it sources the secrets env file and points at `/etc/commutecompass/config.toml`, so the calling session needs no preamble. Outside NixOS, ship an equivalent wrapper on PATH. The legacy direct-Telegram path is still available via `[notify].mode = "telegram"` if you'd rather not depend on OpenClaw.
+
+**Skill-user trust boundary:** every user listed in
+`services.commutecompass.skill.users` joins the service group and can read the
+**entire** `services.commutecompass.environmentFile` (which must be group-readable,
+e.g. mode `0440`). This exposes all configured API keys, Telegram bot tokens and
+Home Assistant tokens, not merely the credentials needed for a particular skill
+command. Add only users trusted with every service secret; the default shared-file
+behavior is unchanged.
 
 ## Already at the destination
 

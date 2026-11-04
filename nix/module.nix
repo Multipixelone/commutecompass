@@ -85,10 +85,18 @@ let
   # to systemd so the unit shows as failed instead of silently dropping the
   # message.
   mkService = subcommand: description:
-    lib.recursiveUpdate serviceDefaults {
+    let
+      wrapper = pkgs.writeShellApplication {
+        name = "commutecompass-${subcommand}";
+        text = ''
+          set -o pipefail
+          ${lib.escapeShellArg "${cfg.package}/bin/commutecompass"} --config ${lib.escapeShellArg configPath} ${lib.escapeShellArg subcommand} | ${lib.escapeShellArg sendWrapper}
+        '';
+      };
+    in lib.recursiveUpdate serviceDefaults {
       inherit description;
-      serviceConfig.ExecStart =
-        "${pkgs.bash}/bin/bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'";
+      serviceConfig.TimeoutStartSec = cfg.jobTimeouts.${subcommand};
+      serviceConfig.ExecStart = lib.getExe wrapper;
     };
 
   # For subcommands that don't emit chat messages and so don't need the
@@ -96,6 +104,7 @@ let
   mkPlainService = subcommand: description:
     lib.recursiveUpdate serviceDefaults {
       inherit description;
+      serviceConfig.TimeoutStartSec = cfg.jobTimeouts.${subcommand} or "10min";
       serviceConfig.ExecStart = "${exe} ${subcommand}";
     };
 in {
@@ -206,17 +215,29 @@ in {
       };
     };
 
+    jobTimeouts = lib.genAttrs [ "poll" "morning" "tomorrow" "gtfs-refresh" "alarm publish" ] (job:
+      lib.mkOption {
+        type = lib.types.str;
+        default = if job == "poll" then "2min" else if job == "gtfs-refresh" then "30min" else "10min";
+        description = ''
+          systemd TimeoutStartSec for the ${job} oneshot job, including init-db.
+          Keep application HTTP timeouts below this limit. A timeout terminates
+          a hung run so the next timer activation can retry.
+        '';
+      });
+
     gtfsRefreshTime = lib.mkOption {
       type = lib.types.str;
       default = "*-*-* 04:30:00 America/New_York";
-      description = "systemd OnCalendar expression for the daily static GTFS refresh, before the morning digest.";
+      description = "systemd OnCalendar expression for the daily static GTFS refresh, before the morning digest. Include an explicit timezone in overrides.";
     };
 
     morningTime = lib.mkOption {
       type = lib.types.str;
-      default = "06:00:00";
+      default = "06:00:00 America/New_York";
       description = ''
-        OnCalendar spec for the morning digest timer.
+        OnCalendar spec for the morning digest timer. Include an explicit
+        timezone in overrides (for example America/New_York).
 
         The TOML key scheduling.morning_run_time is ignored when running under
         systemd; this option is the source of truth.
@@ -242,8 +263,9 @@ in {
 
     tomorrowTime = lib.mkOption {
       type = lib.types.str;
-      default = "20:45:00";
+      default = "20:45:00 America/New_York";
       description = ''
+        Include an explicit timezone in user-supplied OnCalendar expressions.
         OnCalendar spec for the tomorrow-alarm push timer (pull-model wake
         alarm — see README "Pull-model tomorrow alarm"). Should fire before
         the iOS Shortcuts automation that polls Home Assistant; the default
@@ -262,8 +284,8 @@ in {
       };
       publishTime = lib.mkOption {
         type = lib.types.str;
-        default = "*:0/15";
-        description = "OnCalendar schedule for alarm publish (system timezone).";
+        default = "*:0/15 America/New_York";
+        description = "OnCalendar schedule for alarm publish. Include an explicit timezone in overrides.";
       };
     };
 
@@ -271,8 +293,10 @@ in {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
       description = ''
-        State directory. Must live under /var/lib/ so systemd's
-        StateDirectory= can manage ownership and permissions.
+        State directory, exactly /var/lib/<name> so systemd's StateDirectory=
+        can manage ownership and permissions. Name may contain only letters,
+        digits, '.', '_' and '-', and must not be '.' or '..'. No nested
+        directories, repeated slashes or trailing slash are allowed.
       '';
     };
 
@@ -292,6 +316,11 @@ in {
             `environment.systemPackages` that sources the env file, sets
             `COMMUTECOMPASS_CONFIG=${configPath}`, and execs `commutecompass`.
 
+        Security boundary: every listed user can read the entire service
+        environmentFile, not just skill-specific credentials. This grants
+        access to all configured API keys and Telegram/Home Assistant tokens.
+        Add only users trusted with every service secret.
+
         The wrapper requires `services.commutecompass.environmentFile` to be
         group-readable (mode 0440 or wider). The default agenix mode `0400`
         is not enough; set `age.secrets.<name>.mode = "0440"` to match.
@@ -301,8 +330,9 @@ in {
 
   config = lib.mkIf cfg.enable {
     assertions = [{
-      assertion = lib.hasPrefix "/var/lib/" cfg.dataDir;
-      message = "services.commutecompass.dataDir must be under /var/lib/ (got: ${cfg.dataDir})";
+      assertion = builtins.match "^/var/lib/[A-Za-z0-9._-]+$" cfg.dataDir != null
+        && !(builtins.elem (baseNameOf cfg.dataDir) [ "." ".." ]);
+      message = "services.commutecompass.dataDir must be /var/lib/<name> with only letters, digits, '.', '_' or '-' in name (not '.' or '..'; got: ${cfg.dataDir})";
     }];
 
     # Expose the CLI system-wide so admins can run `commutecompass morning`,

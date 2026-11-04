@@ -21,3 +21,5 @@ build/
 /.pre-commit-config.yaml
 .claude/settings.local.json
 .slim/deepwork/
+/result
+/result-*

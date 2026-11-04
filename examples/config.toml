@@ -8,6 +8,7 @@
 [notify]
 mode = "stdout"
 
+# synthetic placeholder: example address and coordinates; not a personal origin.
 [origin]
 address = "123 Example Ave, Brooklyn, NY 11201"
 lat = 40.6950

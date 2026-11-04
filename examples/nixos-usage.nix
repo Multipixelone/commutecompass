@@ -13,12 +13,13 @@ in {
     configFile = ../config/commutecompass/config.toml;
     venuesFile = ../config/commutecompass/known_venues.yaml;
     environmentFile = config.age.secrets.commutecompass-env.path;
-    morningTime = "06:00:00";
+    # Include a timezone in OnCalendar overrides, independent of the host zone.
+    morningTime = "06:00:00 America/New_York";
     pollInterval = "1min";
 
     openclaw = {
       package = openclaw;
-      target = "-987654321";
+      target = "-987654321"; # synthetic placeholder
     };
   };
 }
