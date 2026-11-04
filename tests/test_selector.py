@@ -58,7 +58,7 @@ def test_naive_now_is_rejected(tmp_db_path: Path, selector: str) -> None:
 def test_utc_now_selects_same_upcoming_event(tmp_db_path: Path) -> None:
     now = _today_anchor()
     event = _make_event("upcoming", title="Grand Central visit", start=now + timedelta(hours=1))
-    store = _seeded_store(tmp_db_path, [Plan(event=event, status="planned")])
+    store = _seeded_store(tmp_db_path, [Plan(event=event)])
     assert resolve_event_selector("next", store, now=now.astimezone(UTC)) == event.id
 
 
