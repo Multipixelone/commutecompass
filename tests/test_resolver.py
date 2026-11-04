@@ -11,6 +11,18 @@ from commutecompass.models import ResolvedLocation, ZoneInfo
 from commutecompass.resolver import looks_like_address, resolve
 from commutecompass.venues import VenueEntry, VenueRegistry
 
+
+@pytest.mark.parametrize("raw", ["Location available once RSVP'd at 123 Main St", "TBD 123 Main St"])
+def test_placeholder_precedes_all_resolution(
+    raw: str, mock_store: MagicMock, mock_geocoder: MagicMock, mock_llm: MagicMock,
+) -> None:
+    result = resolve(raw, store=mock_store, venues=VenueRegistry([]), geocoder=mock_geocoder, llm=mock_llm)
+    assert result is None
+    mock_store.get_geocode.assert_not_called()
+    mock_geocoder.assert_not_called()
+    mock_llm.resolve_location.assert_not_called()
+
+
 # ── Fixtures ────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -97,6 +109,8 @@ class TestIsPlaceholder:
             ("TBA", True),
             ("TBD", True),
             ("TBD Location", True),
+            ("Westbank Theatre", False),
+            ("TBDish venue", False),
             ("200 Example St", False),  # real address
             ("Lincoln Center", False),  # venue name
             ("Home", False),  # plain word
