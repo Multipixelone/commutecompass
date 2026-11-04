@@ -24,6 +24,10 @@ from commutecompass.config import (
 
 @pytest.fixture
 def minimal_toml(tmp_path: Path) -> Path:
+    return _write_minimal_toml(tmp_path)
+
+
+def _write_minimal_toml(tmp_path: Path) -> Path:
     """A minimal valid TOML file covering all sections."""
     content = """
 [origin]
@@ -706,7 +710,7 @@ def test_externally_scheduled_updates_warn(minimal_toml: Path, key: str, value: 
 
 class TestUpdateConfigField:
     def _write_toml(self, tmp_path: Path) -> Path:
-        p = minimal_toml.__wrapped__(tmp_path)
+        p = _write_minimal_toml(tmp_path)
         original = p.read_text()
         p.write_text("# Top-level comment that must survive\n" + original.replace(
             "prep_minutes = 20", "prep_minutes = 20  # inline comment"
@@ -920,7 +924,7 @@ class TestExpandedAllowlist:
     """The HA toggle keys added for OpenClaw chat tweaks must round-trip."""
 
     def _write(self, tmp_path: Path) -> Path:
-        p = minimal_toml.__wrapped__(tmp_path)
+        p = _write_minimal_toml(tmp_path)
         p.write_text(p.read_text() + "\n[home_assistant]\n")
         return p
 
