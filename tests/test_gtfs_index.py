@@ -5,8 +5,9 @@ from __future__ import annotations
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from commutecompass.gtfs_allowlist import AllowlistEntry
@@ -15,6 +16,7 @@ from commutecompass.gtfs_index import (
     FeedError,
     GtfsIndex,
     GtfsRefreshError,
+    download,
     import_feed,
     parse_gtfs_time,
     refresh,
@@ -486,6 +488,57 @@ def test_open_stale_future_and_out_of_coverage(tmp_path: Path) -> None:
     assert GtfsIndex.open(db, now=late) is not None
     # 2027-04-01 NYC is past coverage_end even though the import is fresh.
     assert GtfsIndex.open(db, now=datetime(2027, 4, 1, 12, 0, tzinfo=UTC)) is None
+
+
+@pytest.mark.parametrize("failure", [OSError("disk full"), httpx.ReadError("interrupted")])
+def test_download_failure_preserves_destination(tmp_path: Path, failure: Exception) -> None:
+    dest = tmp_path / "feed.zip"
+    dest.write_bytes(b"previous feed")
+    response = MagicMock()
+
+    def chunks(size: int) -> object:
+        yield b"partial download"
+        raise failure
+
+    response.iter_bytes.side_effect = chunks
+    with patch("httpx.stream") as stream:
+        stream.return_value.__enter__.return_value = response
+        with pytest.raises(FeedError):
+            download("https://example.test/feed.zip", dest)
+    assert dest.read_bytes() == b"previous feed"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["feed.zip"]
+
+
+def test_download_open_error_is_feed_error(tmp_path: Path) -> None:
+    with patch("httpx.stream"), patch(
+        "commutecompass.gtfs_index.tempfile.NamedTemporaryFile", side_effect=OSError("disk full"),
+    ), pytest.raises(FeedError):
+        download("https://example.test/feed.zip", tmp_path / "feed.zip")
+    assert not list(tmp_path.iterdir())
+
+
+def test_download_size_limit_cleans_partial(tmp_path: Path) -> None:
+    response = MagicMock()
+    response.iter_bytes.return_value = [b"too large"]
+    with patch("httpx.stream") as stream, patch(
+        "commutecompass.gtfs_index._MAX_DOWNLOAD_BYTES", 1,
+    ):
+        stream.return_value.__enter__.return_value = response
+        with pytest.raises(FeedError):
+            download("https://example.test/feed.zip", tmp_path / "feed.zip")
+    assert not list(tmp_path.iterdir())
+
+
+def test_download_atomic_success(tmp_path: Path) -> None:
+    dest = tmp_path / "feed.zip"
+    dest.write_bytes(b"previous feed")
+    response = MagicMock()
+    response.iter_bytes.return_value = [b"new ", b"feed"]
+    with patch("httpx.stream") as stream:
+        stream.return_value.__enter__.return_value = response
+        download("https://example.test/feed.zip", dest)
+    assert dest.read_bytes() == b"new feed"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["feed.zip"]
 
 
 # ─────────── refresh(): supplemented → regular fallback ───────────
