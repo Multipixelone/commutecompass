@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from commutecompass.llm import OpencodeGoClient
 from commutecompass.models import Alert, Route, TransitLeg
@@ -46,6 +47,18 @@ class TestResolveLocation:
             mock_instance.post.return_value = _make_response(content)
             client = _make_client()
             return client.resolve_location(raw, hints)
+
+    @pytest.mark.parametrize("content", [
+        "[]", "null", '"x"', '{"kind":"address","value":[]}',
+        '{"kind":[],"value":"venue"}', '{"kind":"address","value":"  "}',
+        "private malformed output",
+    ])
+    def test_malformed_response_is_unresolved(self, content: str) -> None:
+        assert self._call("venue", content) is None
+
+    def test_invalid_json_is_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        assert self._call("venue", "private malformed output") is None
+        assert "private malformed output" not in caplog.text
 
     def test_address_kind_returns_resolved_location(self) -> None:
         result = self._call(

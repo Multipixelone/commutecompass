@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
+from pydantic import ValidationError
 
 from commutecompass.models import ResolvedLocation
 from commutecompass.retry import retry
@@ -125,27 +126,27 @@ class OpencodeGoClient:
 
         try:
             parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            log.warning("opencode-go JSON parse failed: %s — content: %r", exc, content)
+        except json.JSONDecodeError:
+            log.warning("opencode-go JSON parse failed (length=%d)", len(content))
             return None
 
+        if not isinstance(parsed, dict):
+            log.warning("opencode-go returned JSON type=%s", type(parsed).__name__)
+            return None
         kind = parsed.get("kind")
-        if kind == "unknown":
+        value = parsed.get("value")
+        if not isinstance(kind, str) or not isinstance(value, str) or not value.strip():
+            return None
+        if kind != "address" and kind != "station":
             return None
 
-        if kind not in ("address", "station"):
-            log.warning("opencode-go returned unknown kind=%r, treating as None", kind)
+        try:
+            return ResolvedLocation(
+                kind="address" if kind == "address" else "station", value=value, source="llm"
+            )
+        except ValidationError:
+            log.warning("opencode-go location validation failed")
             return None
-
-        value = parsed.get("value", "")
-        if not value:
-            return None
-
-        return ResolvedLocation(
-            kind=kind,
-            value=value,
-            source="llm",
-        )
 
     def classify_alert_relevance(
         self,
