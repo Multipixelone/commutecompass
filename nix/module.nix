@@ -85,11 +85,18 @@ let
   # to systemd so the unit shows as failed instead of silently dropping the
   # message.
   mkService = subcommand: description:
-    lib.recursiveUpdate serviceDefaults {
+    let
+      wrapper = pkgs.writeShellApplication {
+        name = "commutecompass-${subcommand}";
+        text = ''
+          set -o pipefail
+          ${lib.escapeShellArg "${cfg.package}/bin/commutecompass"} --config ${lib.escapeShellArg configPath} ${lib.escapeShellArg subcommand} | ${lib.escapeShellArg sendWrapper}
+        '';
+      };
+    in lib.recursiveUpdate serviceDefaults {
       inherit description;
       serviceConfig.TimeoutStartSec = cfg.jobTimeouts.${subcommand};
-      serviceConfig.ExecStart =
-        "${pkgs.bash}/bin/bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'";
+      serviceConfig.ExecStart = lib.getExe wrapper;
     };
 
   # For subcommands that don't emit chat messages and so don't need the

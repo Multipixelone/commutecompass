@@ -1,7 +1,21 @@
 { pkgs, nixpkgs, module }:
 let
   inherit (pkgs) lib;
-  app = pkgs.writeShellScriptBin "commutecompass" ''exit 0'';
+  app = pkgs.symlinkJoin {
+    name = "commutecompass-module-test";
+    paths = [
+      (pkgs.writeShellScriptBin "commutecompass" ''exit "''${MOCK_APP_STATUS:-0}"'')
+      (pkgs.writeTextFile {
+        name = "mock-openclaw-send";
+        destination = "/share/commutecompass/openclaw-send.sh";
+        executable = true;
+        text = ''
+          #!${pkgs.runtimeShell}
+          exit "''${MOCK_SEND_STATUS:-0}"
+        '';
+      })
+    ];
+  };
   openclaw = pkgs.writeShellScriptBin "openclaw" ''exit 0'';
   evaluate = extra: (nixpkgs.lib.nixosSystem {
     system = pkgs.stdenv.hostPlatform.system;
@@ -34,6 +48,8 @@ assert lib.assertMsg (lib.all (item: item.assertion) config.assertions)
   (lib.concatMapStringsSep "\n" (item: item.message)
     (builtins.filter (item: !item.assertion) config.assertions));
 assert services.commutecompass-poll.serviceConfig.Type == "oneshot";
+assert lib.hasSuffix "/bin/commutecompass-poll" services.commutecompass-poll.serviceConfig.ExecStart;
+assert lib.hasSuffix "/bin/commutecompass-morning" services.commutecompass-morning.serviceConfig.ExecStart;
 assert services.commutecompass-poll.serviceConfig.TimeoutStartSec == "2min";
 assert services.commutecompass-morning.serviceConfig.TimeoutStartSec == "10min";
 assert services.commutecompass-tomorrow.serviceConfig.TimeoutStartSec == "10min";
@@ -52,5 +68,13 @@ assert timers.commutecompass-alarm-publish.timerConfig.Persistent;
 assert builtins.elem "skill-test" config.users.groups.commutecompass.members;
 assert builtins.any (package: package.name == "commutecompass-skill") config.environment.systemPackages;
 pkgs.runCommand "commutecompass-module-eval" {} ''
+  ${services.commutecompass-poll.serviceConfig.ExecStart}
+  ${services.commutecompass-morning.serviceConfig.ExecStart}
+  status=0
+  MOCK_APP_STATUS=17 ${services.commutecompass-poll.serviceConfig.ExecStart} || status=$?
+  test "$status" = 17
+  status=0
+  MOCK_SEND_STATUS=23 ${services.commutecompass-poll.serviceConfig.ExecStart} || status=$?
+  test "$status" = 23
   touch "$out"
 ''
