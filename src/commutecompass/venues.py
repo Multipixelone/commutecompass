@@ -55,6 +55,12 @@ class VenueRegistry:
         for idx, entry in enumerate(entries):
             for alias in entry.aliases:
                 norm = _normalize(alias)
+                previous = self._exact.get(norm)
+                if previous is not None and previous != idx:
+                    raise ValueError(
+                        f"Duplicate venue alias {norm!r} for "
+                        f"{entries[previous].resolves_to.value!r} and {entry.resolves_to.value!r}"
+                    )
                 self._exact[norm] = idx
             for alias in entry.aliases:
                 collapsed = re.sub(r"\s+", "", _normalize(alias))

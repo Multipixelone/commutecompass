@@ -4,10 +4,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from commutecompass.models import ResolvedLocation
 from commutecompass.venues import VenueEntry, VenueRegistry
 
 FIXTURE_PATH = Path(__file__).parent.parent / "data" / "known_venues.yaml"
+
+
+def test_duplicate_normalized_alias_names_both_venues(tmp_path: Path) -> None:
+    path = tmp_path / "venues.yaml"
+    path.write_text("""
+  - aliases: [Shared Venue]
+    resolves_to: {kind: station, value: Grand Central Terminal}
+  - aliases: ['SHARED VENUE!']
+    resolves_to: {kind: station, value: Penn Station}
+""")
+    with pytest.raises(ValueError, match="(?i)duplicate.*shared venue") as exc:
+        VenueRegistry.load(path)
+    assert "Grand Central Terminal" in str(exc.value)
+    assert "Penn Station" in str(exc.value)
+
+
+def test_repeated_alias_within_same_venue_is_allowed() -> None:
+    registry = VenueRegistry([VenueEntry(
+        aliases=["Grand Central", "GRAND CENTRAL!"],
+        resolves_to=ResolvedLocation(kind="station", value="Grand Central Terminal", source="known_venues"),
+    )])
+    assert registry.match("Grand Central") is not None
 
 
 def test_exact_match_school() -> None:

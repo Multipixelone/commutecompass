@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -52,7 +53,7 @@ _PLACEHOLDER_PATTERNS = (
 def _is_placeholder(raw: str) -> bool:
     """Return True if `raw` is clearly a non-actionable placeholder string."""
     lowered = raw.lower()
-    return any(pat in lowered for pat in _PLACEHOLDER_PATTERNS)
+    return any(re.search(r"\b" + re.escape(pat) + r"\b", lowered) for pat in _PLACEHOLDER_PATTERNS)
 
 
 # ── Step 4b: placeholder check ────────────────────────────────────────────────
@@ -70,12 +71,11 @@ def resolve(
     """Resolve a raw location string through the resolution pipeline.
 
     Pipeline (§6.10, with HA zones in front):
-    1. Empty raw → None
+    1. Empty raw or non-actionable placeholder → None
     1b. HA zone friendly_name match → return (not cached, so HA edits propagate)
     2. Cache hit (store.get_geocode) → return cached
     3. Venue registry match → cache + return
     4. looks_like_address → geocode → cache + return
-    4b. Placeholder check → None (skip LLM/geocoder)
     5. LLM resolution → address: geocode + cache + return;
                         station: cache + return
     6. Unresolved → log + return None
@@ -84,7 +84,12 @@ def resolve(
     if not raw or not raw.strip():
         return None
 
+    original_raw = raw
     raw = raw.strip()
+    cache_key = " ".join(unicodedata.normalize("NFKC", raw).casefold().split())
+    if _is_placeholder(raw):
+        log.debug("resolver: non-actionable placeholder, skipping")
+        return None
 
     # ── Step 1b: HA zone match ────────────────────────────────────────────────
     if ha_zones:
@@ -100,7 +105,11 @@ def resolve(
             )
 
     # ── Step 2: cache hit ───────────────────────────────────────────────────────
-    cached = store.get_geocode(raw)
+    cached = store.get_geocode(cache_key)
+    if cached is None and original_raw != cache_key:
+        cached = store.get_geocode(original_raw)
+    if cached is None and raw not in (cache_key, original_raw):
+        cached = store.get_geocode(raw)
     if cached is not None:
         log.debug("resolver: cache hit for %r", raw)
         return cached
@@ -117,7 +126,7 @@ def resolve(
             lon=venue_resolved.lon,
             source="known_venues",
         )
-        store.cache_geocode(raw, result)
+        store.cache_geocode(cache_key, result)
         return result
 
     # ── Step 4: address heuristic → geocode ─────────────────────────────────────
@@ -132,13 +141,8 @@ def resolve(
                 lon=geo_result.lon,
                 source="geocode",
             )
-            store.cache_geocode(raw, result)
+            store.cache_geocode(cache_key, result)
             return result
-
-    # ── Step 4b: placeholder check ───────────────────────────────────────────────
-    if _is_placeholder(raw):
-        log.debug("resolver: placeholder %r skipped", raw)
-        return None
 
     # ── Step 5: LLM resolution ─────────────────────────────────────────────────
     llm_resolved = llm.resolve_location(raw, hints={})
@@ -146,7 +150,7 @@ def resolve(
         if llm_resolved.kind == "station":
             # Stations don't need geocoding — cache as-is and return
             log.debug("resolver: LLM station match for %r", raw)
-            store.cache_geocode(raw, llm_resolved)
+            store.cache_geocode(cache_key, llm_resolved)
             return llm_resolved
 
         if llm_resolved.kind == "address":
@@ -161,7 +165,7 @@ def resolve(
                     lon=geo_result.lon,
                     source="llm",
                 )
-                store.cache_geocode(raw, result)
+                store.cache_geocode(cache_key, result)
                 return result
 
     # ── Step 6: unresolved ───────────────────────────────────────────────────────

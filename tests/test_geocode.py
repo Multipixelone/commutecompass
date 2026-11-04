@@ -34,6 +34,30 @@ def _zero_results_response() -> dict[str, Any]:
 # ─────────── Tests ───────────
 
 class TestGeocode:
+    @pytest.mark.parametrize("payload", [
+        None, [], {"status": "OK", "results": [{}]},
+        {"status": "OK", "results": [None]},
+        {"status": "OK", "results": {"bad": "shape"}},
+        *[
+            {"status": "OK", "results": [{"geometry": {"location": location}}]}
+            for location in [
+                {"lat": 40.75}, {"lat": float("nan"), "lng": -73.98},
+                {"lat": "40.75", "lng": "-73.98"}, {"lat": True, "lng": 0},
+                {"lat": 91, "lng": 0}, {"lat": 0, "lng": 181},
+                {"lat": 0, "lng": float("inf")},
+            ]
+        ],
+    ])
+    def test_malformed_payload_returns_none(self, payload: Any) -> None:
+        with patch("commutecompass.geocode._do_geocode_request") as request:
+            request.return_value.json.return_value = payload
+            assert geocode("Grand Central Terminal", "test-key") is None
+
+    def test_non_json_returns_none(self) -> None:
+        with patch("commutecompass.geocode._do_geocode_request") as request:
+            request.return_value.json.side_effect = ValueError("invalid JSON")
+            assert geocode("Grand Central Terminal", "test-key") is None
+
     def test_success_parses_all_fields(self) -> None:
         payload = _ok_response(
             address="200 Example St, New York, NY 10001",

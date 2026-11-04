@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -68,11 +69,18 @@ class CalendarClient:
                 "Run `commutecompass oauth` first."
             )
 
-        creds_data = json.loads(self.token_path.read_text())
-        creds = cast(
-            Credentials,
-            Credentials.from_authorized_user_info(creds_data, SCOPES),  # type: ignore[no-untyped-call]
-        )
+        try:
+            creds_data = json.loads(self.token_path.read_text())
+            if not isinstance(creds_data, dict):
+                raise TypeError("token must be a JSON object")
+            creds = cast(
+                Credentials,
+                Credentials.from_authorized_user_info(creds_data, SCOPES),  # type: ignore[no-untyped-call]
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise AuthError(
+                "Token file is unreadable or invalid. Please re-run `commutecompass oauth`."
+            ) from exc
 
         if creds.expired:
             try:
@@ -169,34 +177,42 @@ class CalendarClient:
                     .execute()
                 )
 
-                for item in response.get("items", []):
-                    # Skip cancelled events
-                    if item.get("status") == "cancelled":
+                for index, item in enumerate(response.get("items", [])):
+                    try:
+                        # Skip cancelled events and valid all-day events.
+                        if item.get("status") == "cancelled":
+                            continue
+                        event_id = item["id"]
+                        if not isinstance(event_id, str) or not event_id.strip():
+                            raise ValueError("missing event id")
+                        start_info = item.get("start", {})
+                        end_info = item.get("end", {})
+                        if not start_info.get("dateTime") and start_info.get("date"):
+                            continue
+
+                        event = Event(
+                            id=event_id,
+                            calendar_id=cal.id,
+                            calendar_name=cal.name,
+                            title=item.get("summary", "(No title)"),
+                            start=self._parse_event_datetime(
+                                start_info["dateTime"], start_info.get("timeZone")
+                            ),
+                            end=self._parse_event_datetime(
+                                end_info["dateTime"], end_info.get("timeZone")
+                            ),
+                            location_raw=item.get("location"),
+                            location_resolved=None,
+                            mode_override=None,
+                            virtual=_is_virtual_only(item),
+                        )
+                    except (KeyError, ValueError, TypeError, AttributeError):
+                        # Never include payloads or exception text: they may contain
+                        # private calendar titles, locations, or malformed values.
+                        logging.getLogger(__name__).warning(
+                            "Skipping malformed calendar event at index=%d", index
+                        )
                         continue
-
-                    start_info = item.get("start", {})
-                    end_info = item.get("end", {})
-
-                    # Skip all-day events (no dateTime, only date)
-                    if not start_info.get("dateTime"):
-                        continue
-
-                    event = Event(
-                        id=item["id"],
-                        calendar_id=cal.id,
-                        calendar_name=cal.name,
-                        title=item.get("summary", "(No title)"),
-                        start=self._parse_event_datetime(
-                            start_info["dateTime"], start_info.get("timeZone")
-                        ),
-                        end=self._parse_event_datetime(
-                            end_info["dateTime"], end_info.get("timeZone")
-                        ),
-                        location_raw=item.get("location"),
-                        location_resolved=None,
-                        mode_override=None,
-                        virtual=_is_virtual_only(item),
-                    )
                     events.append(event)
 
                 page_token = response.get("nextPageToken")

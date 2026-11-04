@@ -60,6 +60,25 @@ def calendar_specs() -> list[CalendarSpec]:
 # Token persistence tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("content", ["not JSON private-token", "[]", "null", "{}"])
+def test_corrupt_token_raises_safe_auth_error(
+    token_path: Path, client_secret_json: str, content: str,
+) -> None:
+    token_path.write_text(content)
+    client = CalendarClient(token_path=token_path, client_secret_json=client_secret_json)
+    with pytest.raises(AuthError, match="commutecompass oauth") as exc:
+        client._load_credentials()
+    assert "private-token" not in str(exc.value)
+    assert content not in str(exc.value)
+
+
+def test_unreadable_token_raises_auth_error(token_path: Path, client_secret_json: str) -> None:
+    token_path.mkdir()
+    client = CalendarClient(token_path=token_path, client_secret_json=client_secret_json)
+    with pytest.raises(AuthError, match="commutecompass oauth"):
+        client._load_credentials()
+
+
 def test_token_not_found_raises_auth_error(client_secret_json: str, token_path: Path) -> None:
     """Loading credentials when token file is missing raises AuthError."""
     client = CalendarClient(client_secret_json, token_path)
@@ -139,6 +158,43 @@ def _build_mock_service(items: list[dict[str, Any]]) -> MagicMock:
     }
 
     return service
+
+
+@pytest.mark.parametrize("invalid_fields", [
+    {"id": None},
+    {"id": ""},
+    {"start": {"dateTime": "private-invalid-time"}},
+    {"end": {}},
+    {"end": {"dateTime": 123}},
+    {"start": None},
+    {"start": {"dateTime": "2026-05-08T10:00:00", "timeZone": "Invalid/Zone"}},
+])
+def test_fetch_events_skips_malformed_items_in_mixed_batch(
+    client_secret_json: str, token_path: Path, caplog: pytest.LogCaptureFixture,
+    invalid_fields: dict[str, Any],
+) -> None:
+    times = {
+        "start": {"dateTime": "2026-05-08T10:00:00+00:00"},
+        "end": {"dateTime": "2026-05-08T11:00:00+00:00"},
+    }
+    malformed = {
+        **times, "id": "bad-event", "summary": "private-title",
+        "location": "private-location", **invalid_fields,
+    }
+    if invalid_fields == {"id": None}:
+        del malformed["id"]
+    items = [{**times, "id": "valid-before"}, malformed, {**times, "id": "valid-after"}]
+    client = CalendarClient(client_secret_json, token_path)
+    with patch.object(client, "_build_service", return_value=_build_mock_service(items)):
+        events = client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            start=make_aware(datetime(2026, 5, 8)),
+            end=make_aware(datetime(2026, 5, 9)),
+        )
+    assert [event.id for event in events] == ["valid-before", "valid-after"]
+    assert "Skipping malformed calendar event at index=1" in caplog.text
+    for private_value in ("private-title", "private-location", "private-invalid-time", "Invalid/Zone"):
+        assert private_value not in caplog.text
 
 
 def test_fetch_events_skips_cancelled(
