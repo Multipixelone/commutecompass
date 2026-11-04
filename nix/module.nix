@@ -222,14 +222,15 @@ in {
     gtfsRefreshTime = lib.mkOption {
       type = lib.types.str;
       default = "*-*-* 04:30:00 America/New_York";
-      description = "systemd OnCalendar expression for the daily static GTFS refresh, before the morning digest.";
+      description = "systemd OnCalendar expression for the daily static GTFS refresh, before the morning digest. Include an explicit timezone in overrides.";
     };
 
     morningTime = lib.mkOption {
       type = lib.types.str;
-      default = "06:00:00";
+      default = "06:00:00 America/New_York";
       description = ''
-        OnCalendar spec for the morning digest timer.
+        OnCalendar spec for the morning digest timer. Include an explicit
+        timezone in overrides (for example America/New_York).
 
         The TOML key scheduling.morning_run_time is ignored when running under
         systemd; this option is the source of truth.
@@ -255,8 +256,9 @@ in {
 
     tomorrowTime = lib.mkOption {
       type = lib.types.str;
-      default = "20:45:00";
+      default = "20:45:00 America/New_York";
       description = ''
+        Include an explicit timezone in user-supplied OnCalendar expressions.
         OnCalendar spec for the tomorrow-alarm push timer (pull-model wake
         alarm — see README "Pull-model tomorrow alarm"). Should fire before
         the iOS Shortcuts automation that polls Home Assistant; the default
@@ -275,8 +277,8 @@ in {
       };
       publishTime = lib.mkOption {
         type = lib.types.str;
-        default = "*:0/15";
-        description = "OnCalendar schedule for alarm publish (system timezone).";
+        default = "*:0/15 America/New_York";
+        description = "OnCalendar schedule for alarm publish. Include an explicit timezone in overrides.";
       };
     };
 

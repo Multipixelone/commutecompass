@@ -44,6 +44,10 @@ assert (evaluate { services.commutecompass.jobTimeouts.poll = "3min"; })
 assert services.commutecompass-alarm.serviceConfig.Type == "simple";
 assert services.commutecompass-alarm.serviceConfig.Restart == "always";
 assert timers.commutecompass-poll.timerConfig.OnUnitActiveSec == "1min";
+assert lib.all (name: lib.hasSuffix " America/New_York" timers.${name}.timerConfig.OnCalendar)
+  [ "commutecompass-morning" "commutecompass-tomorrow" "commutecompass-gtfs-refresh" "commutecompass-alarm-publish" ];
+assert (evaluate { services.commutecompass.morningTime = "07:00:00 UTC"; })
+  .systemd.timers.commutecompass-morning.timerConfig.OnCalendar == "07:00:00 UTC";
 assert timers.commutecompass-alarm-publish.timerConfig.Persistent;
 assert builtins.elem "skill-test" config.users.groups.commutecompass.members;
 assert builtins.any (package: package.name == "commutecompass-skill") config.environment.systemPackages;
