@@ -443,7 +443,10 @@ def _route_summary_detailed(route: Route) -> str:
     lines = []
     for leg in route.legs:
         if leg.mode == "TRANSIT" and leg.system:
-            line = leg.line or ""
+            # The completed summary is Markdown-escaped by format_leave_ping.
+            # Sanitize each external field here without truncating the whole route.
+            line = _sanitize_text(leg.line or "")
+            system = _sanitize_text(leg.system)
             depart = leg.depart_at.strftime("%I:%M %p").lstrip("0")
             arrive = leg.arrive_at.strftime("%I:%M %p").lstrip("0")
             if leg.system == "MTA Subway":
@@ -452,7 +455,7 @@ def _route_summary_detailed(route: Route) -> str:
                 branch = f" ({line})" if line else ""
                 lines.append(f"LIRR{branch}, {depart} → {arrive}")
             else:
-                lines.append(f"{leg.system} {line}, {depart} → {arrive}")
+                lines.append(f"{system} {line}, {depart} → {arrive}")
         elif leg.mode == "WALKING":
             mins = leg.duration_seconds // 60
             lines.append(f"Walk {mins} min")

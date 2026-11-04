@@ -108,6 +108,21 @@ def make_plan(event: Event, route: Route | None = None) -> Plan:
     )
 
 
+@pytest.mark.parametrize("system", ["MTA Subway", "LIRR", "Bus\u202e\x01_*"])
+def test_leave_route_details_are_sanitized(system: str) -> None:
+    leg = TransitLeg(
+        mode="TRANSIT", system=system, line="C\u202e\x01_*" + "x" * 250,
+        headsign="Destination\u202e\x01", depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=UTC),
+        arrive_at=datetime(2026, 5, 12, 9, 0, tzinfo=UTC),
+        duration_seconds=2700, summary="Transit",
+    )
+    result = format_leave_ping(make_plan(make_event(), make_route([leg])))
+    assert "\u202e" not in result
+    assert "\x01" not in result
+    assert r"C\_\*" in result
+    assert "x" * 201 not in result
+
+
 class TestEscapeMd:
     """Tests for escape_md MarkdownV2 escaping."""
 
