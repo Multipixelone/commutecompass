@@ -16,12 +16,42 @@ from commutecompass.mta import (
     _build_route_context,
     _fetch_feed,
     _is_location_specific_alert,
+    _parse_alert,
     _systems_lines_overlap,
     _time_overlaps,
     alerts_affecting_route,
     fetch_alerts,
     select_actionable_alerts,
 )
+
+
+def test_inverted_alert_period_is_discarded() -> None:
+    from google.transit import gtfs_realtime_pb2 as gtfs
+
+    proto = gtfs.Alert()
+    proto.informed_entity.add().route_id = "C"
+    period = proto.active_period.add()
+    period.start, period.end = 2000, 1000
+    assert _parse_alert(proto, "MTA Subway") is None
+    valid = proto.active_period.add()
+    valid.start, valid.end = 3000, 4000
+    parsed = _parse_alert(proto, "MTA Subway")
+    assert parsed is not None
+    assert parsed.active_periods == [
+        (datetime.fromtimestamp(3000, NYC_TZ), datetime.fromtimestamp(4000, NYC_TZ)),
+    ]
+
+
+def test_inverted_stored_period_does_not_overlap() -> None:
+    start = datetime(2026, 11, 4, 10, tzinfo=NYC_TZ)
+    alert = Alert(
+        id="inverted", affected_routes={"C"}, affected_systems={"MTA Subway"},
+        header="bad period", description="", severity="WARNING",
+        active_periods=[(start, start - timedelta(minutes=10))], raw={},
+    )
+    leg = subway_leg("C", depart_at=start - timedelta(hours=1), arrive_at=start + timedelta(hours=1))
+    assert not _time_overlaps(alert, sample_route([leg]), start)
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
