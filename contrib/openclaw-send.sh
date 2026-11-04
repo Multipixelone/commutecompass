@@ -59,15 +59,25 @@ _send_one() {
 
 in_msg=0
 buffer=""
-while IFS= read -r line; do
+while IFS= read -r line || [[ -n "$line" ]]; do
   case "$line" in
     "===COMMUTECOMPASS-MSG===")
+      if [[ "$in_msg" == "1" ]]; then
+        echo "openclaw-send: nested START — discarding incomplete message" >&2
+        failures=$((failures + 1))
+      fi
       in_msg=1
       buffer=""
       ;;
     "===COMMUTECOMPASS-END===")
+      if [[ "$in_msg" == "1" ]]; then
+        _send_one "$buffer"
+      else
+        echo "openclaw-send: stray END" >&2
+        failures=$((failures + 1))
+      fi
       in_msg=0
-      _send_one "$buffer"
+      buffer=""
       ;;
     *)
       if [[ "$in_msg" == "1" ]]; then
@@ -76,6 +86,9 @@ while IFS= read -r line; do
         else
           buffer="$buffer"$'\n'"$line"
         fi
+      else
+        echo "openclaw-send: unframed output — discarding line" >&2
+        failures=$((failures + 1))
       fi
       ;;
   esac

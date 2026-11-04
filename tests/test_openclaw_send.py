@@ -34,6 +34,19 @@ def run_bridge(tmp_path: Path, text: str, *, fail: bool = False) -> tuple[subpro
     return result, calls
 
 
+@pytest.mark.parametrize(("bad", "warning"), [
+    ("unframed private text\n", "unframed output"),
+    (f"{START}\nabandoned\n", "nested START"),
+    (f"{END}\n", "stray END"),
+])
+def test_framing_errors_warn_and_preserve_valid_messages(tmp_path: Path, bad: str, warning: str) -> None:
+    result, calls = run_bridge(tmp_path, bad + f"{START}\ngood\n{END}\n")
+    assert result.returncode == 1
+    assert warning in result.stderr
+    assert "private text" not in result.stderr
+    assert [call[-1] for call in calls] == ["good"]
+
+
 def test_send_failure_logs_metadata_not_message(tmp_path: Path) -> None:
     body = "Private event 🚆\nPrivate location"
     result, _ = run_bridge(tmp_path, f"{START}\n{body}\n{END}\n", fail=True)
