@@ -8,14 +8,13 @@ alarm fires earlier.  Open-Meteo is free and keyless, so this needs no secret.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 import httpx
 
 from commutecompass.config import WeatherConfig
 from commutecompass.retry import retry
-from commutecompass.timeutil import to_nyc
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +60,8 @@ def _fetch_forecast(lat: float, lon: float, forecast_url: str) -> dict[str, Any]
         "latitude": f"{lat:.4f}",
         "longitude": f"{lon:.4f}",
         "hourly": "precipitation,precipitation_probability,snowfall",
-        "timezone": "America/New_York",
+        "timezone": "GMT",
+                "timeformat": "unixtime",
         "forecast_days": "2",
     }
 
@@ -85,7 +85,7 @@ def _buffer_from_hourly(
         return _CLEAR
 
     # Open-Meteo hour stamps are local ISO strings like "2026-06-23T08:00".
-    target = to_nyc(at_time).strftime("%Y-%m-%dT%H:00")
+    target = int(at_time.astimezone(UTC).replace(minute=0, second=0, microsecond=0).timestamp())
     try:
         idx = times.index(target)
     except ValueError:

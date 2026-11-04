@@ -128,8 +128,13 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> 
         start = _parse_timestamp(period.start)
         end = _parse_timestamp(period.end) if period.HasField("end") else None
         if start is not None:
+            if end is not None and end < start:
+                logger.warning("Discarding inverted alert active period")
+                continue
             active_periods.append((start, end))
 
+    if gtfs_alert.active_period and not active_periods:
+        return None
     if not active_periods:
         # No active period means currently active with no known end
         now = datetime.now(NYC_TZ)
@@ -201,7 +206,7 @@ def _extract_text(text_proto: Any) -> str:
 
 def _parse_timestamp(seconds: int) -> datetime | None:
     """Convert GTFS-RT Unix timestamp to aware NYC datetime."""
-    if seconds == 0:
+    if seconds <= 0:
         return None
     try:
         dt = datetime.fromtimestamp(seconds, tz=NYC_TZ)
@@ -542,6 +547,9 @@ def _time_overlaps(alert: Alert, route: Route, at_time: datetime) -> bool:
         leg_end = _ensure_aware(leg.arrive_at)
 
         for active_start, active_end in alert.active_periods:
+            if active_end is not None and _ensure_aware(active_end) < _ensure_aware(active_start):
+                logger.warning("Discarding inverted alert active period")
+                continue
             if _periods_overlap(leg_start, leg_end, active_start, active_end):
                 return True
 

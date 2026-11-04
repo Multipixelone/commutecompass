@@ -219,7 +219,9 @@ def _scheduled_time(value: Any, nyc_tz: Any) -> datetime | None:
         return None
 
 
-def _parse_step(step: dict[str, Any], nyc_tz: Any) -> TransitLeg | None:
+def _parse_step(
+    step: dict[str, Any], nyc_tz: Any, fallback_at: datetime | None = None,
+) -> TransitLeg | None:
     """Parse a single step from a Directions leg into a TransitLeg.
 
     Returns None for unsupported travel modes.
@@ -241,18 +243,21 @@ def _parse_step(step: dict[str, Any], nyc_tz: Any) -> TransitLeg | None:
     departure_time = step.get("departure_time", {}) if mode != "TRANSIT" else {}
     arrival_time = step.get("arrival_time", {}) if mode != "TRANSIT" else {}
 
-    # Parse departure time - can be a datetime dict with "value" (unix timestamp)
-    if isinstance(departure_time, dict):
-        dep_ts = departure_time.get("value")
-        depart_at = datetime.fromtimestamp(dep_ts, tz=nyc_tz) if dep_ts else datetime.now(nyc_tz)
-    else:
-        depart_at = datetime.now(nyc_tz)
-
-    if isinstance(arrival_time, dict):
-        arr_ts = arrival_time.get("value")
-        arrive_at = datetime.fromtimestamp(arr_ts, tz=nyc_tz) if arr_ts else datetime.now(nyc_tz)
-    else:
-        arrive_at = datetime.now(nyc_tz)
+    # Non-transit steps frequently omit times. Anchor them to the surrounding
+    # schedule, never to the clock while parsing a response.
+    scheduled_departure = _scheduled_time(departure_time, nyc_tz)
+    scheduled_arrival = _scheduled_time(arrival_time, nyc_tz)
+    anchor = (
+        datetime.now(nyc_tz) if mode == "TRANSIT"
+        else fallback_at or datetime.fromtimestamp(0, tz=nyc_tz)
+    )
+    depart_at = scheduled_departure or (
+        datetime.fromtimestamp(scheduled_arrival.timestamp() - duration_sec, tz=nyc_tz)
+        if scheduled_arrival is not None else anchor
+    )
+    arrive_at = scheduled_arrival or datetime.fromtimestamp(
+        depart_at.timestamp() + duration_sec, tz=nyc_tz,
+    )
 
     scheduled_departure_valid = False
     transit_details = step.get("transit_details", {})
@@ -373,7 +378,9 @@ def _attach_bridge_identity(route: Route, gtfs_db_path: str) -> Route:
         return route
 
 
-def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Route | None:
+def _parse_route(
+    response: dict[str, Any], *, gtfs_db_path: str = "", request_time: datetime | None = None,
+) -> Route | None:
     """Parse a Google Directions API response into a Route.
 
     Returns None if no valid routes found.
@@ -383,14 +390,19 @@ def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Route |
         return None
 
     routes = response.get("routes", [])
-    if not routes:
+    if not isinstance(routes, list) or not routes:
         return None
 
     best_route = None
     best_score = math.inf
 
     for route_index, route in enumerate(routes):
-        legs = route.get("legs", [])
+        if not isinstance(route, dict):
+            continue
+        raw_legs = route.get("legs", [])
+        if not isinstance(raw_legs, list):
+            continue
+        legs = [leg for leg in raw_legs if isinstance(leg, dict)]
         if not legs:
             continue
 
@@ -400,12 +412,27 @@ def _parse_route(response: dict[str, Any], *, gtfs_db_path: str = "") -> Route |
         prev_was_transit = False
 
         for leg in legs:
+            fallback_at = (
+                _scheduled_time(leg.get("departure_time"), NYC_TZ)
+                or (transit_legs[-1].arrive_at if transit_legs else None)
+            )
+            if fallback_at is None:
+                end = _scheduled_time(leg.get("arrival_time"), NYC_TZ) or request_time
+                if end is not None:
+                    fallback_at = datetime.fromtimestamp(
+                        end.timestamp() - leg.get("duration", {}).get("value", 0), tz=NYC_TZ,
+                    )
             steps = leg.get("steps", [])
+            if not isinstance(steps, list):
+                continue
             for step in steps:
-                transit_leg = _parse_step(step, NYC_TZ)
+                if not isinstance(step, dict):
+                    continue
+                transit_leg = _parse_step(step, NYC_TZ, fallback_at)
                 if transit_leg is None:
                     continue
 
+                fallback_at = transit_leg.arrive_at
                 transit_legs.append(transit_leg)
 
                 if transit_leg.mode == "WALKING":
@@ -525,9 +552,11 @@ def plan_route(
             )
             response.raise_for_status()
             data = response.json()
+        if not isinstance(data, dict):
+            return None
+        return _parse_route(data, gtfs_db_path=gtfs_db_path, request_time=arrival_time)
     except httpx.HTTPError:
         return None
-
-    if not isinstance(data, dict):
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        logger.warning("Directions response invalid: %s", type(exc).__name__)
         return None
-    return _parse_route(data, gtfs_db_path=gtfs_db_path)

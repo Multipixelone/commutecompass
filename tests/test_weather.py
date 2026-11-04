@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from commutecompass.config import WeatherConfig
@@ -18,7 +18,9 @@ def _fetcher(hourly: dict[str, Any]) -> Any:
 
 def _hourly(*, precip: float, prob: int, snow: float) -> dict[str, Any]:
     return {
-        "time": ["2026-05-08T13:00", "2026-05-08T14:00"],
+        "time": [
+            int(datetime(2026, 5, 8, hour, tzinfo=NYC_TZ).timestamp()) for hour in (13, 14)
+        ],
         "precipitation": [0.0, precip],
         "precipitation_probability": [5, prob],
         "snowfall": [0.0, snow],
@@ -31,6 +33,19 @@ def _raises(*a: Any, **k: Any) -> Any:
 
 def _boom(*a: Any, **k: Any) -> Any:
     raise RuntimeError("network down")
+
+
+def test_fall_back_forecast_distinguishes_repeated_hour() -> None:
+    first = datetime(2026, 11, 1, 5, tzinfo=UTC)
+    second = datetime(2026, 11, 1, 6, tzinfo=UTC)
+    hourly = {
+        "time": [int(first.timestamp()), int(second.timestamp())],
+        "precipitation": [0.0, 1.0], "precipitation_probability": [0, 100],
+        "snowfall": [0.0, 0.0],
+    }
+    cfg = WeatherConfig(enabled=True, rain_buffer_minutes=12)
+    assert weather_buffer(40.7, -74.0, first, cfg, fetcher=_fetcher(hourly)) == (0, None)
+    assert weather_buffer(40.7, -74.0, second, cfg, fetcher=_fetcher(hourly)) == (12, "rain")
 
 
 def test_disabled_returns_zero() -> None:

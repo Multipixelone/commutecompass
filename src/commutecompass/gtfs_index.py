@@ -674,18 +674,29 @@ def download(url: str, dest: Path) -> None:
     """Stream ``url`` to ``dest`` (bounded size); raises ``FeedError``."""
     import httpx
 
+    partial: Path | None = None
     try:
         with httpx.stream("GET", url, timeout=_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as resp:
             resp.raise_for_status()
             total = 0
-            with dest.open("wb") as fh:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=f".{dest.name}.", suffix=".part", dir=dest.parent, delete=False,
+            ) as fh:
+                partial = Path(fh.name)
                 for chunk in resp.iter_bytes(1 << 20):
                     total += len(chunk)
                     if total > _MAX_DOWNLOAD_BYTES:
                         raise FeedError(f"{url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes")
                     fh.write(chunk)
-    except httpx.HTTPError as exc:
+            partial.replace(dest)
+    except (httpx.HTTPError, OSError) as exc:
         raise FeedError(f"{url}: download failed: {exc}") from exc
+    finally:
+        if partial is not None:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError as exc:
+                _logger.warning("gtfs download cleanup failed: %s", type(exc).__name__)
 
 
 def refresh(
@@ -719,12 +730,11 @@ def refresh(
                     zip_path, db_path, feed_kind=kind, allowlist=entries,
                     source_url=url, now=now,
                 )
-            except AllowlistMismatchError as exc:
-                allowlist_failed = True
-                errors.append(f"{kind}: {exc}")
-            except (GtfsImportError, OSError, sqlite3.Error) as exc:
-                errors.append(f"{kind}: {exc}")
-            _logger.warning("gtfs refresh: %s feed failed: %s", kind, errors[-1])
+            except Exception as exc:  # noqa: BLE001 - each feed attempt must fail open
+                if isinstance(exc, AllowlistMismatchError):
+                    allowlist_failed = True
+                errors.append(f"{kind}: {type(exc).__name__}")
+                _logger.warning("gtfs refresh: %s feed failed: %s", kind, type(exc).__name__)
     raise GtfsRefreshError(
         "gtfs refresh failed; previous index kept: " + " | ".join(errors),
         config_error=allowlist_failed,

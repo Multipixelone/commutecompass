@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from commutecompass.config import RealtimeConfig
@@ -597,6 +598,50 @@ class TestParseRoute:
         route = _parse_route(response)
         assert route is not None
         assert route.legs[0].line == "C"
+
+
+@pytest.mark.parametrize("timestamp", ["abc", float("nan"), 1e20])
+@pytest.mark.parametrize("mode", ["WALKING", "DRIVING", "BICYCLING"])
+def test_nontransit_invalid_timestamps_use_leg_schedule(timestamp: Any, mode: str) -> None:
+    response = {
+        "status": "OK", "routes": [{"legs": [{
+            "departure_time": {"value": 1000}, "arrival_time": {"value": 5000},
+            "duration": {"value": 4000}, "steps": [{
+                "travel_mode": mode, "duration": {"value": 300},
+                "departure_time": {"value": timestamp}, "arrival_time": {"value": timestamp},
+            }],
+        }]}],
+    }
+    route = _parse_route(response)
+    assert route is not None
+    step = route.legs[0]
+    assert step.depart_at == datetime.fromtimestamp(1000, NYC_TZ)
+    assert step.arrive_at == datetime.fromtimestamp(1300, NYC_TZ)
+    assert step.depart_at.tzinfo == step.arrive_at.tzinfo == NYC_TZ
+
+
+@pytest.mark.parametrize("malformed", [None, [], "invalid"])
+def test_parse_route_skips_malformed_shapes(malformed: Any) -> None:
+    valid_leg = {
+        "departure_time": {"value": 1000}, "arrival_time": {"value": 5000},
+        "duration": {"value": 4000}, "steps": [malformed, _walk_step()],
+    }
+    response = {"status": "OK", "routes": [malformed, {"legs": [malformed, valid_leg]}]}
+    route = _parse_route(response)
+    assert route is not None
+    assert len(route.legs) == 1
+    assert route.provider_route_index == 1
+    assert _parse_route({"status": "OK", "routes": [malformed]}) is None
+
+
+@pytest.mark.parametrize("body", [b"not json", b'{"status": "OK", "routes": [null]}'])
+def test_plan_route_rejects_malformed_response(
+    body: bytes, origin: Origin, destination: ResolvedLocation, arrival_time: datetime,
+) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+    client = httpx.Client(transport=transport)
+    with patch("commutecompass.routing.httpx.Client", return_value=client):
+        assert plan_route(origin, destination, arrival_time, api_key="test") is None
 
 
 # ─── Test plan_route ──────────────────────────────────────────────────────────
