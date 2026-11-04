@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import math
+
 import httpx
 from pydantic import BaseModel
 
@@ -59,25 +62,38 @@ def geocode(address: str, api_key: str) -> GeocodeResult | None:
     except httpx.RequestError as e:
         raise RuntimeError(f"Geocoding request failed for address '{address}': {e}") from e
 
-    data = response.json()
-    status = data.get("status", "")
+    try:
+        data = response.json()
+        status = data.get("status", "")
 
-    if status == "ZERO_RESULTS":
+        if status == "ZERO_RESULTS":
+            return None
+
+        if status != "OK":
+            # Preserve explicit API failure statuses for callers.
+            raise RuntimeError(f"Google Geocoding API returned status '{status}' for address '{address}'")
+
+        results = data.get("results", [])
+        if not results:
+            return None
+
+        top = results[0]
+        location = top["geometry"]["location"]
+        lat, lon = location["lat"], location["lng"]
+        for coordinate, limit in ((lat, 90), (lon, 180)):
+            if (
+                isinstance(coordinate, bool)
+                or not isinstance(coordinate, (int, float))
+                or not math.isfinite(coordinate)
+                or not -limit <= coordinate <= limit
+            ):
+                raise ValueError("invalid coordinate")
+        return GeocodeResult(
+            formatted_address=top.get("formatted_address", ""),
+            lat=lat,
+            lon=lon,
+            place_id=top.get("place_id"),
+        )
+    except (ValueError, TypeError, KeyError, AttributeError):
+        logging.getLogger(__name__).warning("Invalid geocoding response")
         return None
-
-    if status != "OK":
-        # Expose non-OK, non-ZERO_RESULTS statuses as runtime errors
-        raise RuntimeError(f"Google Geocoding API returned status '{status}' for address '{address}'")
-
-    results = data.get("results", [])
-    if not results:
-        return None
-
-    top = results[0]
-    location = top.get("geometry", {}).get("location", {})
-    return GeocodeResult(
-        formatted_address=top.get("formatted_address", ""),
-        lat=location.get("lat", 0.0),
-        lon=location.get("lng", 0.0),
-        place_id=top.get("place_id"),
-    )
