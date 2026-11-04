@@ -49,11 +49,16 @@ class JobLock:
     def release(self) -> None:
         if self._fd is None:
             return
+        fd, self._fd = self._fd, None
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            _logger.warning("Could not unlock job %s: %s", self.job_name, exc)
         finally:
-            os.close(self._fd)
-            self._fd = None
+            try:
+                os.close(fd)
+            except OSError as exc:
+                _logger.warning("Could not close job lock for %s: %s", self.job_name, exc)
 
     def __enter__(self) -> Self:
         self.acquire()
