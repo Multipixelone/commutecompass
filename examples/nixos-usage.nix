@@ -19,7 +19,7 @@ in {
 
     openclaw = {
       package = openclaw;
-      target = "-987654321";
+      target = "-987654321"; # synthetic placeholder
     };
   };
 }
