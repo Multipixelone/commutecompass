@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import tempfile
 import tomllib
 from datetime import datetime
 from datetime import time as dt_time
@@ -656,6 +658,22 @@ def _walk_or_none(doc: Any, path_parts: list[str]) -> Any:
     return node
 
 
+def _atomic_write_config(path: Path, content: str) -> None:
+    """Replace a config only after the complete, permission-preserving write."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     """Surgically update a single allowlisted field in ``toml_path``.
 
@@ -693,8 +711,7 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     except ValueError as exc:
         raise ConfigSetError(f"Invalid config: {exc}") from exc
 
-    with open(toml_path, "w", encoding="utf-8") as fh:
-        fh.write(tomlkit.dumps(doc))
+    _atomic_write_config(toml_path, tomlkit.dumps(doc))
 
     return coerced
 
@@ -724,8 +741,7 @@ def delete_config_field(toml_path: Path, dotted_key: str) -> bool:
         return False
     del node[leaf]
 
-    with open(toml_path, "w", encoding="utf-8") as fh:
-        fh.write(tomlkit.dumps(doc))
+    _atomic_write_config(toml_path, tomlkit.dumps(doc))
     return True
 
 
