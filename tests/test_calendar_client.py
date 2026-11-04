@@ -60,6 +60,25 @@ def calendar_specs() -> list[CalendarSpec]:
 # Token persistence tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("content", ["not JSON private-token", "[]", "null", "{}"])
+def test_corrupt_token_raises_safe_auth_error(
+    token_path: Path, client_secret_json: str, content: str,
+) -> None:
+    token_path.write_text(content)
+    client = CalendarClient(token_path=token_path, client_secret_json=client_secret_json)
+    with pytest.raises(AuthError, match="commutecompass oauth") as exc:
+        client._load_credentials()
+    assert "private-token" not in str(exc.value)
+    assert content not in str(exc.value)
+
+
+def test_unreadable_token_raises_auth_error(token_path: Path, client_secret_json: str) -> None:
+    token_path.mkdir()
+    client = CalendarClient(token_path=token_path, client_secret_json=client_secret_json)
+    with pytest.raises(AuthError, match="commutecompass oauth"):
+        client._load_credentials()
+
+
 def test_token_not_found_raises_auth_error(client_secret_json: str, token_path: Path) -> None:
     """Loading credentials when token file is missing raises AuthError."""
     client = CalendarClient(client_secret_json, token_path)

@@ -68,11 +68,18 @@ class CalendarClient:
                 "Run `commutecompass oauth` first."
             )
 
-        creds_data = json.loads(self.token_path.read_text())
-        creds = cast(
-            Credentials,
-            Credentials.from_authorized_user_info(creds_data, SCOPES),  # type: ignore[no-untyped-call]
-        )
+        try:
+            creds_data = json.loads(self.token_path.read_text())
+            if not isinstance(creds_data, dict):
+                raise TypeError("token must be a JSON object")
+            creds = cast(
+                Credentials,
+                Credentials.from_authorized_user_info(creds_data, SCOPES),  # type: ignore[no-untyped-call]
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise AuthError(
+                "Token file is unreadable or invalid. Please re-run `commutecompass oauth`."
+            ) from exc
 
         if creds.expired:
             try:
