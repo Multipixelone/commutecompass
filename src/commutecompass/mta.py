@@ -206,7 +206,7 @@ def _extract_text(text_proto: Any) -> str:
 
 def _parse_timestamp(seconds: int) -> datetime | None:
     """Convert GTFS-RT Unix timestamp to aware NYC datetime."""
-    if seconds == 0:
+    if seconds <= 0:
         return None
     try:
         dt = datetime.fromtimestamp(seconds, tz=NYC_TZ)

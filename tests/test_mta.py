@@ -17,12 +17,19 @@ from commutecompass.mta import (
     _fetch_feed,
     _is_location_specific_alert,
     _parse_alert,
+    _parse_timestamp,
     _systems_lines_overlap,
     _time_overlaps,
     alerts_affecting_route,
     fetch_alerts,
     select_actionable_alerts,
 )
+
+
+def test_negative_alert_timestamp_is_rejected() -> None:
+    assert _parse_timestamp(-1) is None
+    assert _parse_timestamp(0) is None
+    assert _parse_timestamp(1) == datetime.fromtimestamp(1, NYC_TZ)
 
 
 def test_inverted_alert_period_is_discarded() -> None:
