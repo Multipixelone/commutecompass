@@ -43,7 +43,14 @@ let
   config = evaluate {};
   services = config.systemd.services;
   timers = config.systemd.timers;
+  dataDirValid = dataDir: lib.all (item: item.assertion)
+    (evaluate { services.commutecompass.dataDir = dataDir; }).assertions;
 in
+assert lib.all (path: !(dataDirValid path)) [
+  "/var/lib/../etc" "/var/lib/." "/var/lib/.." "/var/lib//commutecompass"
+  "/var/lib/commutecompass/" "/var/lib/nested/state" "/var/lib/" "/etc/commutecompass"
+];
+assert dataDirValid "/var/lib/commutecompass-test_1.0";
 assert lib.assertMsg (lib.all (item: item.assertion) config.assertions)
   (lib.concatMapStringsSep "\n" (item: item.message)
     (builtins.filter (item: !item.assertion) config.assertions));

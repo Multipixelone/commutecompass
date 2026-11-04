@@ -293,8 +293,10 @@ in {
       type = lib.types.path;
       default = "/var/lib/commutecompass";
       description = ''
-        State directory. Must live under /var/lib/ so systemd's
-        StateDirectory= can manage ownership and permissions.
+        State directory, exactly /var/lib/<name> so systemd's StateDirectory=
+        can manage ownership and permissions. Name may contain only letters,
+        digits, '.', '_' and '-', and must not be '.' or '..'. No nested
+        directories, repeated slashes or trailing slash are allowed.
       '';
     };
 
@@ -323,8 +325,9 @@ in {
 
   config = lib.mkIf cfg.enable {
     assertions = [{
-      assertion = lib.hasPrefix "/var/lib/" cfg.dataDir;
-      message = "services.commutecompass.dataDir must be under /var/lib/ (got: ${cfg.dataDir})";
+      assertion = builtins.match "^/var/lib/[A-Za-z0-9._-]+$" cfg.dataDir != null
+        && !(builtins.elem (baseNameOf cfg.dataDir) [ "." ".." ]);
+      message = "services.commutecompass.dataDir must be /var/lib/<name> with only letters, digits, '.', '_' or '-' in name (not '.' or '..'; got: ${cfg.dataDir})";
     }];
 
     # Expose the CLI system-wide so admins can run `commutecompass morning`,
