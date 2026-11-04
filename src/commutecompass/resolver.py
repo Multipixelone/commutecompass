@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -83,7 +84,9 @@ def resolve(
     if not raw or not raw.strip():
         return None
 
+    original_raw = raw
     raw = raw.strip()
+    cache_key = " ".join(unicodedata.normalize("NFKC", raw).casefold().split())
     if _is_placeholder(raw):
         log.debug("resolver: non-actionable placeholder, skipping")
         return None
@@ -102,7 +105,11 @@ def resolve(
             )
 
     # ── Step 2: cache hit ───────────────────────────────────────────────────────
-    cached = store.get_geocode(raw)
+    cached = store.get_geocode(cache_key)
+    if cached is None and original_raw != cache_key:
+        cached = store.get_geocode(original_raw)
+    if cached is None and raw not in (cache_key, original_raw):
+        cached = store.get_geocode(raw)
     if cached is not None:
         log.debug("resolver: cache hit for %r", raw)
         return cached
@@ -119,7 +126,7 @@ def resolve(
             lon=venue_resolved.lon,
             source="known_venues",
         )
-        store.cache_geocode(raw, result)
+        store.cache_geocode(cache_key, result)
         return result
 
     # ── Step 4: address heuristic → geocode ─────────────────────────────────────
@@ -134,7 +141,7 @@ def resolve(
                 lon=geo_result.lon,
                 source="geocode",
             )
-            store.cache_geocode(raw, result)
+            store.cache_geocode(cache_key, result)
             return result
 
     # ── Step 5: LLM resolution ─────────────────────────────────────────────────
@@ -143,7 +150,7 @@ def resolve(
         if llm_resolved.kind == "station":
             # Stations don't need geocoding — cache as-is and return
             log.debug("resolver: LLM station match for %r", raw)
-            store.cache_geocode(raw, llm_resolved)
+            store.cache_geocode(cache_key, llm_resolved)
             return llm_resolved
 
         if llm_resolved.kind == "address":
@@ -158,7 +165,7 @@ def resolve(
                     lon=geo_result.lon,
                     source="llm",
                 )
-                store.cache_geocode(raw, result)
+                store.cache_geocode(cache_key, result)
                 return result
 
     # ── Step 6: unresolved ───────────────────────────────────────────────────────

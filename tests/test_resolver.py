@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -21,6 +22,30 @@ def test_placeholder_precedes_all_resolution(
     mock_store.get_geocode.assert_not_called()
     mock_geocoder.assert_not_called()
     mock_llm.resolve_location.assert_not_called()
+
+
+@pytest.mark.parametrize("raw", ["  Joe's  Pub ", "Ｊｏｅ's Pub", "JOE'S PUB"])
+def test_canonical_cache_key(
+    raw: str, tmp_path: Path, mock_geocoder: MagicMock, mock_llm: MagicMock,
+) -> None:
+    from commutecompass.store import Store
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    location = ResolvedLocation(kind="station", value="Grand Central Terminal, NY", source="llm")
+    mock_llm.resolve_location.return_value = location
+    assert resolve(raw, store=store, venues=VenueRegistry([]), geocoder=mock_geocoder, llm=mock_llm) == location
+    mock_llm.resolve_location.reset_mock()
+    cached = resolve("joe's pub", store=store, venues=VenueRegistry([]), geocoder=mock_geocoder, llm=mock_llm)
+    assert cached is not None and cached.value == location.value
+    mock_llm.resolve_location.assert_not_called()
+
+
+def test_legacy_raw_cache_key_fallback(mock_store: MagicMock, mock_geocoder: MagicMock, mock_llm: MagicMock) -> None:
+    cached = ResolvedLocation(kind="station", value="Grand Central", source="cache")
+    mock_store.get_geocode.side_effect = [None, cached]
+    assert resolve("  Legacy Venue  ", store=mock_store, venues=VenueRegistry([]), geocoder=mock_geocoder, llm=mock_llm) == cached
+    assert mock_store.get_geocode.call_args_list == [call("legacy venue"), call("  Legacy Venue  ")]
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────────
@@ -212,7 +237,7 @@ class TestResolve:
         )
 
         assert result is cached_location
-        mock_store.get_geocode.assert_called_once_with("Apple HQ")
+        mock_store.get_geocode.assert_called_once_with("apple hq")
         # Should NOT call geocoder or LLM
         mock_geocoder.assert_not_called()
         mock_llm.resolve_location.assert_not_called()
@@ -529,7 +554,7 @@ class TestHaZoneMatch:
             ha_zones=zones,
         )
         # Falls through to cache check and downstream — no zone short-circuit.
-        mock_store.get_geocode.assert_called_once()
+        assert mock_store.get_geocode.call_args_list == [call("office tower"), call("Office Tower")]
         assert result is None or result.source != "ha_zone"
 
     def test_no_zones_arg_keeps_existing_behavior(
