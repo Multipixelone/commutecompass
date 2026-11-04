@@ -248,7 +248,7 @@ def format_alerts_block(alerts: list[Alert]) -> str:
         marker = "🔴" if alert.severity == "SEVERE" else "⚠️"
         lines.append(f"{marker} {escape_md(_sanitize_text(alert.header))}")
         if alert.affected_routes:
-            routes_str = ", ".join(sorted(alert.affected_routes))
+            routes_str = ", ".join(_sanitize_text(route) for route in sorted(alert.affected_routes))
             lines.append(f"  Routes: {escape_md(routes_str)}")
     return "\n".join(lines)
 

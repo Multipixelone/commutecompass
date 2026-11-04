@@ -27,6 +27,21 @@ from commutecompass.models import (
 )
 
 
+def test_alert_routes_are_sanitized() -> None:
+    from commutecompass.format import format_alerts_block
+
+    alert = Alert(
+        id="untrusted", header="Delays", description="", severity="WARNING",
+        affected_routes={"C\u202e\x01_*", "A" + "x" * 250},
+        affected_systems=set(), active_periods=[],
+    )
+    result = format_alerts_block([alert])
+    assert "\u202e" not in result
+    assert "\x01" not in result
+    assert "C\\_\\*" in result
+    assert "x" * 201 not in result
+
+
 def make_nyc(dt: datetime) -> datetime:
     """Ensure a datetime is in America/New_York timezone."""
     if dt.tzinfo is None:
