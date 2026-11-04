@@ -511,7 +511,14 @@ def load_config(toml_path: Path) -> Config:
 
 # Substrings that mark a field as a secret — checked anywhere in the field
 # name. Covers `*_token`, `*_secret_*`, `*_key`, `oauth_*`, etc.
-_REDACT_TOKENS = ("token", "secret", "key", "oauth")
+_SECRET_FIELD_PATHS = frozenset({
+    "google_maps_api_key",
+    "google_oauth_client_secret_json",
+    "telegram_bot_token",
+    "opencode_go_token",
+    "home_assistant_token",
+})
+_REDACT_TOKENS = ("token", "secret", "key", "oauth", "password", "credential", "bearer")
 _REDACT_PLACEHOLDER = "***REDACTED***"
 
 
@@ -520,7 +527,7 @@ def _is_secret_key(leaf_key: str) -> bool:
     return any(tok in name for tok in _REDACT_TOKENS)
 
 
-def redact_for_display(data: Any) -> Any:
+def redact_for_display(data: Any, *, _path: str = "") -> Any:
     """Recursively replace secret-looking values with a placeholder.
 
     Used by ``commutecompass config show`` so the LLM (or anyone reading
@@ -528,11 +535,16 @@ def redact_for_display(data: Any) -> Any:
     """
     if isinstance(data, dict):
         return {
-            k: (_REDACT_PLACEHOLDER if _is_secret_key(str(k)) and v else redact_for_display(v))
+            k: (
+                _REDACT_PLACEHOLDER
+                if v and (path in _SECRET_FIELD_PATHS or _is_secret_key(str(k)))
+                else redact_for_display(v, _path=path)
+            )
             for k, v in data.items()
+            for path in [f"{_path}.{k}" if _path else str(k)]
         }
     if isinstance(data, list):
-        return [redact_for_display(item) for item in data]
+        return [redact_for_display(item, _path=_path) for item in data]
     return data
 
 

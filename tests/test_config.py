@@ -658,6 +658,37 @@ def test_update_validates_entire_document(minimal_toml: Path) -> None:
     assert minimal_toml.read_bytes() == before
 
 
+@pytest.mark.parametrize("field", [
+    "google_maps_api_key", "google_oauth_client_secret_json", "telegram_bot_token",
+    "opencode_go_token", "home_assistant_token",
+])
+def test_all_config_secrets_redacted(minimal_toml: Path, field: str) -> None:
+    import tomllib
+
+    assert field in Config.model_fields
+    config = Config.model_validate(tomllib.loads(minimal_toml.read_text())).model_dump()
+    config[field] = "sensitive-value"
+    assert redact_for_display(config)[field] == "***REDACTED***"
+
+
+@pytest.mark.parametrize("field", ["password", "credential", "bearer"])
+def test_additional_secret_keywords_redacted(field: str) -> None:
+    assert redact_for_display({"nested": [{field: "sensitive-value"}]}) == {
+        "nested": [{field: "***REDACTED***"}]
+    }
+
+
+def test_explicit_secret_paths_do_not_depend_on_heuristics(monkeypatch: pytest.MonkeyPatch) -> None:
+    import commutecompass.config as config_module
+
+    monkeypatch.setattr(config_module, "_REDACT_TOKENS", ())
+    secrets = {field: "sensitive-value" for field in (
+        "google_maps_api_key", "google_oauth_client_secret_json", "telegram_bot_token",
+        "opencode_go_token", "home_assistant_token",
+    )}
+    assert set(redact_for_display(secrets).values()) == {"***REDACTED***"}
+
+
 class TestUpdateConfigField:
     def _write_toml(self, tmp_path: Path) -> Path:
         p = minimal_toml.__wrapped__(tmp_path)
