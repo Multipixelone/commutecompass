@@ -361,9 +361,15 @@ def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
     provider_leg["arrival_time"]["value"] = int((now + timedelta(minutes=53)).timestamp())
 
     def parse_at(observed: datetime) -> Route:
-        with patch("commutecompass.routing.datetime", wraps=datetime) as clock:
-            clock.now.return_value = observed
-            route = _parse_route(sample)
+        from copy import deepcopy
+
+        payload = deepcopy(sample)
+        # Walking provider times are unscheduled placeholders. Vary that data,
+        # not the wall clock: missing times are now derived deterministically.
+        for step in payload["routes"][0]["legs"][0]["steps"]:
+            if step["travel_mode"] == "WALKING":
+                step["departure_time"] = {"value": int(observed.timestamp())}
+        route = _parse_route(payload)
         assert route is not None
         return route
 
