@@ -27,6 +27,21 @@ from commutecompass.models import (
 )
 
 
+def test_alert_routes_are_sanitized() -> None:
+    from commutecompass.format import format_alerts_block
+
+    alert = Alert(
+        id="untrusted", header="Delays", description="", severity="WARNING",
+        affected_routes={"C\u202e\x01_*", "A" + "x" * 250},
+        affected_systems=set(), active_periods=[],
+    )
+    result = format_alerts_block([alert])
+    assert "\u202e" not in result
+    assert "\x01" not in result
+    assert "C\\_\\*" in result
+    assert "x" * 201 not in result
+
+
 def make_nyc(dt: datetime) -> datetime:
     """Ensure a datetime is in America/New_York timezone."""
     if dt.tzinfo is None:
@@ -91,6 +106,21 @@ def make_plan(event: Event, route: Route | None = None) -> Plan:
         prep_at=prep_at,
         error=None,
     )
+
+
+@pytest.mark.parametrize("system", ["MTA Subway", "LIRR", "Bus\u202e\x01_*"])
+def test_leave_route_details_are_sanitized(system: str) -> None:
+    leg = TransitLeg(
+        mode="TRANSIT", system=system, line="C\u202e\x01_*" + "x" * 250,
+        headsign="Destination\u202e\x01", depart_at=datetime(2026, 5, 12, 8, 15, tzinfo=UTC),
+        arrive_at=datetime(2026, 5, 12, 9, 0, tzinfo=UTC),
+        duration_seconds=2700, summary="Transit",
+    )
+    result = format_leave_ping(make_plan(make_event(), make_route([leg])))
+    assert "\u202e" not in result
+    assert "\x01" not in result
+    assert r"C\_\*" in result
+    assert "x" * 201 not in result
 
 
 class TestEscapeMd:

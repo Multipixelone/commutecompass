@@ -638,21 +638,79 @@ class TestRenderConfig:
 # ─────────── update_config_field ─────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("scheduling.poll_interval_seconds", "0"),
+    ("prep.prep_minutes", "-1"),
+    ("prep.prep_minutes", "1441"),
+])
+def test_invalid_update_leaves_document_unchanged(minimal_toml: Path, key: str, value: str) -> None:
+    before = minimal_toml.read_bytes()
+    with pytest.raises(ConfigSetError, match="Invalid config"):
+        update_config_field(minimal_toml, key, value)
+    assert minimal_toml.read_bytes() == before
+
+
+def test_update_validates_entire_document(minimal_toml: Path) -> None:
+    minimal_toml.write_text(minimal_toml.read_text().replace('lat = 40.6950', 'lat = 999'))
+    before = minimal_toml.read_bytes()
+    with pytest.raises(ConfigSetError, match="Invalid config"):
+        update_config_field(minimal_toml, "prep.prep_minutes", "30")
+    assert minimal_toml.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", [
+    "google_maps_api_key", "google_oauth_client_secret_json", "telegram_bot_token",
+    "opencode_go_token", "home_assistant_token",
+])
+def test_all_config_secrets_redacted(minimal_toml: Path, field: str) -> None:
+    import tomllib
+
+    assert field in Config.model_fields
+    config = Config.model_validate(tomllib.loads(minimal_toml.read_text())).model_dump()
+    config[field] = "sensitive-value"
+    assert redact_for_display(config)[field] == "***REDACTED***"
+
+
+@pytest.mark.parametrize("field", ["password", "credential", "bearer"])
+def test_additional_secret_keywords_redacted(field: str) -> None:
+    assert redact_for_display({"nested": [{field: "sensitive-value"}]}) == {
+        "nested": [{field: "***REDACTED***"}]
+    }
+
+
+def test_explicit_secret_paths_do_not_depend_on_heuristics(monkeypatch: pytest.MonkeyPatch) -> None:
+    import commutecompass.config as config_module
+
+    monkeypatch.setattr(config_module, "_REDACT_TOKENS", ())
+    secrets = {field: "sensitive-value" for field in (
+        "google_maps_api_key", "google_oauth_client_secret_json", "telegram_bot_token",
+        "opencode_go_token", "home_assistant_token",
+    )}
+    assert set(redact_for_display(secrets).values()) == {"***REDACTED***"}
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("scheduling.morning_run_time", "07:15"),
+    ("scheduling.poll_interval_seconds", "30"),
+])
+def test_externally_scheduled_updates_warn(minimal_toml: Path, key: str, value: str) -> None:
+    from click.testing import CliRunner
+
+    from commutecompass.cli import cli
+
+    result = CliRunner().invoke(cli, ["--config", str(minimal_toml), "config", "set", key, value])
+    assert result.exit_code == 0, result.output
+    assert "not read at runtime" in result.output
+    assert "systemd timer" in result.output
+
+
 class TestUpdateConfigField:
     def _write_toml(self, tmp_path: Path) -> Path:
-        p = tmp_path / "config.toml"
-        p.write_text(
-            """\
-# Top-level comment that must survive
-[prep]
-prep_minutes = 20  # inline comment
-safety_buffer_minutes = 5
-
-[scheduling]
-morning_run_time = "06:00"
-poll_interval_seconds = 60
-"""
-        )
+        p = minimal_toml.__wrapped__(tmp_path)
+        original = p.read_text()
+        p.write_text("# Top-level comment that must survive\n" + original.replace(
+            "prep_minutes = 20", "prep_minutes = 20  # inline comment"
+        ))
         return p
 
     def test_allowlist_unknown_key_rejected(self, tmp_path: Path) -> None:
@@ -862,8 +920,8 @@ class TestExpandedAllowlist:
     """The HA toggle keys added for OpenClaw chat tweaks must round-trip."""
 
     def _write(self, tmp_path: Path) -> Path:
-        p = tmp_path / "config.toml"
-        p.write_text("[home_assistant]\n")
+        p = minimal_toml.__wrapped__(tmp_path)
+        p.write_text(p.read_text() + "\n[home_assistant]\n")
         return p
 
     def test_ha_replan_window_int(self, tmp_path: Path) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import tempfile
 import tomllib
 from datetime import datetime
 from datetime import time as dt_time
@@ -509,7 +511,14 @@ def load_config(toml_path: Path) -> Config:
 
 # Substrings that mark a field as a secret — checked anywhere in the field
 # name. Covers `*_token`, `*_secret_*`, `*_key`, `oauth_*`, etc.
-_REDACT_TOKENS = ("token", "secret", "key", "oauth")
+_SECRET_FIELD_PATHS = frozenset({
+    "google_maps_api_key",
+    "google_oauth_client_secret_json",
+    "telegram_bot_token",
+    "opencode_go_token",
+    "home_assistant_token",
+})
+_REDACT_TOKENS = ("token", "secret", "key", "oauth", "password", "credential", "bearer")
 _REDACT_PLACEHOLDER = "***REDACTED***"
 
 
@@ -518,7 +527,7 @@ def _is_secret_key(leaf_key: str) -> bool:
     return any(tok in name for tok in _REDACT_TOKENS)
 
 
-def redact_for_display(data: Any) -> Any:
+def redact_for_display(data: Any, *, _path: str = "") -> Any:
     """Recursively replace secret-looking values with a placeholder.
 
     Used by ``commutecompass config show`` so the LLM (or anyone reading
@@ -526,11 +535,16 @@ def redact_for_display(data: Any) -> Any:
     """
     if isinstance(data, dict):
         return {
-            k: (_REDACT_PLACEHOLDER if _is_secret_key(str(k)) and v else redact_for_display(v))
+            k: (
+                _REDACT_PLACEHOLDER
+                if v and (path in _SECRET_FIELD_PATHS or _is_secret_key(str(k)))
+                else redact_for_display(v, _path=path)
+            )
             for k, v in data.items()
+            for path in [f"{_path}.{k}" if _path else str(k)]
         }
     if isinstance(data, list):
-        return [redact_for_display(item) for item in data]
+        return [redact_for_display(item, _path=_path) for item in data]
     return data
 
 
@@ -656,6 +670,22 @@ def _walk_or_none(doc: Any, path_parts: list[str]) -> Any:
     return node
 
 
+def _atomic_write_config(path: Path, content: str) -> None:
+    """Replace a config only after the complete, permission-preserving write."""
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     """Surgically update a single allowlisted field in ``toml_path``.
 
@@ -686,8 +716,14 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     node = _walk_or_create(doc, path_parts)
     node[leaf] = coerced
 
-    with open(toml_path, "w", encoding="utf-8") as fh:
-        fh.write(tomlkit.dumps(doc))
+    # Validate the entire edited document before touching disk. Credentials are
+    # environment-only and default empty here; editing does not require them.
+    try:
+        Config.model_validate(doc.unwrap())
+    except ValueError as exc:
+        raise ConfigSetError(f"Invalid config: {exc}") from exc
+
+    _atomic_write_config(toml_path, tomlkit.dumps(doc))
 
     return coerced
 
@@ -717,8 +753,7 @@ def delete_config_field(toml_path: Path, dotted_key: str) -> bool:
         return False
     del node[leaf]
 
-    with open(toml_path, "w", encoding="utf-8") as fh:
-        fh.write(tomlkit.dumps(doc))
+    _atomic_write_config(toml_path, tomlkit.dumps(doc))
     return True
 
 

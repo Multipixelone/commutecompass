@@ -5,12 +5,16 @@ else (paths, credentials, calendar IDs, MTA URLs, LLM endpoints) is
 intentionally read-only via the skill and must be changed by editing
 `config.toml` directly on the host.
 
+The two scheduling cadence keys remain editable for compatibility, but are not
+read at runtime. `config set` prints a warning: change the systemd timer in the
+Nix module (or the cron entry) as well to change when the job actually runs.
+
 | Key                                       | Type        | Notes                                           |
 |-------------------------------------------|-------------|-------------------------------------------------|
 | `prep.prep_minutes`                       | int (min)   | Default prep buffer for every event             |
 | `prep.safety_buffer_minutes`              | int (min)   | Extra slack added on top of route duration      |
-| `scheduling.morning_run_time`             | "HH:MM"     | When the morning digest fires (NYC local time)  |
-| `scheduling.poll_interval_seconds`        | int (sec)   | Poll cadence; should match the cron interval    |
+| `scheduling.morning_run_time`             | "HH:MM"     | Advisory; update the Nix/systemd timer too      |
+| `scheduling.poll_interval_seconds`        | int (sec)   | Advisory; update the Nix/systemd timer too      |
 | `scheduling.quiet_hours_start`            | "HH:MM"     | Begin suppressing prep/alert pings              |
 | `scheduling.quiet_hours_end`              | "HH:MM"     | End of quiet-hours window                       |
 | `notify.mode`                             | enum        | `"stdout"` or `"telegram"`                      |
