@@ -478,6 +478,41 @@ class TestOauthCommand:
         assert result.exit_code == 0
 
 
+@pytest.mark.parametrize("operation", ["pending_pings", "claim_ping_entry"])
+def test_poll_database_failure_exits_transient_without_heartbeat(
+    runner: CliRunner, tmp_path: Path, operation: str,
+) -> None:
+    import sqlite3
+
+    from commutecompass.models import PingEntry
+
+    cfg = _fake_config(tmp_path)
+    cfg.monitoring.heartbeat_url = "https://example.com/heartbeat"
+    store = Store(cfg.paths.db_path)
+    store.init_schema()
+    now = datetime.now(NYC_TZ)
+    previous_success = now - timedelta(minutes=5)
+    store.record_job_success("poll", previous_success)
+    store.schedule_ping(PingEntry(
+        id="due", event_id="event", kind="leave", fire_at=now - timedelta(seconds=1),
+        message="Time to leave",
+    ))
+    notifier = mock.MagicMock()
+    with mock.patch("commutecompass.config.load_config", return_value=cfg), \
+         mock.patch.object(Store, operation, side_effect=sqlite3.OperationalError("database is locked")), \
+         mock.patch("commutecompass.notify.build_notifier", return_value=notifier), \
+         mock.patch("commutecompass.monitoring.ping_heartbeat") as heartbeat:
+        result = runner.invoke(cli, ["poll"])
+
+    assert result.exit_code == 75, result.output
+    assert "database is locked" in result.output
+    assert "Traceback" not in result.output
+    assert store.get_job_heartbeat("poll") == previous_success
+    heartbeat.assert_not_called()
+    notifier.send.assert_not_called()
+    assert store.get_pending_ping("event", "leave") is not None
+
+
 # ─────────── digest-preview ──────────────────────────────────────────────────
 
 

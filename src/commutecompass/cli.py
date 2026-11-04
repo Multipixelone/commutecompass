@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -79,6 +80,9 @@ def _run_with_job_lock(cfg: Config, job_name: str, fn: Callable[[], None]) -> No
             fn()
     except LockHeld as exc:
         click.echo(f"{job_name}: {exc}", err=True)
+        sys.exit(EXIT_TRANSIENT)
+    except sqlite3.OperationalError as exc:
+        click.echo(f"{job_name}: database operation failed: {exc}", err=True)
         sys.exit(EXIT_TRANSIENT)
 
 

@@ -215,5 +215,5 @@ failure modes without parsing log output:
 | 64   | Usage / bad arguments (Click already uses 2; we use 64 for `config set` rejects). |
 | 65   | Subject not found (no plan / event / location row).        |
 | 66   | Data could not be resolved (no current location, no route, prep/leave missing). |
-| 75   | Transient failure: job lock held by another process, or an external API/feed is down (e.g. `gtfs-refresh` could fetch neither the supplemented nor the regular subway GTFS); retry next cycle. |
+| 75   | Transient failure: job lock held by another process, a morning/poll SQLite operation failed, or an external API/feed is down (e.g. `gtfs-refresh` could fetch neither the supplemented nor the regular subway GTFS); retry next cycle. |
 | 78   | Config error (missing env var, malformed TOML; for `gtfs-refresh`, the vendored stop allowlist does not match the feed — needs a reviewed allowlist change, do not retry). |
