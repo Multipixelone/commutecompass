@@ -38,11 +38,13 @@ def test_ping_heartbeat_swallows_failure() -> None:
         assert ping_heartbeat("https://hc-ping.example/abc") is False
 
 
+@pytest.mark.parametrize("application_level", [logging.NOTSET, logging.INFO])
 @pytest.mark.parametrize("outcome", [200, 403, 503, "network", "retry_success"])
 def test_heartbeat_transport_log_privacy(
-    outcome: int | str, caplog: pytest.LogCaptureFixture,
+    outcome: int | str, application_level: int, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Real httpx URL logging and separately injected httpcore diagnostics."""
+    """Real transport logging, under both inherited and CLI-configured levels."""
+    caplog.set_level(application_level, logger="commutecompass")
     url = "https://heartbeat.example/SYNTHETIC_HEARTBEAT_TOKEN"
     requests: list[httpx.Request] = []
 
@@ -60,7 +62,11 @@ def test_heartbeat_transport_log_privacy(
         return httpx.Response(status, text="SYNTHETIC_HEARTBEAT_BODY")
 
     real_client = httpx.Client
-    with caplog.at_level(logging.DEBUG), patch(
+    # CLI invocations set the application parent to INFO. Root DEBUG alone
+    # cannot enable this child's failure diagnostic; request it explicitly.
+    with caplog.at_level(logging.DEBUG), caplog.at_level(
+        logging.DEBUG, logger="commutecompass.monitoring",
+    ), patch(
         "commutecompass.monitoring.httpx.Client",
         side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(transport), **kwargs),
     ), patch("commutecompass.retry.time.sleep"):
