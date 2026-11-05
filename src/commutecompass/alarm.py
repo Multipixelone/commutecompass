@@ -138,7 +138,11 @@ def wake_for_day(
     first: Plan | None = None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
     now_utc = now.astimezone(UTC) if now is not None else None
+    day_end, _ = logical_day_bounds_nyc(day_start + timedelta(hours=36))
     for p in plans:
+        if not (day_start.astimezone(UTC) <= p.event.start.astimezone(UTC)
+                < day_end.astimezone(UTC)):
+            continue
         prep = p.prep_at
         if p.error is not None or prep is None:
             if (
