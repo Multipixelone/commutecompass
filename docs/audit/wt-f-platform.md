@@ -15,10 +15,19 @@ and timer behavior. CI at `.github/workflows/ci.yml:54-58` invokes flake check a
 builds the default package.
 
 The audit's local `nix flake check --print-build-logs` exited 0, evaluated these
-attributes, but reported **running 0 flake checks**. It therefore does not demonstrate
-that their build phases ran. Evaluation itself can force module assertions; do not
-claim those assertions were skipped or that hosted CI necessarily behaves like the
-local machine. The separate default package build succeeded.
+attributes, but reported **running 0 flake checks**. It does not demonstrate fresh
+build-phase execution. Follow-up inspection of installed Nix 2.35.3's
+[`flake.cc`](https://github.com/NixOS/nix/blob/2.35.3/src/nix/flake.cc#L799-L830)
+explains that this count includes only `queryMissing().willBuild`: valid or
+substitutable checks need not appear. All three exact baseline outputs were valid
+locally at follow-up, without establishing whether they were already present or
+substitutable at baseline time. No selection defect is confirmed.
+
+Module and Renovate assertions execute during evaluation; the module's synthetic
+wrapper commands execute only in its build phase. Do not conflate those evidence
+levels or infer hosted CI behavior. The separate default package build succeeded,
+but its derivation differs from the evaluation log's package derivation; it does
+not prove identical source inputs or pytest execution.
 
 ### Investigation only
 

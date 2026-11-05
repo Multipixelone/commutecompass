@@ -18,7 +18,7 @@ turned into implementation orders. This is a scoped audit, not a security guaran
 | C — routing/realtime/weather | Directions, GTFS bridge/index, MTA, realtime, weather | Overall endpoint and weather numeric parsing |
 | D — interface/config/notification | CLI, TOML/env, Telegram/stdout, OpenClaw skill/glue | Config exit classification; Telegram logging/acknowledgement |
 | E — alarm/HA | Wake computation, daemon, publication, presence, tomorrow | Optional callback isolation; geographic input validation |
-| F — platform | Nix module/flake, CI, packaging, examples, dependency policy | Check-execution evidence gap; no confirmed production defect |
+| F — platform | Nix module/flake, CI, packaging, examples, dependency policy | Cache-aware zero-build count explained; no confirmed production defect |
 
 ## Confirmed backlog
 
@@ -42,8 +42,10 @@ user incident or provider failure was observed. Each brief states its evidence l
 | ALM-9 | P3 | Unexpected optional publisher/heartbeat callback exceptions escape daemon iteration | [WT-E](wt-e-alarm.md) |
 | ALM-10 | P3 | Non-finite/out-of-range HA geometry and invalid accuracy/radius are accepted | [WT-H](wt-h-ha-validation.md) |
 
-**Not confirmed implementation work:** [WT-F](wt-f-platform.md) investigates PLT-8's
-zero-check-derivation result and optional fork-PR Attic behavior. Raw LLM input size
+**Not confirmed implementation work:** [WT-F](wt-f-platform.md) explains PLT-8's
+zero-build count as cache-aware Nix reporting, not a check-selection defect. Historical
+local-versus-substituter availability and optional fork-PR Attic behavior remain
+unconfirmed. Raw LLM input size
 and arbitrary non-httpx exceptions in tomorrow's
 injected publisher need evidence before expanding scope. Briefs record legacy-ID
 resolutions/withdrawals, including intentional dead-man heartbeat suppression.
