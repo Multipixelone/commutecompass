@@ -91,6 +91,67 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture
+def synthetic_config(tmp_path: Path) -> Path:
+    """Complete offline config; no real origin, credentials, or state paths."""
+    path = tmp_path / "synthetic.toml"
+    path.write_text('''calendars = []
+[origin]
+address = "Synthetic venue"
+lat = 0.0
+lon = 0.0
+[prep]
+prep_minutes = 20
+[scheduling]
+morning_run_time = "06:00"
+[paths]
+venues_file = "synthetic-venues.yaml"
+db_path = "synthetic-state.db"
+oauth_token_path = "synthetic-token.json"
+[opencode_go]
+endpoint = "https://example.invalid"
+model = "synthetic"
+[mta]
+subway_alerts_url = "https://example.invalid/subway"
+lirr_alerts_url = "https://example.invalid/lirr"
+bus_alerts_url = "https://example.invalid/bus"
+[notify]
+mode = "stdout"
+''')
+    return path
+
+
+@pytest.mark.parametrize("invalid_field", ["heartbeat", "fallback", "section", "scalar"])
+def test_validation_diagnostics_never_disclose_input(
+    runner: CliRunner, synthetic_config: Path, env_block: None,
+    caplog: pytest.LogCaptureFixture, invalid_field: str,
+) -> None:
+    sentinel = "SYNTHETIC_SECRET_DO_NOT_DISPLAY"
+    content = synthetic_config.read_text()
+    if invalid_field == "heartbeat":
+        content += f'\n[monitoring]\nheartbeat_url = "ftp://example.invalid/{sentinel}"\n'
+    elif invalid_field == "fallback":
+        content += f'\n[alarm]\nfallback_time = "{sentinel}"\n'
+    elif invalid_field == "section":
+        content = f'alarm = "{sentinel}"\n' + content
+    else:
+        content = content.replace("prep_minutes = 20", f'prep_minutes = "{sentinel}"')
+    synthetic_config.write_text(content)
+    with (
+        mock.patch("commutecompass.store.Store") as store,
+        mock.patch("socket.socket.connect") as connect,
+        mock.patch("httpx.Client.send") as send,
+    ):
+        result = runner.invoke(cli, ["--config", str(synthetic_config), "init-db"])
+    assert result.exit_code == 78
+    assert "Invalid config" in result.output
+    assert sentinel not in result.output + caplog.text
+    assert "input_value" not in result.output
+    store.assert_not_called()
+    connect.assert_not_called()
+    send.assert_not_called()
+
+
 # ─────────── Help text tests ──────────────────────────────────────────────────
 
 
@@ -1781,7 +1842,7 @@ class TestGtfsRefresh:
         ):
             result = runner.invoke(cli, ["--config", str(minimal_toml), "gtfs-refresh"])
         assert result.exit_code == EXIT_CONFIG, result.output
-        assert "gtfs_db_path must be separate" in result.output
+        assert "paths: invalid value" in result.output
         refresh.assert_not_called()
         lock.assert_not_called()
         assert state_db.read_bytes() == b"original plans database"

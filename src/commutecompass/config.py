@@ -10,9 +10,9 @@ import tomllib
 from datetime import datetime
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 # ─────────── Config models (mirrors models.py for loader use) ───────────
 
@@ -273,7 +273,7 @@ class MonitoringConfig(BaseModel):
     def _validate_heartbeat_url(cls, v: str | None) -> str | None:
         if v and not v.startswith(("http://", "https://")):
             raise ValueError(
-                f"monitoring.heartbeat_url must start with http(s)://, got {v!r}"
+                "monitoring.heartbeat_url must start with http(s)://"
             )
         return v
 
@@ -412,6 +412,54 @@ class Config(BaseModel):
     telegram_chat_id: int = 0
     opencode_go_token: str = ""
     home_assistant_token: str = ""
+
+
+def _nested_model(annotation: Any) -> type[BaseModel] | None:
+    """Find a model inside a schema annotation (including lists/unions)."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    for arg in get_args(annotation):
+        if model := _nested_model(arg):
+            return model
+    return None
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    """Render schema fields and fixed categories, never input or validator text.
+
+    Even error locations can contain input-derived dictionary keys. Only names
+    present in Config's schema are allowed into operator-facing diagnostics.
+    """
+    details: list[str] = []
+    categories = {
+        "missing": "required field",
+        "model_type": "expected section/table",
+        "int_parsing": "expected integer",
+        "int_type": "expected integer",
+        "float_parsing": "expected number",
+        "float_type": "expected number",
+        "bool_parsing": "expected boolean",
+        "bool_type": "expected boolean",
+        "string_type": "expected string",
+        "list_type": "expected list",
+    }
+    for error in exc.errors(include_input=False, include_context=False, include_url=False):
+        model: type[BaseModel] | None = Config
+        fields: list[str] = []
+        for part in error["loc"]:
+            if isinstance(part, int):
+                continue  # Never render input-derived indices/keys.
+            if model is None or part not in model.model_fields:
+                break
+            field = model.model_fields[part]
+            fields.append(part)
+            model = _nested_model(field.annotation)
+        location = ".".join(fields) or "config"
+        category = categories.get(error["type"], "invalid value")
+        detail = f"{location}: {category}"
+        if detail not in details:
+            details.append(detail)
+    return "Invalid config: " + "; ".join(details)
 
 
 # ─────────── Exceptions ───────────
@@ -724,8 +772,8 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     # environment-only and default empty here; editing does not require them.
     try:
         Config.model_validate(doc.unwrap())
-    except ValueError as exc:
-        raise ConfigSetValidationError(f"Invalid config: {exc}") from exc
+    except ValidationError as exc:
+        raise ConfigSetValidationError(format_validation_error(exc)) from None
 
     _atomic_write_config(toml_path, tomlkit.dumps(doc))
 

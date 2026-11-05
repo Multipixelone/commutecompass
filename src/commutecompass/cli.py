@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import click
 from pydantic import ValidationError
 
-from commutecompass.config import ConfigError
+from commutecompass.config import ConfigError, format_validation_error
 from commutecompass.joblock import JobLock, LockHeld, lock_path_for
 from commutecompass.models import CalendarSpec
 
@@ -46,7 +46,10 @@ def _load_config(config_path: Path) -> Config:
 
     try:
         return config_mod.load_config(config_path)
-    except (ConfigError, ValidationError) as exc:
+    except ValidationError as exc:
+        click.echo(f"Error: {format_validation_error(exc)}", err=True)
+        sys.exit(EXIT_CONFIG)
+    except ConfigError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(EXIT_CONFIG)
 

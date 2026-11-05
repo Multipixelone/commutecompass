@@ -12,6 +12,7 @@ from commutecompass.config import (
     Config,
     ConfigError,
     ConfigSetError,
+    format_validation_error,
     load_config,
     load_from_env,
     redact_for_display,
@@ -93,6 +94,21 @@ def _apply_env(env: dict[str, str]) -> None:
 def _clear_env(keys: list[str]) -> None:
     for key in keys:
         os.environ.pop(key, None)
+
+
+def test_validation_formatter_only_renders_schema_fields() -> None:
+    from pydantic import ValidationError
+    from pydantic_core import PydanticCustomError
+
+    sentinel = "SYNTHETIC_SECRET_DO_NOT_DISPLAY"
+    exc = ValidationError.from_exception_data("Config", [{
+        "type": PydanticCustomError(sentinel, sentinel, {"secret": sentinel}),
+        "loc": ("monitoring", "heartbeat_url", sentinel),
+        "input": {"secret": sentinel},
+    }])
+    assert format_validation_error(exc) == (
+        "Invalid config: monitoring.heartbeat_url: invalid value"
+    )
 
 
 # ─────────── Tests ───────────
