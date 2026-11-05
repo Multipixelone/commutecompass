@@ -1,8 +1,11 @@
 # Repository audit and isolated fixer handoffs
 
 **Audited source:** `4df247f` (2026-11-04). This replaces the stale audit against
-`469bf08`. This pass changes documentation only: no production fixes, deployments,
-credential reads, personal-origin inspection, or live calendar/Telegram/HA calls.
+`469bf08`. The initial audit was documentation-only. The subsequent implementation
+is tracked in [implementation results](implementation-status.md); the briefs below
+retain the original findings and lane contracts, not a list of still-open defects.
+Neither phase involved deployments, credential reads, personal-origin inspection,
+or live calendar/Telegram/HA calls.
 
 Six read-only explorer lanes audited the categories below. Findings were reconciled
 against current source; targeted offline probes used fake data and mocked HTTP.
