@@ -88,7 +88,7 @@ def test_event_before_noon_wakes_at_prep(tmp_path: Path) -> None:
     prep = _nyc(2026, 10, 15, 8, 30)
     r = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): [_plan(prep)]}))
     assert r.wake_at == prep
-    assert r.source == "event"
+    assert r.source == "calendar"
     assert r.day == date(2026, 10, 15)
     assert r.next_prep_at == prep
     assert r.next_event == "Class"
@@ -113,11 +113,12 @@ def test_no_events_uses_fallback(tmp_path: Path) -> None:
     assert r.next_event == ""
 
 
-def test_errored_plans_fail_closed(tmp_path: Path) -> None:
+def test_errored_plans_use_warned_next_day_safety_fallback(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     plans = [_plan(_nyc(2026, 10, 15, 7, 0), error="location_unresolved")]
-    with pytest.raises(AlarmError, match="incomplete planning"):
-        compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): plans}))
+    result = compute_wake(cfg, _nyc(2026, 10, 15, 5, 0), _provider({date(2026, 10, 15): plans}))
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.warning and "incomplete" in result.warning
 
 
 def test_custom_fallback_time(tmp_path: Path) -> None:
@@ -142,7 +143,7 @@ def test_elapsed_early_tomorrow_wake_searches_third_day(tmp_path: Path) -> None:
     assert result.source == "fallback"
 
 
-def test_extended_wake_horizon_still_rejects_incomplete_planning(tmp_path: Path) -> None:
+def test_extended_wake_horizon_incomplete_planning_uses_safety_fallback(tmp_path: Path) -> None:
     cfg = _config(tmp_path, wake_lead_minutes=180)
     early = _plan(datetime(2026, 10, 16, 2, 30, tzinfo=NYC_TZ))
     incomplete = _plan(datetime(2026, 10, 17, 9, tzinfo=NYC_TZ), error="unresolved")
@@ -152,8 +153,9 @@ def test_extended_wake_horizon_still_rejects_incomplete_planning(tmp_path: Path)
             day_start.date(), [],
         )
 
-    with pytest.raises(AlarmError, match="incomplete planning"):
-        compute_wake(cfg, datetime(2026, 10, 15, 23, 45, tzinfo=NYC_TZ), provider)
+    result = compute_wake(cfg, datetime(2026, 10, 15, 23, 45, tzinfo=NYC_TZ), provider)
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.warning
 
 
 def test_wake_lead_subtracted(tmp_path: Path) -> None:
@@ -520,26 +522,36 @@ def test_published_upcoming_schedule_preserves_active_wake(
 
 
 @pytest.mark.parametrize("bad_day", [15, 16])
-def test_partial_planning_never_posts_fallback(tmp_path: Path, bad_day: int) -> None:
+def test_partial_planning_publishes_warned_next_day_safety_fallback(tmp_path: Path, bad_day: int) -> None:
     cfg = _config(tmp_path)
     plans = [_plan(_nyc(2026, 10, bad_day, 21), error="no_route")]
-    with patch("commutecompass.ha_client.call_service") as cs, pytest.raises(
-        AlarmError, match="incomplete planning"
-    ):
-        publish(
+    with patch("commutecompass.ha_client.call_service", return_value=True) as cs, patch(
+        "commutecompass.alarm.fetch_entity_state", return_value=None,
+    ), patch("commutecompass.notify.build_notifier") as notifier:
+        result, ok = publish(
             cfg, now=_nyc(2026, 10, 15, 20),
             plans_for_day=_provider({date(2026, 10, bad_day): plans}),
         )
-    cs.assert_not_called()
+    assert ok
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.warning and "incomplete" in result.warning
+    cs.assert_called_once()
+    notifier.return_value.send.assert_called_once()
 
 
 def test_calendar_failure_is_not_empty_day(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     with patch("commutecompass.jobs.tomorrow.plan_window", return_value=None), patch(
-        "commutecompass.ha_client.call_service"
-    ) as cs, pytest.raises(AlarmError, match="calendar fetch failed"):
-        publish(cfg, now=_nyc(2026, 10, 15, 20))
-    cs.assert_not_called()
+        "commutecompass.ha_client.call_service", return_value=True,
+    ) as cs, patch("commutecompass.notify.build_notifier") as notifier, patch(
+        "commutecompass.alarm.fetch_entity_state", return_value=None,
+    ):
+        result, ok = publish(cfg, now=_nyc(2026, 10, 15, 20))
+    assert ok
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.warning and "planning failed" in result.warning
+    cs.assert_called_once()
+    notifier.return_value.send.assert_called_once()
 
 
 def test_elapsed_tomorrow_wake_publishes_following_day(tmp_path: Path) -> None:
@@ -680,15 +692,16 @@ def test_past_unresolved_start_bounds_elapsed_wake(tmp_path: Path, error: str) -
 @pytest.mark.parametrize("error", ["no_route", "location_unresolved", "too_imminent"])
 def test_historical_success_does_not_excuse_future_error(tmp_path: Path, error: str) -> None:
     cfg = _config(tmp_path)
-    with pytest.raises(AlarmError, match="incomplete planning"):
-        compute_wake(
-            cfg, _nyc(2026, 10, 15, 13), _provider({
-                date(2026, 10, 15): [
-                    _plan(_nyc(2026, 10, 15, 7), error="too_imminent"),
-                    _plan(_nyc(2026, 10, 15, 16), error=error),
-                ],
-            }),
-        )
+    result = compute_wake(
+        cfg, _nyc(2026, 10, 15, 13), _provider({
+            date(2026, 10, 15): [
+                _plan(_nyc(2026, 10, 15, 7), error="too_imminent"),
+                _plan(_nyc(2026, 10, 15, 16), error=error),
+            ],
+        }),
+    )
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.warning
 
 
 # ─────────── schedule contract v1 ───────────
@@ -892,8 +905,8 @@ def test_legacy_default_publish_unchanged(tmp_path: Path) -> None:
     assert set(cs.call_args.kwargs["data"]) == {"wake_at", "next_prep_at", "next_event", "deadline_at"}
 
 
-def test_v1_planner_failure_publishes_nothing(tmp_path: Path) -> None:
-    """Incomplete planning raises; it is never turned into a kind='none' clear."""
+def test_v1_planner_failure_publishes_safe_fallback_not_clear(tmp_path: Path) -> None:
+    """Incomplete planning publishes a warned next-day wake, never a clear."""
     ha = _FakeHA()
     cfg = _config(tmp_path, schedule_contract="v1")
 
@@ -902,23 +915,39 @@ def test_v1_planner_failure_publishes_nothing(tmp_path: Path) -> None:
 
     with patch("commutecompass.ha_client.call_service", side_effect=ha.call_service), patch(
         "commutecompass.alarm.fetch_entity_state", side_effect=ha.fetch,
-    ):
-        with pytest.raises(AlarmError):
-            publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=broken)
-        # Background path swallows the error but still sends nothing.
+    ), patch("commutecompass.notify.build_notifier") as notifier:
+        result, ok = publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=broken)
         from commutecompass.alarm import publish_safe
 
         with patch("commutecompass.alarm._default_provider", return_value=broken):
             publish_safe(cfg, now=_nyc(2026, 10, 15, 5, 0), store=None, planned={})
-    assert ha.calls == [] and ha.reads == []
-    assert ha.helper == "old"
+    assert ok and result.warning
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert len(ha.calls) == 2
+    assert notifier.return_value.send.call_count == 2
+    from commutecompass.alarm_contract import parse_schedule
+
+    for _, kwargs in ha.calls:
+        schedule = parse_schedule(kwargs["data"]["snapshot"])
+        assert schedule.kind == "legacy"
+        assert schedule.wake_at == result.wake_at.astimezone(UTC)
+        assert schedule.deadline_at is None
 
 
-def test_v1_errored_plan_publishes_nothing(tmp_path: Path) -> None:
+def test_v1_errored_plan_publishes_warned_next_day_fallback(tmp_path: Path) -> None:
     ha = _FakeHA()
-    with pytest.raises(AlarmError):
-        _publish_v1(tmp_path, ha, [_plan(_nyc(2026, 10, 15, 8, 0), error="no route")])
-    assert ha.calls == []
+    with patch("commutecompass.notify.build_notifier") as notifier:
+        result, ok = _publish_v1(tmp_path, ha, [_plan(_nyc(2026, 10, 15, 8, 0), error="no route")])
+    assert ok and result.warning
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert len(ha.calls) == 1
+    notifier.return_value.send.assert_called_once()
+    from commutecompass.alarm_contract import parse_schedule
+
+    schedule = parse_schedule(ha.calls[0][1]["data"]["snapshot"])
+    assert schedule.kind == "legacy"
+    assert schedule.wake_at == result.wake_at.astimezone(UTC)
+    assert schedule.deadline_at is None
 
 
 def test_v1_publisher_never_emits_none_kind(tmp_path: Path) -> None:

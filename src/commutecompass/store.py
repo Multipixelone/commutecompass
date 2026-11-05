@@ -21,6 +21,13 @@ from commutecompass.models import (
 )
 
 
+def _alarm_instant(value: datetime) -> datetime:
+    """Require aware alarm timestamps and normalize their absolute identity."""
+    if value.utcoffset() is None:
+        raise ValueError("alarm timestamps must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 def _now_iso() -> str:
     """Return the current time as an ISO-8601 string in NYC tz.
 
@@ -180,6 +187,17 @@ class Store:
                     muted_at TEXT NOT NULL,
                     expires_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS alarm_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    manual_deadline TEXT,
+                    manual_force INTEGER NOT NULL DEFAULT 0,
+                    manual_version INTEGER NOT NULL DEFAULT 0,
+                    bound_wake TEXT,
+                    bound_deadline TEXT,
+                    bound_version INTEGER,
+                    last_publish_json TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS job_heartbeat (
                     job TEXT PRIMARY KEY,
                     last_success TEXT NOT NULL
@@ -239,6 +257,144 @@ class Store:
         with self._connect() as conn:
             row = conn.execute("PRAGMA user_version").fetchone()
         return int(row[0]) if row else 0
+
+    # ── Alarm state (additive; independent of the plan schema version) ──────────
+
+    def _read_alarm_state(self) -> sqlite3.Row | None:
+        """Read without creating a database, journal, or missing state table."""
+        if not self.db_path.exists():
+            return None
+        conn = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarm_state'"
+            ).fetchone()
+            return conn.execute("SELECT * FROM alarm_state WHERE id = 1").fetchone() if exists else None
+        finally:
+            conn.close()
+
+    def load_alarm_manual(
+        self, now: datetime, *, dry_run: bool = False
+    ) -> tuple[datetime, bool, int] | None:
+        """Read deadline, force, and identity; retire expiry unless dry-run."""
+        now_utc = _alarm_instant(now)
+        if dry_run:
+            row = self._read_alarm_state()
+        else:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM alarm_state WHERE id = 1").fetchone()
+                if (
+                    row is not None
+                    and row["manual_deadline"] is not None
+                    and datetime.fromisoformat(row["manual_deadline"]) <= now_utc
+                ):
+                    conn.execute("""
+                        UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                            bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
+                        WHERE id = 1
+                    """)
+                    return None
+        if row is None or row["manual_deadline"] is None:
+            return None
+        deadline = datetime.fromisoformat(row["manual_deadline"])
+        return (
+            (deadline, bool(row["manual_force"]), int(row["manual_version"]))
+            if deadline > now_utc else None
+        )
+
+    def save_alarm_manual(self, deadline_at: datetime, force: bool = False) -> None:
+        """Replace the manual intent and invalidate every previous binding."""
+        deadline = _alarm_instant(deadline_at).isoformat()
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO alarm_state (id, manual_deadline, manual_force, manual_version)
+                VALUES (1, ?, ?, 1)
+                ON CONFLICT(id) DO UPDATE SET
+                    manual_deadline = excluded.manual_deadline,
+                    manual_force = excluded.manual_force,
+                    manual_version = alarm_state.manual_version + 1,
+                    bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
+            """, (deadline, int(force)))
+
+    def clear_alarm_manual(self) -> None:
+        """Clear intent and binding, preserving the last successful publication."""
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                    bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
+                WHERE id = 1
+            """)
+
+    def bind_alarm_manual(
+        self,
+        wake_at: datetime,
+        deadline_at: datetime,
+        *,
+        expected_deadline_at: datetime | None = None,
+        expected_version: int | None = None,
+    ) -> None:
+        """Compare intent identity then bind; calendar deadlines may cross 02:00.
+
+        A complete expected identity proves which manual intent the caller selected;
+        its calendar deadline need not share the manual deadline's logical day.
+        Without an identity, compatibility calls require an exact deadline match.
+        """
+        wake = _alarm_instant(wake_at)
+        deadline = _alarm_instant(deadline_at)
+        if (expected_deadline_at is None) != (expected_version is None):
+            return
+        expected = _alarm_instant(expected_deadline_at) if expected_deadline_at else deadline
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT manual_deadline, manual_version FROM alarm_state WHERE id = 1"
+            ).fetchone()
+            if row is None or row[0] is None:
+                return
+            manual_deadline = datetime.fromisoformat(row[0])
+            if manual_deadline != expected:
+                return
+            if expected_version is not None and row[1] != expected_version:
+                return
+            conn.execute("""
+                UPDATE alarm_state SET bound_wake = ?, bound_deadline = ?,
+                    bound_version = manual_version
+                WHERE id = 1
+            """, (wake.isoformat(), deadline.isoformat()))
+
+    def clear_alarm_manual_for_wake(self, wake_at: datetime) -> bool:
+        """Compare-and-clear a completed binding; a replaced intent is untouched."""
+        wake = _alarm_instant(wake_at).isoformat()
+        with self._connect() as conn:
+            result = conn.execute("""
+                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                    bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
+                WHERE id = 1 AND bound_wake = ? AND manual_deadline IS NOT NULL
+                    AND manual_version = bound_version
+            """, (wake,))
+            return result.rowcount == 1
+
+    def load_alarm_last_publish(self) -> dict[str, object] | None:
+        """Return the last successful result without creating or changing state."""
+        row = self._read_alarm_state()
+        if row is None or row["last_publish_json"] is None:
+            return None
+        payload: object = json.loads(row["last_publish_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("stored alarm publication must be a JSON object")
+        return cast(dict[str, object], payload)
+
+    def save_alarm_last_publish(self, payload: dict[str, object]) -> None:
+        """Persist a caller-serialized successful result without changing intent."""
+        encoded = json.dumps(payload, allow_nan=False)
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO alarm_state (id, last_publish_json) VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET last_publish_json = excluded.last_publish_json
+            """, (encoded,))
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 

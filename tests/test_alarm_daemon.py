@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import signal
 import wave
 from dataclasses import replace
@@ -1153,6 +1154,8 @@ def test_nap_snooze_shutdown_restart_preserves_ha_cleanup_mode(tmp_path: Path) -
 def test_optional_callback_failure_retries_without_interrupting_audio(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, operation: str, raises: bool,
 ) -> None:
+    # CLI logging setup may leave this logger at INFO when tests run together.
+    caplog.set_level(logging.WARNING, logger="commutecompass.alarm_daemon")
     clock = [at(0)]
     cache = AlarmCache(tmp_path / "c.json")
     cache.save(DaemonState(window_done_pending=at(-1)))
@@ -1304,6 +1307,7 @@ def test_optional_callbacks_propagate_process_control_exceptions(
 def test_status_callback_exception_stays_isolated_and_redacted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING, logger="commutecompass.alarm_daemon")
     player = Mock(spec=FakePlayer)
     status = Mock(side_effect=[RuntimeError("private status payload"), True])
     daemon = AlarmDaemon(

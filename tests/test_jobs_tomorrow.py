@@ -330,11 +330,14 @@ def test_calendar_fetch_failure_returns_none(tomorrow_config: Config) -> None:
     assert result is None
 
 
-def test_plan_failure_preserves_existing_alarm(tomorrow_config: Config) -> None:
-    """One missing route must not replace an existing wake with a later one."""
+def test_plan_failure_skips_partial_prep_push_but_publishes_safe_wake(tomorrow_config: Config) -> None:
+    """Legacy prep push rejects partial plans; wake publication uses safety."""
     events = _tomorrow_events()[:2]
     route = _route()
     early_prep = events[1].start - timedelta(minutes=65)
+    tomorrow_config.alarm.enabled = True
+    clock = (events[0].start - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    expected_fallback = events[0].start.replace(hour=12, minute=0, second=0, microsecond=0)
 
     def fake_plan(event: Event, **_: Any) -> Plan:
         if event.id == "evt-late":
@@ -350,12 +353,21 @@ def test_plan_failure_preserves_existing_alarm(tomorrow_config: Config) -> None:
         "commutecompass.jobs.tomorrow.plan_event", side_effect=fake_plan
     ), patch(
         "commutecompass.jobs.tomorrow.push_tomorrow_alarm", return_value=True
-    ) as mock_push, patch("commutecompass.ha_client.fetch_zones", return_value={}):
+    ) as mock_push, patch("commutecompass.ha_client.fetch_zones", return_value={}), patch(
+        "commutecompass.ha_client.call_service", return_value=True,
+    ) as publish_wake, patch("commutecompass.alarm.fetch_entity_state", return_value=None), patch(
+        "commutecompass.notify.build_notifier",
+    ) as notifier, patch("commutecompass.jobs.tomorrow.now_nyc", return_value=clock), patch(
+        "commutecompass.alarm.now_nyc", return_value=clock,
+    ):
         mock_cal.return_value.fetch_events.return_value = events
         result = tomorrow_run(tomorrow_config)
 
     assert result is None
     mock_push.assert_not_called()
+    publish_wake.assert_called_once()
+    assert publish_wake.call_args.kwargs["data"]["wake_at"] == expected_fallback.isoformat()
+    notifier.return_value.send.assert_called_once()
 
 
 def test_morning_pings_not_touched(tomorrow_config: Config) -> None:
@@ -454,21 +466,33 @@ def test_partial_calendar_failure_does_not_publish(tomorrow_config: Config) -> N
     alarm.assert_not_called()
 
 
-def test_partial_plan_failure_does_not_publish_either_alarm(tomorrow_config: Config) -> None:
+def test_partial_plan_failure_skips_prep_push_but_publishes_fallback(tomorrow_config: Config) -> None:
     from commutecompass.config import AlarmConfig
 
     tomorrow_config.alarm = AlarmConfig(enabled=True)
-    events = _tomorrow_events()[:2]
+    now = datetime(2026, 10, 15, 20, tzinfo=NYC_TZ)
+    events = [event.model_copy(update={
+        "start": datetime(2026, 10, 16, hour, tzinfo=NYC_TZ),
+        "end": datetime(2026, 10, 16, hour + 1, tzinfo=NYC_TZ),
+    }) for event, hour in zip(_tomorrow_events()[:2], [14, 9], strict=True)]
     plans = [
         Plan(event=events[0], error="no_route"),
         Plan(event=events[1], prep_at=events[1].start - timedelta(minutes=30)),
     ]
     with patch("commutecompass.jobs.tomorrow.plan_window", return_value=plans), patch(
         "commutecompass.jobs.tomorrow.push_tomorrow_alarm"
-    ) as legacy, patch("commutecompass.ha_client.call_service") as alarm:
+    ) as legacy, patch("commutecompass.ha_client.call_service", return_value=True) as alarm, patch(
+        "commutecompass.jobs.tomorrow.now_nyc", return_value=now,
+    ), patch("commutecompass.alarm.now_nyc", return_value=now), patch(
+        "commutecompass.alarm.fetch_entity_state", return_value=None,
+    ), patch("commutecompass.notify.build_notifier") as notifier:
         assert tomorrow_run(tomorrow_config) is None
     legacy.assert_not_called()
-    alarm.assert_not_called()
+    alarm.assert_called_once()
+    assert alarm.call_args.kwargs["data"]["wake_at"] == datetime(
+        2026, 10, 16, 12, tzinfo=NYC_TZ,
+    ).isoformat()
+    notifier.return_value.send.assert_called_once()
 
 
 def test_evening_job_publishes_despite_historical_too_imminent(tomorrow_config: Config) -> None:

@@ -20,9 +20,12 @@ days stay correct; wall-clock values are rendered in America/New_York.
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal
 
 from commutecompass.alarm_contract import (
@@ -34,6 +37,7 @@ from commutecompass.alarm_contract import (
 from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc, now_nyc, to_nyc
 
 if TYPE_CHECKING:
+    from commutecompass.alarm_state import ManualWake
     from commutecompass.config import Config
     from commutecompass.models import Plan
     from commutecompass.store import Store
@@ -58,16 +62,18 @@ class WakeResult:
 
     wake_at: datetime
     day: date
-    source: Literal["event", "fallback"]
+    source: Literal["calendar", "fallback", "manual", "retained"] = "calendar"
     # Plan whose prep_at drove the wake (None for fallback).
-    plan: Plan | None
+    plan: Plan | None = None
     # Earliest future prep_at across today/tomorrow, minus wake lead — HA nap cap.
     # For wake-window plans this is the first window alarm instead.
-    next_prep_at: datetime | None
-    next_event: str
+    next_prep_at: datetime | None = None
+    next_event: str = ""
     # Buffered leave deadline anchoring a commute wake window
     # (``wake_at == deadline_at - first_alarm_lead``); None for fallback/prep wakes.
     deadline_at: datetime | None = None
+    warning: str | None = None
+    manual_deadline_at: datetime | None = None
 
 
 def _window_deadline(plan: Plan, config: Config) -> datetime | None:
@@ -168,10 +174,11 @@ def wake_for_day(
     return wake, first
 
 
-def compute_wake(
+def _compute_wake(
     config: Config,
     now: datetime,
     plans_for_day: PlansProvider,
+    manual: ManualWake | None = None,
 ) -> WakeResult:
     """Compute the next morning wake.
 
@@ -183,26 +190,79 @@ def compute_wake(
     """
     now_utc = now.astimezone(UTC)
     today_start, _ = logical_day_bounds_nyc(now)
-    today_plans = plans_for_day(today_start)
+    warning: str | None = None
+    conflicts: dict[datetime, str] = {}
+
+    def fetch(day: datetime) -> list[Plan]:
+        nonlocal warning
+        try:
+            end, _ = logical_day_bounds_nyc(day + timedelta(hours=36))
+            return [p for p in plans_for_day(day) if
+                    day.astimezone(UTC) <= p.event.start.astimezone(UTC) < end.astimezone(UTC)]
+        except Exception as exc:  # noqa: BLE001 — planner failure must enter safety recovery
+            warning = f"Alarm planning failed ({type(exc).__name__}); degraded computation"
+            return []
+
+    def select(day: datetime, plans: list[Plan]) -> tuple[datetime, Plan | None]:
+        nonlocal warning
+        try:
+            wake, plan = wake_for_day(day, plans, config, now=now)
+        except AlarmError:
+            warning = "Alarm planning incomplete; degraded computation"
+            wake, plan = fallback_for_day(day, config.alarm.fallback_clock()), None
+        if manual is not None and manual.deadline_at.astimezone(UTC) > now_utc:
+            manual_day, _ = logical_day_bounds_nyc(manual.deadline_at)
+            if manual_day == day:
+                # Prep-only/virtual alarms must not mask another event's real
+                # departure deadline when competing with manual intent.
+                departures = [
+                    (candidate_deadline, candidate)
+                    for candidate in plans
+                    if (candidate_deadline := _window_deadline(candidate, config)) is not None
+                    and candidate_deadline.astimezone(UTC) > now_utc
+                ]
+                calendar = min(departures, key=lambda item: item[0].astimezone(UTC), default=None)
+                deadline, plan = calendar if calendar is not None else (None, None)
+                # Only a real calendar deadline competes, never the noon cap.
+                earlier = deadline is not None and deadline.astimezone(UTC) < manual.deadline_at.astimezone(UTC)
+                if earlier:
+                    conflicts[day] = "Manual deadline conflicts with an earlier calendar deadline" + (
+                        "; force selects manual" if manual.force else "; calendar selected"
+                    )
+                if not earlier or manual.force:
+                    return ((manual.deadline_at.astimezone(UTC) - timedelta(
+                        minutes=config.alarm.window.first_alarm_lead_minutes
+                    )).astimezone(NYC_TZ), None)
+                if plan is not None:
+                    return (_first_alarm(plan, config) or wake), plan
+        return wake, plan
+
+    today_plans = fetch(today_start)
     tomorrow_start, _ = logical_day_bounds_nyc(today_start + timedelta(hours=36))
-    tomorrow_plans = plans_for_day(tomorrow_start)
+    tomorrow_plans = fetch(tomorrow_start)
     # Even after today's fallback, today's afternoon prep still caps naps.
     # Validate both snapshots so partial planning never clears that cap.
-    tomorrow_wake, tomorrow_plan = wake_for_day(tomorrow_start, tomorrow_plans, config, now=now)
-    wake, plan = wake_for_day(today_start, today_plans, config, now=now)
+    tomorrow_wake, tomorrow_plan = select(tomorrow_start, tomorrow_plans)
+    wake, plan = select(today_start, today_plans)
+
+    def usable(wake_at: datetime, day: datetime) -> bool:
+        return wake_at.astimezone(UTC) > now_utc or (
+            manual is not None and manual.deadline_at.astimezone(UTC) > now_utc
+            and logical_day_bounds_nyc(manual.deadline_at)[0] == day
+        )
     day_start = today_start
-    if wake.astimezone(UTC) <= now_utc:
+    if not usable(wake, day_start):
         wake, plan = tomorrow_wake, tomorrow_plan
         day_start = tomorrow_start
     all_plans = [*today_plans, *tomorrow_plans]
-    if wake.astimezone(UTC) <= now_utc:
+    if not usable(wake, day_start):
         # An early tomorrow event minus a large lead can already be past tonight.
         # Search one more logical day, still validating every fetched snapshot.
         day_start, _ = logical_day_bounds_nyc(tomorrow_start + timedelta(hours=36))
-        later_plans = plans_for_day(day_start)
-        wake, plan = wake_for_day(day_start, later_plans, config, now=now)
+        later_plans = fetch(day_start)
+        wake, plan = select(day_start, later_plans)
         all_plans.extend(later_plans)
-    if wake.astimezone(UTC) <= now_utc:
+    if not usable(wake, day_start):
         raise AlarmError("no future wake in three logical days")
 
     # Nap cap: the next first alarm (window start or prep minus lead).
@@ -212,15 +272,179 @@ def compute_wake(
     deadline: datetime | None = None
     if plan is not None and _same_instant(_first_alarm(plan, config), wake):
         deadline = _window_deadline(plan, config)
+    bound_manual = manual if (manual is not None
+        and manual.deadline_at.astimezone(UTC) > now_utc
+        and logical_day_bounds_nyc(manual.deadline_at)[0] == day_start) else None
+    is_manual = bound_manual is not None and plan is None
+    if bound_manual is not None and day_start in conflicts:
+        warning = "; ".join(filter(None, (warning, conflicts[day_start])))
+    if warning and bound_manual is None:
+        raise AlarmError(warning)
+    if is_manual and bound_manual is not None:
+        deadline = bound_manual.deadline_at
     return WakeResult(
         wake_at=to_nyc(wake),
         day=to_nyc(day_start).date(),
-        source="event" if plan is not None else "fallback",
+        source="manual" if is_manual else "calendar" if plan is not None else "fallback",
         plan=plan,
         next_prep_at=nxt[1] if nxt is not None else None,
         next_event=_sanitize_text(nxt[0].event.title) if nxt is not None else "",
         deadline_at=to_nyc(deadline) if deadline is not None else None,
+        warning=warning,
+        manual_deadline_at=bound_manual.deadline_at if bound_manual else None,
     )
+
+
+def _stored_result(result: WakeResult) -> dict[str, object]:
+    return {
+        "wake_at": result.wake_at.isoformat(), "day": result.day.isoformat(),
+        "source": result.source, "next_event": result.next_event,
+        "next_prep_at": result.next_prep_at.isoformat() if result.next_prep_at else None,
+        "deadline_at": result.deadline_at.isoformat() if result.deadline_at else None,
+        "manual_deadline_at": (result.manual_deadline_at.isoformat()
+                               if result.manual_deadline_at else None),
+    }
+
+
+def _retained(config: Config, now: datetime, manual: ManualWake | None) -> WakeResult | None:
+    from commutecompass.alarm_state import load_last_publish
+
+    try:
+        data = load_last_publish(config)
+        if not data:
+            return None
+        def stamp(key: str) -> datetime | None:
+            value = data.get(key)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise TypeError("invalid persisted timestamp")
+            dt = datetime.fromisoformat(value)
+            if dt.utcoffset() is None:
+                raise ValueError("naive persisted timestamp")
+            return dt
+        wake = stamp("wake_at")
+        bound = stamp("manual_deadline_at")
+        if wake is None or wake.astimezone(UTC) <= now.astimezone(UTC):
+            return None
+        if data.get("source") == "manual" and bound is None:
+            return None
+        if bound is not None and (manual is None
+                or not _same_instant(bound, manual.deadline_at)
+                or bound.astimezone(UTC) <= now.astimezone(UTC)):
+            return None
+        deadline = stamp("deadline_at")
+        if deadline is not None and deadline.astimezone(UTC) - wake.astimezone(UTC) != timedelta(
+            minutes=config.alarm.window.first_alarm_lead_minutes
+        ):
+            return None
+        return WakeResult(wake, date.fromisoformat(str(data["day"])), "retained",
+                          next_prep_at=stamp("next_prep_at"),
+                          next_event=str(data.get("next_event", "")),
+                          deadline_at=deadline, manual_deadline_at=bound)
+    except Exception:  # noqa: BLE001 — corrupt/unavailable state must not prevent fallback
+        logger.warning("Could not read a valid retained alarm")
+        return None
+
+
+def compute_wake(
+    config: Config, now: datetime, plans_for_day: PlansProvider,
+    manual: ManualWake | None = None,
+) -> WakeResult:
+    """Compute, or retain the last future publication / next-day safety fallback.
+
+    Failure never clears a valid future alarm. This function performs reads only;
+    publication owns warnings and persistence of successful HA writes.
+    """
+    def prefer_retained(warning: str) -> WakeResult | None:
+        retained = _retained(config, now, manual)
+        if retained is None:
+            return None
+        if manual is not None and manual.deadline_at.astimezone(UTC) > now.astimezone(UTC):
+            manual_day = logical_day_bounds_nyc(manual.deadline_at)[0].date()
+            if retained.day > manual_day:
+                return None
+            if retained.day == manual_day:
+                if (manual.force or retained.deadline_at is None
+                        or retained.deadline_at.astimezone(UTC) >= manual.deadline_at.astimezone(UTC)):
+                    return None
+                retained = replace(retained, manual_deadline_at=manual.deadline_at)
+                warning += "; manual conflicts with an earlier retained calendar deadline"
+        return replace(retained, warning=warning + "; retaining last future wake")
+
+    try:
+        result = _compute_wake(config, now, plans_for_day, manual)
+        if result.warning and "degraded computation" in result.warning:
+            retained = prefer_retained(result.warning)
+            if retained is not None:
+                return retained
+        return result
+    except Exception as exc:  # noqa: BLE001 — safety boundary for arbitrary planning failures
+        warning = (str(exc) if isinstance(exc, AlarmError) else
+                   f"Alarm computation failed ({type(exc).__name__})")
+        retained = prefer_retained(warning)
+        if retained is not None:
+            return retained
+        today, _ = logical_day_bounds_nyc(now)
+        tomorrow, _ = logical_day_bounds_nyc(today + timedelta(hours=36))
+        if (manual is not None and manual.deadline_at.astimezone(UTC) > now.astimezone(UTC)
+                and logical_day_bounds_nyc(manual.deadline_at)[0].astimezone(UTC)
+                <= tomorrow.astimezone(UTC)):
+            manual_day, _ = logical_day_bounds_nyc(manual.deadline_at)
+            return WakeResult(
+                (manual.deadline_at.astimezone(UTC) - timedelta(
+                    minutes=config.alarm.window.first_alarm_lead_minutes
+                )).astimezone(NYC_TZ), manual_day.date(), "manual",
+                deadline_at=manual.deadline_at, manual_deadline_at=manual.deadline_at,
+                warning=warning + "; publishing usable manual deadline",
+            )
+        return WakeResult(
+            fallback_for_day(tomorrow, config.alarm.fallback_clock()),
+            tomorrow.date(), "fallback",
+            warning=warning + "; using next logical day's configured fallback",
+        )
+
+
+def _retain_live_on_upgrade(config: Config, now: datetime, result: WakeResult) -> WakeResult:
+    """Read HA only when no publication history exists (first upgraded run).
+
+    Never resurrect a rejected stored manual selection after clear/expiry. A
+    persisted record, even if invalid, disables this bootstrap-only recovery.
+    """
+    from commutecompass.alarm_contract import parse_schedule
+    from commutecompass.alarm_state import load_last_publish
+
+    if not result.warning or result.source != "fallback":
+        return result
+    try:
+        if load_last_publish(config) is not None:
+            return result
+        base_url, token = require_ha(config)
+        deadline: datetime | None = None
+        next_prep: datetime | None = None
+        if config.alarm.schedule_contract == "v1":
+            raw = fetch_entity_state(base_url, token, config.alarm.schedule_entity)
+            if raw is None:
+                return result
+            schedule = parse_schedule(
+                raw, first_lead_seconds=config.alarm.window.first_alarm_lead_minutes * 60,
+            )
+            wake = schedule.wake_at
+            deadline, next_prep = schedule.deadline_at, schedule.next_prep_at
+        else:
+            raw = fetch_entity_state(base_url, token, config.alarm.wake_entity)
+            if raw is None:
+                return result
+            wake = to_nyc(datetime.fromisoformat(raw))
+        if wake is None or wake.astimezone(UTC) <= now.astimezone(UTC):
+            return result
+        day, _ = logical_day_bounds_nyc(deadline or wake)
+        return WakeResult(wake, day.date(), "retained", next_prep_at=next_prep,
+                          deadline_at=deadline,
+                          warning=result.warning + "; retaining future live HA wake")
+    except Exception:  # noqa: BLE001 — optional bootstrap recovery fails open to safe fallback
+        logger.warning("Could not read a valid future live HA alarm")
+        return result
 
 
 def _same_instant(a: datetime | None, b: datetime) -> bool:
@@ -283,7 +507,7 @@ def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, obje
         "next_prep_at": result.next_prep_at.isoformat() if result.next_prep_at else "",
         "next_event": result.next_event,
     }
-    if window:
+    if window or result.manual_deadline_at is not None:
         payload["deadline_at"] = (
             result.deadline_at.isoformat() if result.deadline_at else ""
         )
@@ -419,13 +643,73 @@ def publish(
         domain, name = split_service(
             config.alarm.publish_v1_script if v1 else config.alarm.publish_script
         )
-    if store is None and plans_for_day is None:
-        from commutecompass.store import Store
+    from commutecompass.alarm_state import bind_manual, load_manual, save_last_publish
 
-        store = Store(config.paths.db_path)
-        store.init_schema()
-    provider = plans_for_day or _default_provider(config, planned or {}, store, _now)
-    result = compute_wake(config, _now, provider)
+    try:
+        manual = load_manual(config, _now, dry_run=dry_run)
+    except Exception:
+        manual = None
+        logger.exception("Could not load manual alarm state; using computation safety")
+        def state_failed(day: datetime) -> list[Plan]:
+            raise AlarmError("Alarm state unavailable")
+        plans_for_day = state_failed
+    scratch: TemporaryDirectory[str] | None = None
+    try:
+        provider_config = config
+        if dry_run and plans_for_day is None:
+            # Never initialize/migrate the live DB or refresh the live OAuth token.
+            scratch = TemporaryDirectory(prefix="alarm-dry-run-", dir="/tmp/opencode")
+            root = Path(scratch.name)
+            db = Path(config.paths.db_path)
+            if db.exists():
+                # Copy SQLite sidecars too; opening even mode=ro on a live WAL
+                # database can create/update its shared-memory file.
+                for suffix in ("", "-wal", "-shm"):
+                    source = Path(str(db) + suffix)
+                    if source.exists():
+                        shutil.copyfile(source, root / ("state.db" + suffix))
+            token_path = Path(config.paths.oauth_token_path)
+            if token_path.exists():
+                shutil.copyfile(token_path, root / "oauth.json")
+            provider_config = config.model_copy(update={"paths": config.paths.model_copy(update={
+                "db_path": str(root / "state.db"),
+                "oauth_token_path": str(root / "oauth.json"),
+            })})
+        provider = plans_for_day or _default_provider(provider_config, planned or {}, store, _now)
+        result = compute_wake(config, _now, provider, manual)
+    except Exception:  # noqa: BLE001 — setup errors require the same safe publication path
+        def setup_failed(day: datetime) -> list[Plan]:
+            raise AlarmError("Alarm provider setup failed")
+        result = compute_wake(config, _now, setup_failed, manual)
+    finally:
+        if scratch is not None:
+            scratch.cleanup()
+
+    if not dry_run:
+        result = _retain_live_on_upgrade(config, _now, result)
+
+    def record_success() -> None:
+        try:
+            save_last_publish(config, _stored_result(result))
+            if result.manual_deadline_at is not None:
+                bind_manual(config, result.wake_at,
+                            result.deadline_at or result.manual_deadline_at,
+                            expected_manual=manual)
+        except Exception:
+            logger.exception("Could not persist successful alarm publication")
+
+    if result.warning:
+        logger.warning("ALARM SAFETY: %s", result.warning)
+
+    def notify_warning() -> None:
+        if result.warning:
+            from commutecompass.format import _sanitize_text, escape_md
+            from commutecompass.notify import build_notifier
+
+            try:
+                build_notifier(config).send(escape_md(_sanitize_text("Alarm warning: " + result.warning)))
+            except Exception:
+                logger.exception("Alarm warning delivery failed")
     logger.info(
         "alarm: wake_at=%s (%s) next_prep_at=%s deadline_at=%s computed_at=%s day=%s",
         result.wake_at.isoformat(),
@@ -438,18 +722,27 @@ def publish(
     if dry_run:
         return result, False
     if config.alarm.schedule_contract == "v1":
-        schedule = build_schedule(result, config, issued_at=_now)
-        publish_v1(config, schedule, result.next_event)
-        if store is not None:
-            store.record_job_success("alarm_publish", _now)
-        return result, True
-    payload = build_payload(result, window=config.alarm.window.enabled)
-    ok = call_service(base_url, token, domain, name, data=payload)
-    if not ok:
-        logger.warning("alarm: publish to %s failed", config.alarm.publish_script)
-    elif store is not None:
-        store.record_job_success("alarm_publish", _now)
-    return result, ok
+        try:
+            schedule = build_schedule(result, config, issued_at=_now)
+            publish_v1(config, schedule, result.next_event)
+            record_success()
+            if store is not None:
+                store.record_job_success("alarm_publish", _now)
+            return result, True
+        finally:
+            notify_warning()
+    try:
+        payload = build_payload(result, window=config.alarm.window.enabled or result.source == "manual")
+        ok = call_service(base_url, token, domain, name, data=payload)
+        if not ok:
+            logger.warning("alarm: publish to %s failed", config.alarm.publish_script)
+        else:
+            record_success()
+            if store is not None:
+                store.record_job_success("alarm_publish", _now)
+        return result, ok
+    finally:
+        notify_warning()
 
 
 def publish_safe(

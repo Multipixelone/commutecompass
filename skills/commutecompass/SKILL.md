@@ -1,6 +1,6 @@
 ---
 name: commutecompass
-description: Plan and adjust NYC commutes from chat — preview today's digest, see or shift prep time for a specific event, run morning/poll on demand, view or tweak safe config fields. Use when the user asks about their commute, calendar-driven travel times, leave or prep times, or NYC transit alerts affecting their day; or when they want to change planning behavior like prep buffer, quiet hours, or morning run time.
+description: Plan and adjust NYC commutes from chat, manage wake alarms anchored on a departure time, and inspect or change safe planner settings. Use for commute routes, calendar travel/prep times, NYC transit alerts, wake/nap alarms, requests like "I need to leave at 9" or "wake me so I can leave by X", and planning settings such as prep buffers or quiet hours.
 version: 0.1.0
 metadata:
   openclaw:
@@ -46,6 +46,8 @@ to stdout; relay that stdout back to the user.
 | "are you alive?" / "send a test ping"                                    | `scripts/test-notify.sh`                          |
 | "when is my wake/nap alarm?" | `scripts/alarm-status.sh [--json]` |
 | "nap for 30 minutes" / "wake me at 15:30" | `scripts/alarm-nap.sh 30` or `--until 15:30` |
+| "I need to leave at 9" / "wake me so I can leave by X" | `scripts/alarm-wake.sh --leave HH:MM [--date YYYY-MM-DD] [--force]` |
+| "clear my manual departure alarm" | `scripts/alarm-wake.sh --clear` |
 | "skip my next wake/nap alarm" | `scripts/alarm-skip.sh` |
 | "enable wake alarms" / "disable wake alarms" | `scripts/alarm-on.sh` / `scripts/alarm-off.sh` |
 | "refresh my wake alarm" | `scripts/alarm-publish.sh [--dry-run]` |
@@ -55,6 +57,36 @@ to stdout; relay that stdout back to the user.
 | "turn off quiet hours" / "remove that override"                          | `scripts/config-unset.sh <dotted.key>`            |
 | "reset all my config tweaks"                                             | `scripts/config-reset.sh --yes`                   |
 | "why didn't I get my morning ping?" / "show me the current state"        | `scripts/status.sh` (text) or `scripts/status.sh --json` |
+
+### Departure-anchored manual wake
+
+For a departure request, use `alarm-wake.sh`, **not** `alarm-nap.sh` or a prep
+adjustment. `--leave` is the latest departure in **America/New_York**, not the
+first alarm time. Without `--date`, it means the next occurrence of that wall
+clock time; an explicit date must still be in the future. `09:00`, `9am`, and
+`9:30am` are accepted. Nonexistent DST wall times are rejected.
+
+```sh
+scripts/alarm-wake.sh --leave 09:00
+scripts/alarm-wake.sh --leave 9:30am --date 2026-11-06
+scripts/alarm-wake.sh --clear
+```
+
+With a 60-minute first-alarm lead, departure at 09:00 means lights at 07:50,
+first alarm at 08:00, and final alarm at 09:00. The departure is used directly:
+no extra travel or safety buffer is subtracted. This is the normal commute wake
+window: unlimited five-minute snoozes before departure and desktop-only dismissal
+of the final alarm. Wake windows must be enabled.
+
+The manual wake survives periodic publishing and replaces that logical day's
+noon fallback. An earlier calendar departure wins on the same logical day;
+relay the warning and earlier time to the user. Use `--force` only when the user
+explicitly wants the manual departure to win despite calendar conflicts.
+Master-off and skip still apply. The override is single-use: dismissal,
+master-off, skip, `--clear`, or expiry at departure removes it. `--clear` removes
+the manual override, then republishes the ordinary calendar/fallback schedule;
+it does not disable all alarms. Check `alarm-status.sh` after a change and relay
+any publication error rather than claiming the alarm is set.
 
 ### Real-time diagnostic interpretation
 

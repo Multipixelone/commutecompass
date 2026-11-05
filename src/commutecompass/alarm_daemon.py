@@ -1371,6 +1371,7 @@ class AlarmDaemon:
     publish_handled: Callable[[datetime], bool] = lambda _t: True
     publish_window_done: Callable[[datetime], bool] = lambda _t: True
     publish_status: Callable[[dict[str, Any]], bool] | None = None
+    retire_manual: Callable[[Inputs, DaemonState, DaemonState, datetime], None] | None = None
     activity_monitor: ActivityMonitor | None = None
     clock: Callable[[], datetime] = now_nyc
     sleep: Callable[[float], None] = _time.sleep
@@ -1443,6 +1444,12 @@ class AlarmDaemon:
         before_audio = self.state
         for action in actions:
             self._apply(action)
+        if self.retire_manual is not None:
+            try:
+                self.retire_manual(inputs, before, self.state, now)
+            except Exception:
+                # Bookkeeping must never interrupt audio stop/restore guarantees.
+                logger.exception("alarm daemon: manual wake retirement failed")
         if inputs.ha_ok:
             self._reconcile_mode()
         if self._audio_healthy and self.state.mode == "ringing" and self.state.ring_started is not None:
@@ -1591,6 +1598,44 @@ def status_snapshot(state: DaemonState, now: datetime) -> dict[str, Any]:
     }}
 
 
+def _retire_manual_control(
+    config: Config, inputs: Inputs, before: DaemonState, after: DaemonState, now: datetime,
+) -> None:
+    """Retire only explicit controls; HA outages/replacements never consume intent.
+
+    Completion deletions compare the persisted wake binding, so a stale completion
+    cannot erase a newly replaced deadline. A current master-off is deliberately
+    global, covering future intent not yet selected as the daemon's pending wake.
+    """
+    if not config.alarm.window.enabled:
+        return
+    from commutecompass.alarm_state import clear_manual, clear_manual_for_wake
+
+    candidates: list[datetime] = []
+    if inputs.ha_ok:
+        if inputs.enabled is False:
+            # A live master-off is global, including unbound/future intent.
+            # Terminal completions below always compare the original binding.
+            clear_manual(config)
+            return
+        if inputs.skipped_at is not None:
+            candidates.append(inputs.skipped_at)
+        if (inputs.wake_known and inputs.wake_at is None
+                and before.pending_kind == "wake" and before.pending is not None):
+            candidates.append(before.pending)
+    terminal = after.ended_wake
+    if terminal is not None and terminal != before.ended_wake:
+        explicit_ha_end = inputs.ha_ok and (
+            (terminal.reason == "skip" and inputs.skipped_at is not None)
+            or (terminal.reason == "schedule_cleared" and inputs.wake_known
+                and inputs.wake_at is None)
+        )
+        if terminal.reason == "desktop_activity" or explicit_ha_end:
+            candidates.append(terminal.original_at)
+    for wake in candidates:
+        clear_manual_for_wake(config, wake)
+
+
 def build_daemon(config: Config) -> AlarmDaemon:
     """Wire the real HA reader, PipeWire player and HA write-back."""
     from commutecompass.alarm import require_ha
@@ -1667,6 +1712,9 @@ def build_daemon(config: Config) -> AlarmDaemon:
         publish_handled=publish_handled,
         publish_window_done=publish_window_done,
         publish_status=publish_status if cfg.status_entity else None,
+        retire_manual=lambda inputs, before, after, now: _retire_manual_control(
+            config, inputs, before, after, now,
+        ),
         activity_monitor=ActivityMonitor(cfg.wayland_display) if cfg.stop_on_activity else None,
     )
 

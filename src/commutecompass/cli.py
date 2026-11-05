@@ -280,6 +280,10 @@ def alarm(ctx: click.Context) -> None:
 def alarm_publish(ctx: click.Context, dry_run: bool) -> None:
     """Compute the next morning wake and publish it to HA."""
     cfg = _load_config(ctx.obj["config_path"])
+    _alarm_publish_result(cfg, dry_run=dry_run)
+
+
+def _alarm_publish_result(cfg: Config, *, dry_run: bool = False) -> None:
     from commutecompass.alarm import AlarmConfigError, AlarmError, publish
 
     try:
@@ -293,9 +297,55 @@ def alarm_publish(ctx: click.Context, dry_run: bool) -> None:
     nxt = result.next_prep_at.isoformat() if result.next_prep_at else "-"
     suffix = " (dry-run — HA push skipped)" if dry_run else ""
     click.echo(f"Wake: {result.wake_at.isoformat()} ({result.source}) next_prep_at={nxt}{suffix}")
+    if result.warning:
+        click.echo(f"Warning: {result.warning}", err=True)
     if not dry_run and not ok:
         click.echo("Error: Home Assistant publish failed", err=True)
         sys.exit(EXIT_TRANSIENT)
+
+
+@alarm.command(name="wake")
+@click.option("--leave", help="Leave deadline in NYC time (HH:MM, 9am or 9:30am).")
+@click.option("--date", "date_value", help="NYC deadline date (YYYY-MM-DD).")
+@click.option("--force", is_flag=True, help="Select this deadline even over an earlier calendar wake.")
+@click.option("--clear", is_flag=True, help="Clear the manual deadline and republish the normal wake.")
+@click.pass_context
+def alarm_wake(
+    ctx: click.Context, leave: str | None, date_value: str | None, force: bool, clear: bool,
+) -> None:
+    """Set a single-use leave deadline, or clear it, and publish immediately."""
+    from datetime import date
+
+    from commutecompass.alarm_state import (
+        ManualWake,
+        clear_manual,
+        parse_manual_deadline,
+        save_manual,
+    )
+    from commutecompass.timeutil import now_nyc
+
+    cfg = _load_config(ctx.obj["config_path"])
+    if not cfg.alarm.window.enabled:
+        click.echo("Error: alarm wake requires [alarm.window].enabled", err=True)
+        sys.exit(EXIT_USAGE)
+    if (clear and (leave is not None or date_value is not None or force)) or (not clear and not leave):
+        click.echo("Error: use --leave TIME [--date YYYY-MM-DD] [--force] OR --clear", err=True)
+        sys.exit(EXIT_USAGE)
+    if clear:
+        clear_manual(cfg)
+    else:
+        try:
+            day = date.fromisoformat(date_value) if date_value is not None else None
+            if day is not None and day.isoformat() != date_value:
+                raise ValueError("date must be YYYY-MM-DD")
+            assert leave is not None
+            deadline = parse_manual_deadline(leave, day, now_nyc())
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(EXIT_USAGE)
+        save_manual(cfg, ManualWake(deadline_at=deadline, force=force))
+    # Persistence precedes HA: a failed push remains pending for the next publish.
+    _alarm_publish_result(cfg)
 
 
 @alarm.command(name="status")
@@ -324,8 +374,36 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
     attrs = states.get(a.next_alarm_entity, {}).get("attributes")
     attrs = attrs if isinstance(attrs, dict) else {}
     hb = parse_ha_datetime(st(a.heartbeat_entity))
+    from datetime import UTC, timedelta
+
+    from commutecompass.alarm_state import load_manual
+    from commutecompass.timeutil import now_nyc, to_nyc
+
+    manual = load_manual(cfg, now_nyc(), dry_run=True) if a.window.enabled else None
+    manual_info: dict[str, object] | None = None
+    selected_manual = False
+    if manual is not None:
+        manual_wake = manual.deadline_at.astimezone(UTC) - timedelta(
+            minutes=a.window.first_alarm_lead_minutes,
+        )
+        selected_manual = (
+            st(a.enabled_entity) == "on" and nxt is not None
+            and nxt.astimezone(UTC) == manual_wake and str(attrs.get("kind", "")) != "nap"
+        )
+        conflict = (
+            nxt is not None and nxt.astimezone(UTC) < manual_wake
+            and str(attrs.get("kind", "")) != "nap"
+        )
+        manual_info = {
+            "deadline_at": manual.deadline_at.isoformat(),
+            "wake_at": to_nyc(manual_wake).isoformat(),
+            "force": manual.force, "selected": selected_manual, "conflict": conflict,
+        }
+    enabled_state = st(a.enabled_entity)
+    enabled = True if enabled_state == "on" else False if enabled_state == "off" else None
     payload = {
-        "enabled": st(a.enabled_entity) == "on",
+        "manual": manual_info,
+        "enabled": enabled,
         "next_alarm": nxt.isoformat() if nxt else None,
         "kind": attrs.get("kind"),
         "event": attrs.get("event"),
@@ -335,10 +413,20 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
     if as_json:
         click.echo(_json.dumps(payload, indent=2))
         return
-    click.echo(f"Alarm enabled: {'yes' if payload['enabled'] else 'no'}")
-    when = payload["next_alarm"] or "none"
+    enabled_label = "yes" if enabled is True else "no" if enabled is False else "unknown"
+    click.echo(f"Alarm enabled: {enabled_label}")
+    when = to_nyc(nxt).isoformat() if nxt else "none"
     kind = f" ({payload['kind']})" if payload["kind"] else ""
-    click.echo(f"Next alarm: {when}{kind}")
+    if selected_manual and manual is not None:
+        kind = f" (manual, leave {to_nyc(manual.deadline_at).strftime('%H:%M')})"
+    effective = " (disabled)" if enabled is False else " (switch unknown)" if enabled is None else ""
+    click.echo(f"Next alarm: {when}{kind}{effective}")
+    if manual is not None and manual_info is not None:
+        flags = (
+            f"force={'yes' if manual.force else 'no'}, "
+            f"conflict={'yes' if manual_info['conflict'] else 'no'}"
+        )
+        click.echo(f"Pending manual: leave {to_nyc(manual.deadline_at).isoformat()} ({flags})")
     if payload["event"]:
         click.echo(f"Event: {payload['event']}")
     click.echo(f"Daemon: {payload['daemon_state'] or 'unknown'} heartbeat={payload['heartbeat'] or 'never'}")
@@ -380,6 +468,10 @@ def alarm_skip(ctx: click.Context) -> None:
     """Skip the next alarm (auto-resets after it passes)."""
     cfg = _load_config(ctx.obj["config_path"])
     _alarm_call(cfg, cfg.alarm.skip_script, {})
+    # Explicit CLI skip/off retire pending manual intent only after HA accepts.
+    from commutecompass.alarm_state import clear_manual
+
+    clear_manual(cfg)
     click.echo("Next alarm skipped.")
 
 
@@ -398,6 +490,9 @@ def alarm_off(ctx: click.Context) -> None:
     """Turn the alarm master switch off."""
     cfg = _load_config(ctx.obj["config_path"])
     _alarm_call(cfg, "input_boolean.turn_off", {"entity_id": cfg.alarm.enabled_entity})
+    from commutecompass.alarm_state import clear_manual
+
+    clear_manual(cfg)
     click.echo("Alarm disabled.")
 
 
