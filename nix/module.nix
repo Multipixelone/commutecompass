@@ -87,10 +87,10 @@ let
   mkService = subcommand: description:
     let
       wrapper = pkgs.writeShellApplication {
-        name = "commutecompass-${subcommand}";
+        name = "commutecompass-${lib.replaceStrings [ " " ] [ "-" ] subcommand}";
         text = ''
           set -o pipefail
-          ${lib.escapeShellArg "${cfg.package}/bin/commutecompass"} --config ${lib.escapeShellArg configPath} ${lib.escapeShellArg subcommand} | ${lib.escapeShellArg sendWrapper}
+          ${lib.escapeShellArg "${cfg.package}/bin/commutecompass"} --config ${lib.escapeShellArg configPath} ${lib.escapeShellArgs (lib.splitString " " subcommand)} | ${lib.escapeShellArg sendWrapper}
         '';
       };
     in lib.recursiveUpdate serviceDefaults {
@@ -404,7 +404,8 @@ in {
       }
     );
     systemd.services."commutecompass-alarm-publish" = lib.mkIf cfg.alarm.enable (
-      mkPlainService "alarm publish" "commutecompass publish wake alarm"
+      # Operational fallback/conflict warnings use the normal notifier framing.
+      mkService "alarm publish" "commutecompass publish wake alarm"
     );
     systemd.timers."commutecompass-alarm-publish" = lib.mkIf cfg.alarm.enable {
       description = "Publish commutecompass wake alarm periodically";

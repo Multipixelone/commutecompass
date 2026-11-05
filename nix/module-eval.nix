@@ -4,7 +4,14 @@ let
   app = pkgs.symlinkJoin {
     name = "commutecompass-module-test";
     paths = [
-      (pkgs.writeShellScriptBin "commutecompass" ''exit "''${MOCK_APP_STATUS:-0}"'')
+      (pkgs.writeShellScriptBin "commutecompass" ''
+        if [ "''${EXPECT_ALARM_PUBLISH:-0}" = 1 ]; then
+          test "$#" = 4
+          test "$3" = alarm
+          test "$4" = publish
+        fi
+        exit "''${MOCK_APP_STATUS:-0}"
+      '')
       (pkgs.writeTextFile {
         name = "mock-openclaw-send";
         destination = "/share/commutecompass/openclaw-send.sh";
@@ -62,6 +69,8 @@ assert services.commutecompass-morning.serviceConfig.TimeoutStartSec == "10min";
 assert services.commutecompass-tomorrow.serviceConfig.TimeoutStartSec == "10min";
 assert services.commutecompass-gtfs-refresh.serviceConfig.TimeoutStartSec == "30min";
 assert services.commutecompass-alarm-publish.serviceConfig.TimeoutStartSec == "10min";
+assert lib.hasSuffix "/bin/commutecompass-alarm-publish"
+  services.commutecompass-alarm-publish.serviceConfig.ExecStart;
 assert (evaluate { services.commutecompass.jobTimeouts.poll = "3min"; })
   .systemd.services.commutecompass-poll.serviceConfig.TimeoutStartSec == "3min";
 assert services.commutecompass-alarm.serviceConfig.Type == "simple";
@@ -77,6 +86,7 @@ assert builtins.any (package: package.name == "commutecompass-skill") config.env
 pkgs.runCommand "commutecompass-module-eval" {} ''
   ${services.commutecompass-poll.serviceConfig.ExecStart}
   ${services.commutecompass-morning.serviceConfig.ExecStart}
+  EXPECT_ALARM_PUBLISH=1 ${services.commutecompass-alarm-publish.serviceConfig.ExecStart}
   status=0
   MOCK_APP_STATUS=17 ${services.commutecompass-poll.serviceConfig.ExecStart} || status=$?
   test "$status" = 17
