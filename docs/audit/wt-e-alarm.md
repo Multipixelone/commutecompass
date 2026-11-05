@@ -10,7 +10,9 @@
 
 **Confirmed source paths:** handled/window-done publishers at
 `alarm_daemon.py:1458,1467`, audio-failed publisher at `:1481`, and heartbeat callback
-at `:1484-1488` are invoked without a local guard. A custom/injected callback raising
+at `:1484-1488` are invoked without a local guard. State publication through
+`_reconcile_mode` (`:1446-1447`, `:1522-1528`) has the same failure mode, reproduced
+with an injected raising `publish_state`. A custom/injected callback raising
 `RuntimeError` escapes `run_once` and ends `run_forever` after cleanup.
 
 **Severity boundary:** normal Home Assistant HTTP failures already become `False`
@@ -30,15 +32,17 @@ wake scheduling, presence gates, or cleanup behavior already fixed.
 
 ### Regression tests / acceptance
 
-- Each of handled, window-done, audio-failed and heartbeat callbacks raises once;
-  `run_once` remains alive, next iteration runs, and later recovery can publish.
+- Each of state, handled, window-done, audio-failed and heartbeat callbacks raises
+  once; `run_once` remains alive, next iteration runs, and later recovery can publish.
+- Failed state publication leaves `_published_mode` dirty for retry; isolation is
+  per callback, not a catch-all that skips subsequent audio/state work.
 - Pending handled/window-done state is not falsely cleared on callback failure.
 - A cached due alarm still rings while optional publication fails.
 - Audio failure continues suppressing healthy heartbeat; ordinary false-returning
   callbacks retain their existing semantics; process-control exceptions propagate.
 - Use fake reader/publishers/audio and frozen aware time; no HA requests.
 
-**Focused command:** `pytest -q tests/test_alarm_daemon.py -k 'heartbeat or handled or window_done or audio_failed'`.
+**Focused command:** `pytest -q tests/test_alarm_daemon.py -k 'heartbeat or handled or window_done or audio_failed or publish_state or mode'`.
 **Suggested commit:** `fix(alarm): isolate optional publication callbacks`.
 
 ## Legacy audit disposition

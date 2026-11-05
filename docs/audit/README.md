@@ -37,15 +37,28 @@ user incident or provider failure was observed. Each brief states its evidence l
 | RTE-NEW1 | P2 | Huge overall route endpoint timestamp raises outside parser boundary | [WT-C](wt-c-routing.md) |
 | WX-NEW1 | P2 | Huge JSON integer in weather series escapes fail-open fallback | [WT-C](wt-c-routing.md) |
 | CFG-1 | P2 | Expected config load errors exit 1 instead of config exit 78 | [WT-D](wt-d-interface.md) |
+| CFG-2 | P1 | Existing validation diagnostics expose secret-bearing input URLs | [WT-D](wt-d-interface.md) |
 | NOTIFY-3 | P2 | HTTP 200 is accepted without a valid Telegram `ok:true` acknowledgement | [WT-G](wt-g-sensitive-logging.md) |
 | ALM-9 | P3 | Unexpected optional publisher/heartbeat callback exceptions escape daemon iteration | [WT-E](wt-e-alarm.md) |
 | ALM-10 | P3 | Non-finite/out-of-range HA geometry and invalid accuracy/radius are accepted | [WT-H](wt-h-ha-validation.md) |
 
 **Not confirmed implementation work:** [WT-F](wt-f-platform.md) investigates PLT-8's
-zero-check-derivation result and optional fork-PR Attic behavior. Raw LLM input size,
-validation-error secret disclosure, and arbitrary non-httpx exceptions in tomorrow's
+zero-check-derivation result and optional fork-PR Attic behavior. Raw LLM input size
+and arbitrary non-httpx exceptions in tomorrow's
 injected publisher need evidence before expanding scope. Briefs record legacy-ID
 resolutions/withdrawals, including intentional dead-man heartbeat suppression.
+
+## Oracle audit corrections
+
+An independent oracle review of `de6475f` confirmed CFG-2 and tightened the briefs:
+truthful degraded digests need formatter ownership; route fallbacks must preserve
+usable duration-only routes and unavailable provider timing; callback isolation
+includes state publication; log tests must exercise real httpx and httpcore child
+records without suppressing unrelated logs. These requirements are incorporated
+in each owner brief. Malformed individual calendar records still have a separate
+completeness tradeoff; Telegram's existing bounded whole-message retries can
+repeat earlier chunks. HA geometry work is boundary hardening, not a demonstrated
+poll presence failure. No fixes may silently expand into those residual designs.
 
 ## Baseline evidence
 
@@ -80,14 +93,14 @@ exclusive, including test files. Each brief has focused tests and a validation o
 
 | Lane | Worktree slug | Owned application area | Order |
 |---|---|---|---|
-| A | `audit-morning-preserve` | `jobs/morning.py`, `test_jobs.py` | First priority |
+| A | `audit-morning-preserve` | morning, formatter and their tests | First priority |
 | G | `audit-sensitive-http` | monitoring, notify, optional new HTTP-log helper and their tests | First priority; parallel with A |
 | B | `audit-calendar` | calendar client and its tests | Can implement in parallel; merge after A |
 | C | `audit-provider-parsing` | routing/weather and their tests | Independent |
-| D | `audit-config-errors` | config/CLI and their tests | Independent |
+| D | `audit-config-errors` | config/CLI and their tests | P1 disclosure fix; independent |
 | E | `audit-alarm-callbacks` | daemon and its tests | Independent |
 | H | `audit-ha-geometry` | models/HA client and their tests | Independent; integration checks consumers |
-| F | `audit-check-execution` | conditional CI/flake/module-eval edits | Optional investigation; serialize Nix validation |
+| F | `audit-check-execution` | no write scope; investigation only | Return evidence; defer full check realization |
 
 A must be integrated before B: invalid calendar containers must produce a controlled
 fetch failure, never an authoritative empty list that loses reminders. G owns any
@@ -159,7 +172,7 @@ Replace the bracketed values and pass the prompt to an independent fixer:
 > Work only in `[absolute .slim/worktrees/slug]` on `[branch]`, from the shared audit
 > handoff commit `[commit]`. Read `AGENTS.md`, `docs/audit/README.md`, and
 > `docs/audit/[brief].md`. Implement only that brief's confirmed findings within its
-> exclusive write scope; for WT-F investigate first and patch only a proven gap.
+> exclusive write scope; WT-F is read-only and returns evidence without a patch.
 > You own focused validation and one Conventional Commit per logical fix. Add failing
 > offline regression tests before fixing. Preserve privacy and existing public
 > contracts. Use the agent-run-long skill/helper for long validation; do not run the

@@ -17,8 +17,21 @@ The Click config path option (`:92-99`) does not require an existing file.
 malformed TOML, `99:99` time, or `notify=42` exit 1 with respectively
 `FileNotFoundError`, `TOMLDecodeError`, `ValueError`, or `AttributeError`, rather than
 78. They fail before DB or network activity. `int(TELEGRAM_CHAT_ID)` is another
-conversion requiring a regression test. A claim that validation output exposes
-secrets remains **unconfirmed**; do not present it as an observed leak.
+conversion requiring a regression test.
+
+## CFG-2 — P1 — existing validation diagnostics disclose secret input
+
+**Confirmed by oracle offline probe:** an otherwise-valid synthetic config with a
+sentinel-bearing invalid-scheme heartbeat URL exits 78 and prints the sentinel.
+`cli.py:49-51` prints raw Pydantic `ValidationError`; the heartbeat validator at
+`config.py:271-277` embeds the full URL in its own error message. This is a demonstrated
+malformed-config disclosure path, not evidence of a real credential incident.
+
+Sanitize existing validation diagnostics too: render safe field/error categories,
+never raw input, validator exception messages or error context. Merely hiding
+Pydantic `input_value` is insufficient because validator text already contains the
+secret. Remove secret interpolation in the heartbeat validator itself. Add an
+otherwise-valid synthetic-config CLI regression with an invalid URL sentinel.
 
 ### Fix boundary
 

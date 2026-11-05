@@ -21,7 +21,11 @@ Keep valid-event per-item isolation, enabled-calendar selection, and timezone ru
 **Acceptance/tests:** mock the Calendar service chain, without authorization/network;
 exercise `items=None`, scalar, string, mapping, absent key, `[]`, and mixed valid/invalid
 events. Invalid containers produce the chosen controlled error, not an accidental
-iteration exception; valid records retain NYC-aware times. Do not expand pagination
+iteration exception; valid records retain NYC-aware times. A malformed later page or
+calendar must fail the whole fetch, never return earlier accumulated partial events
+as authoritative success. Individual malformed records remain intentionally skipped;
+that residual completeness/reconciliation tradeoff needs a separate decision, not
+an incidental change in this lane. Do not expand pagination
 or change multi-calendar completeness semantics without a separate design decision.
 
 ## RES-13 — P2 — credential writes are non-atomic and briefly over-permissive

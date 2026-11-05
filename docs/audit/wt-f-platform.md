@@ -2,9 +2,8 @@
 
 **Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
 **Slug / branch:** `audit-check-execution` / `ci/audit-check-execution`.
-**Conditional exclusive write scope:** `.github/workflows/ci.yml`,
-`.github/actions/setup-nix-attic/action.yml`, `flake.nix`, `nix/module-eval.nix`.
-**Validation owner:** this lane's fixer; serialize its Nix builds with integration.
+**Write scope:** none in this round; return investigation evidence only.
+**Validation owner:** this lane's fixer for inspection; integration owns check realization.
 **Status:** investigation first; no confirmed production platform defect warrants a
 blind patch. Keep Python/application code out of this lane.
 
@@ -21,19 +20,21 @@ that their build phases ran. Evaluation itself can force module assertions; do n
 claim those assertions were skipped or that hosted CI necessarily behaves like the
 local machine. The separate default package build succeeded.
 
-### Investigation and conditional fix
+### Investigation only
 
 1. Inspect selected system, effective local Nix settings/check selection, and the
    flake output shape. Determine why zero derivations ran locally; distinguish local
    configuration/cache behavior from a reproducible workflow flaw.
-2. Explicitly validate the three `checks.x86_64-linux` attributes using the helper
-   below. Report evaluated assertions separately from realized derivations/cache hits.
-3. If reproducible CI ambiguity remains, make the smallest workflow/check-selection
+2. Inspect the three `checks.x86_64-linux` attributes without realizing them; the
+   integration validation owner coordinates explicit realization because the
+   pre-commit check includes the full suite. Distinguish evaluated assertions from
+   realized derivations/cache hits in the available evidence.
+3. If reproducible CI ambiguity remains, propose (do not implement) the smallest workflow/check-selection
    change that explicitly validates the intended native checks. Preserve package
    build/Attic behavior and existing module assertions. Otherwise report no change
    needed and retain evidence; do not alter CI for a local-only artifact.
 
-**Focused command (through `agent-run-long`, not a bare long shell call):**
+**Deferred integration command (not this lane; through `agent-run-long`):**
 
 ```sh
 agent-run-long --label audit-explicit-checks --timeout 30m -- nix build --no-link --print-build-logs '.#checks.x86_64-linux.module-eval' '.#checks.x86_64-linux.renovate-policy' '.#checks.x86_64-linux.pre-commit-check'
@@ -42,8 +43,8 @@ agent-run-long --label audit-explicit-checks --timeout 30m -- nix build --no-lin
 Use outer tool timeout >=1860000ms; pre-commit-check includes tests and must not run
 concurrently with another full validation in the same checkout. The audit did **not**
 run this explicit command. Acceptance is evidence for the intended check outputs and
-an explained zero-check result, not merely an exit-0 summary. For any workflow edit,
-validate syntax and changed expressions locally; do not dispatch hosted CI or deploy.
+an explained zero-check result, not merely an exit-0 summary. A workflow patch
+requires separately approved scope. Do not dispatch hosted CI or deploy.
 
 ## F-PLAT-03 — unconfirmed fork-PR Attic resilience question
 

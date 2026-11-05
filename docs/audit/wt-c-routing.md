@@ -16,17 +16,31 @@ with overall departure `1e100` raises `OverflowError` through `plan_route`.
 Infinity was contained as `ValueError` on the audit platform; do not claim every
 invalid timestamp escapes. Severity is P2 because this needs malformed provider data.
 
-Use the existing safe timestamp validator for overall endpoints as well as steps.
-Choose a deterministic fallback from validated route legs/request time, or reject
-the route through the existing no-route path. Avoid fabricating current-time endpoints.
-Defensive outer exception handling is useful but does not replace input validation.
-Preserve valid schedules, routing modes, and bridge-only GTFS identity provenance.
+Harden the existing timestamp validator itself: `_scheduled_time` (`:207-219`)
+calls `math.isfinite` before its guarded conversion, so `10**1000` also raises there,
+including through `route_timing`. Use the hardened validator for overall endpoints.
+Preserve otherwise-usable duration-only routes and normally untimed non-transit
+responses, including existing zero/negative endpoint behavior (`tests/test_routing.py:163-190`).
+Use chronological validated endpoints from the selected candidate. With one valid
+endpoint and usable duration, derive only the missing display endpoint using guarded
+UTC-instant arithmetic. With neither valid, anchor display arrival to explicit request
+arrival time; production `plan_route` must pass it. Direct-parser calls without either
+endpoint or request time use a fixed aware epoch display placeholder, preserving
+usable duration-only compatibility. Guard duration and arithmetic overflow too.
+Never borrow nested transit-leg wall-clock placeholders (`routing.py:250-273`).
+In `route_timing`, missing/invalid provider timestamps must remain unavailable; do
+not promote derived display timestamps into provider schedules. Reject genuinely
+unusable routes, not every route missing an endpoint. Defensive outer exception
+handling does not replace numeric validation. Preserve live/legacy/cached timing,
+selected alternatives, routing modes, and bridge-only GTFS identity provenance.
 
 **Acceptance/tests:** parameterize departure and arrival independently with strings,
 bools, NaN, infinity, `1e100`, huge integers, zero, negative, and absent values. No
 uncaught exception from the public planner; each case gives a documented safe fallback
-or no-route result. Valid endpoints remain NYC-aware, and fallbacks are independent
-of wall-clock time. Keep existing valid/multi-leg parsing coverage.
+or no-route result without discarding usable duration-only routes. Valid endpoints
+remain NYC-aware, and fallbacks are independent of wall-clock time. Include missing
+nested transit timestamps and direct helper/route_timing huge-integer tests; keep
+existing valid/multi-leg, live/legacy/cache and selected-alternative coverage.
 
 ## WX-NEW1 — P2 — numeric weather parsing escapes fail-open boundary
 
@@ -43,7 +57,7 @@ explicit public-boundary contract over unrelated weather refactoring.
 
 **Acceptance/tests:** huge integers, non-finite values, missing/short series, and
 ordinary malformed values cannot crash `weather_buffer`; invalid data alone produces
-the clear-weather fallback. Valid precipitation/wind/snow and repeated-DST-hour tests
+the clear-weather fallback. Valid precipitation/probability/snow and repeated-DST-hour tests
 still pass. Use only mocked forecast data.
 
 **Focused command:** `pytest -q tests/test_routing.py tests/test_weather.py`.

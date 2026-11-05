@@ -12,8 +12,12 @@
 `models.py:312-328` accept NaN, out-of-range latitude/longitude and negative radius.
 `ha_client.py:75-89` checks only numeric types; NaN accuracy bypasses the
 `accuracy_m > min_accuracy_m` rejection. Zone ingestion at `:255-275` has no finite
-or geographic bounds either. Invalid data can poison distance/presence decisions.
-This is malformed-input hardening, not a demonstrated normal HA outage.
+or geographic bounds either. This is boundary/model hardening, not a proven current
+poll presence-suppression bug: `jobs/poll.py:58-75` already guards invalid coordinates
+and accuracy, and zone radius currently has no distance-calculation consumer.
+Preserve those consumer guards and unknown accuracy as `None`. Stored invalid
+locations already have a safe deserialization boundary (`store.py:1106-1120`);
+no store rewrite or migration is established as necessary.
 
 ### Fix boundary
 

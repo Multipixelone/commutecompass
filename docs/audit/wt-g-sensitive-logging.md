@@ -40,9 +40,15 @@ message bodies, token URLs, or heartbeat credentials.
 **Logging acceptance/tests:** capture the application, retry, httpx and httpcore
 loggers at DEBUG with synthetic sentinels. Exercise success, 4xx, transient retry,
 and transport exceptions; sentinel URL path/query/token values never appear in
-formatted records or retained record arguments/exception info. Test two concurrent
-fake clients with different sentinels to catch unsafe global logger mutations.
-Heartbeat still returns `True` on success and `False` on failure; notifier chunking,
+formatted records or retained record arguments/exception info. Use at least one
+real `httpx.Client` with `MockTransport` to exercise actual httpx URL logging. Explicitly
+exercise emitting httpcore child loggers (e.g. `httpcore.http11`) with sentinel-bearing
+diagnostic/exception content: MockTransport alone bypasses httpcore. Parent/root
+logger filters do not automatically filter propagated descendant records; a single
+handler formatter or URL-regex replacement is insufficient. Test concurrent sensitive
+requests and an unrelated request/logging control whose logs remain available.
+No temporary global/root/library log-level changes. A request-context-scoped policy
+is a reasonable direction. Heartbeat still returns `True` on success and `False` on failure; notifier chunking,
 stdout framing and existing send return values remain compatible except below.
 
 ## NOTIFY-3 — P2 — HTTP 200 is accepted without a valid Telegram acknowledgement
@@ -53,11 +59,14 @@ No real Telegram HTTP-200/ok-false incident was established; this is robustness
 against malformed or intermediary responses, not a proven provider outage mode.
 
 Require a JSON mapping with `ok is True` for each chunk. Reject malformed JSON,
-wrong-shaped JSON, missing/false/wrong-typed `ok`, and non-200 responses with a safe
+wrong-shaped JSON, missing/false/wrong-typed `ok` (including numeric `1`), and non-200 responses with a safe
 failure diagnostic. Stop after the first failed chunk; retain existing bounded
 message splitting. Do not add transport retries here: retrying a successfully sent
 but unacknowledged chunk can duplicate delivery. Preserve the poll's existing
-claim/release/retry policy without editing it.
+claim/release/retry policy without editing it. This is not exactly-once delivery:
+a delivered-but-unacknowledged chunk or later-chunk failure can make poll retry the
+whole message within existing bounds, duplicating earlier chunks. Accept/document
+that existing bounded-delivery tradeoff; do not redesign poll retries in this lane.
 
 **Acknowledgement acceptance/tests:** `ok:true` succeeds; `ok:false`, absent/string
 `ok`, malformed JSON and list/scalar JSON fail; later-chunk failure returns `False`
