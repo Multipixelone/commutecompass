@@ -12,6 +12,7 @@ from commutecompass.models import (
     Alert,
     CalendarSpec,
     Config,
+    CurrentLocation,
     Event,
     GtfsProvenance,
     MtaConfig,
@@ -25,6 +26,7 @@ from commutecompass.models import (
     Route,
     SchedulingConfig,
     TransitLeg,
+    ZoneInfo,
 )
 
 # ─────────── Timezone helpers ───────────
@@ -39,6 +41,52 @@ def aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone(timedelta(hours=-5)))
     return dt
+
+
+@pytest.mark.parametrize("model", [CurrentLocation, ZoneInfo])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in ("lat", "lon")
+        for value in (float("nan"), float("inf"), -float("inf"), True, False, 10**400)
+    ] + [("lat", -90.1), ("lat", 90.1), ("lon", -180.1), ("lon", 180.1)],
+)
+def test_ha_models_reject_invalid_coordinates(
+    model: type[CurrentLocation | ZoneInfo], field: str, value: object,
+) -> None:
+    data: dict[str, Any] = {
+        "lat": 0, "lon": 0, "captured_at": nyc_now(), "name": "Synthetic zone",
+    }
+    data[field] = value
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
+
+
+@pytest.mark.parametrize("model, field", [(CurrentLocation, "accuracy_m"), (ZoneInfo, "radius_m")])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -float("inf"), -0.1, True, False, 10**400, "5"],
+)
+def test_ha_models_reject_invalid_distance(
+    model: type[CurrentLocation | ZoneInfo], field: str, value: object,
+) -> None:
+    data: dict[str, Any] = {
+        "lat": 0, "lon": 0, "captured_at": nyc_now(), "name": "Synthetic zone",
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
+
+
+@pytest.mark.parametrize("lat, lon", [(-90, -180), (0, 0), (90, 180)])
+def test_ha_models_accept_coordinate_boundaries(lat: float, lon: float) -> None:
+    captured_at = nyc_now()
+    location = CurrentLocation(lat=lat, lon=lon, captured_at=captured_at)
+    assert location.accuracy_m is None
+    assert location.captured_at == captured_at
+    assert CurrentLocation(lat=lat, lon=lon, captured_at=captured_at, accuracy_m=0).accuracy_m == 0
+    assert ZoneInfo(name="Synthetic zone", lat=lat, lon=lon).radius_m == 0
+    assert ZoneInfo(name="Synthetic zone", lat=lat, lon=lon, radius_m=5).radius_m == 5
 
 
 # ─────────── Config model tests ───────────

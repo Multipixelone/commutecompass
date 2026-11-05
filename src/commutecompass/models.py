@@ -310,21 +310,21 @@ class PingEntry(BaseModel):
 
 
 class CurrentLocation(BaseModel):
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90.0, le=90.0, allow_inf_nan=False, strict=True)
+    lon: float = Field(ge=-180.0, le=180.0, allow_inf_nan=False, strict=True)
     zone: str | None = None
     captured_at: datetime
     source: str = "home_assistant"
-    accuracy_m: float | None = None
+    accuracy_m: float | None = Field(default=None, ge=0, allow_inf_nan=False, strict=True)
 
 
 class ZoneInfo(BaseModel):
     """Snapshot of an HA `zone.*` entity used for origin/destination matching."""
 
     name: str
-    lat: float
-    lon: float
-    radius_m: float = 0.0
+    lat: float = Field(ge=-90.0, le=90.0, allow_inf_nan=False, strict=True)
+    lon: float = Field(ge=-180.0, le=180.0, allow_inf_nan=False, strict=True)
+    radius_m: float = Field(default=0.0, ge=0, allow_inf_nan=False, strict=True)
     entity_id: str = ""
 
 

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 
 import httpx
+from pydantic import ValidationError
 
 from commutecompass.models import CurrentLocation, ZoneInfo
 from commutecompass.timeutil import NYC_TZ
@@ -77,10 +78,25 @@ def fetch_location(
     if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
         return None
 
-    accuracy_raw = attrs.get("gps_accuracy")
-    accuracy_m: float | None = (
-        float(accuracy_raw) if isinstance(accuracy_raw, (int, float)) else None
-    )
+    state = payload.get("state")
+    zone = state if isinstance(state, str) and state else None
+    captured_at = _parse_last_updated(payload.get("last_updated"))
+    if captured_at is None:
+        return None
+
+    try:
+        location = CurrentLocation(
+            lat=lat,
+            lon=lon,
+            zone=zone,
+            captured_at=captured_at,
+            source="home_assistant",
+            accuracy_m=attrs.get("gps_accuracy"),
+        )
+    except (ValidationError, OverflowError):
+        return None
+
+    accuracy_m = location.accuracy_m
     if (
         min_accuracy_m is not None
         and min_accuracy_m > 0
@@ -95,21 +111,7 @@ def fetch_location(
         )
         return None
 
-    state = payload.get("state")
-    zone = state if isinstance(state, str) and state else None
-
-    captured_at = _parse_last_updated(payload.get("last_updated"))
-    if captured_at is None:
-        return None
-
-    return CurrentLocation(
-        lat=float(lat),
-        lon=float(lon),
-        zone=zone,
-        captured_at=captured_at,
-        source="home_assistant",
-        accuracy_m=accuracy_m,
-    )
+    return location
 
 
 def call_service(
@@ -259,18 +261,20 @@ def fetch_zones(
         lon = attrs.get("longitude")
         if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
             continue
-        radius = attrs.get("radius", 0.0)
-        radius_m = float(radius) if isinstance(radius, (int, float)) else 0.0
         friendly = attrs.get("friendly_name") or entity_id.removeprefix("zone.")
         if not isinstance(friendly, str) or not friendly:
             continue
-        zones[friendly.lower()] = ZoneInfo(
-            name=friendly,
-            lat=float(lat),
-            lon=float(lon),
-            radius_m=radius_m,
-            entity_id=entity_id,
-        )
+        try:
+            zone = ZoneInfo(
+                name=friendly,
+                lat=lat,
+                lon=lon,
+                radius_m=attrs.get("radius", 0.0),
+                entity_id=entity_id,
+            )
+        except (ValidationError, OverflowError):
+            continue
+        zones[friendly.lower()] = zone
 
     return zones
 

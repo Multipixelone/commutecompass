@@ -62,6 +62,76 @@ def test_tomorrow_service_must_have_exactly_two_components(service: str) -> None
     call.assert_not_called()
 
 
+_INVALID_GEOMETRY_VALUES: tuple[object, ...] = (
+    float("nan"), float("inf"), -float("inf"), True, False, 10**400, "5", [], {},
+)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        (field, value)
+        for field in ("latitude", "longitude", "gps_accuracy")
+        for value in _INVALID_GEOMETRY_VALUES
+    ] + [
+        ("latitude", None), ("longitude", None),
+        ("latitude", -90.1), ("latitude", 90.1),
+        ("longitude", -180.1), ("longitude", 180.1), ("gps_accuracy", -1),
+    ],
+)
+def test_fetch_location_rejects_malformed_geometry(field: str, value: object) -> None:
+    attrs = {"latitude": 0, "longitude": 0, "gps_accuracy": 10, field: value}
+    payload = {"attributes": attrs, "last_updated": "2026-05-09T12:34:56+00:00"}
+    with patch("httpx.Client") as client:
+        response = client.return_value.__enter__.return_value.get.return_value
+        response.status_code = 200
+        response.json.return_value = payload
+        assert fetch_location("http://ha", "person.test", "tok", min_accuracy_m=500) is None
+
+
+@pytest.mark.parametrize("accuracy", [None, 0, 5])
+@pytest.mark.parametrize("lat, lon", [(-90, -180), (0, 0), (90, 180)])
+def test_fetch_location_preserves_valid_geometry(
+    accuracy: float | None, lat: float, lon: float,
+) -> None:
+    payload = {
+        "attributes": {"latitude": lat, "longitude": lon, "gps_accuracy": accuracy},
+        "last_updated": "2026-05-09T12:34:56+00:00",
+    }
+    with patch("httpx.Client") as client:
+        client.return_value.__enter__.return_value.get.return_value = _mock_get_response(200, payload)
+        location = fetch_location("http://ha", "person.test", "tok", min_accuracy_m=500)
+    assert location is not None
+    assert (location.lat, location.lon, location.accuracy_m) == (lat, lon, accuracy)
+    assert location.captured_at.isoformat() == "2026-05-09T08:34:56-04:00"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        (field, value)
+        for field in ("latitude", "longitude", "radius")
+        for value in (*_INVALID_GEOMETRY_VALUES, None)
+    ] + [
+        ("latitude", -90.1), ("latitude", 90.1),
+        ("longitude", -180.1), ("longitude", 180.1), ("radius", -1),
+    ],
+)
+def test_fetch_zones_skips_malformed_geometry_individually(field: str, value: object) -> None:
+    payload = [
+        {"entity_id": "zone.before", "attributes": {"latitude": -90, "longitude": -180}},
+        {"entity_id": "zone.bad", "attributes": {"latitude": 0, "longitude": 0, field: value}},
+        {"entity_id": "zone.after", "attributes": {"latitude": 90, "longitude": 180, "radius": 0}},
+    ]
+    with patch("httpx.Client") as client:
+        response = client.return_value.__enter__.return_value.get.return_value
+        response.status_code = 200
+        response.json.return_value = payload
+        zones = fetch_zones("http://ha", "tok")
+    assert set(zones) == {"before", "after"}
+    assert zones["before"].radius_m == zones["after"].radius_m == 0
+
+
 class TestFetchLocation:
     @pytest.mark.parametrize("timestamp", [None, "", "bad", 123, "2026-05-09T12:34:56"])
     def test_invalid_timestamp_never_manufactures_fresh_fix(self, timestamp: object) -> None:
@@ -97,6 +167,7 @@ class TestFetchLocation:
         assert result.lon == -74.006
         assert result.zone == "not_home"
         assert result.source == "home_assistant"
+        assert result.accuracy_m is None
 
         call_kwargs = mock_instance.get.call_args.kwargs
         assert call_kwargs["headers"]["Authorization"] == "Bearer secret-token"
