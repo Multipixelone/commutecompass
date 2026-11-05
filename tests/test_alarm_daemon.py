@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -1143,6 +1144,179 @@ def test_nap_snooze_shutdown_restart_preserves_ha_cleanup_mode(tmp_path: Path) -
     resumed.run_once()
     assert resumed.state.mode == "ringing" and player.events[0] == "start"
     assert published[-1] == "ringing" and "idle" not in published
+
+
+@pytest.mark.parametrize("operation", [
+    "publish_state", "publish_handled", "publish_window_done", "publish_audio_failed", "heartbeat",
+])
+@pytest.mark.parametrize("raises", [False, True], ids=["false-return", "exception"])
+def test_optional_callback_failure_retries_without_interrupting_audio(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, operation: str, raises: bool,
+) -> None:
+    clock = [at(0)]
+    cache = AlarmCache(tmp_path / "c.json")
+    cache.save(DaemonState(window_done_pending=at(-1)))
+    player = Mock(spec=FakePlayer)
+    callbacks = {name: Mock(return_value=True) for name in (
+        "publish_state", "publish_handled", "publish_window_done", "publish_audio_failed",
+        "heartbeat", "publish_status",
+    )}
+    failed = callbacks[operation]
+    failed.side_effect = [RuntimeError("private callback payload") if raises else False, True]
+    daemon = AlarmDaemon(
+        reader=lambda: inp(), player=player, cache=cache, settings=S, clock=lambda: clock[0],
+    )
+    for name, callback in callbacks.items():
+        setattr(daemon, name, callback)
+
+    assert daemon.run_once() == 2.0
+    assert daemon.state.mode == "ringing"
+    player.start.assert_called_once()
+    player.tick.assert_called_once()
+    player.stop.assert_not_called()
+    assert all(callback.call_count == 1 for callback in callbacks.values())
+    if operation == "publish_state":
+        assert daemon._published_mode is None
+    elif operation == "publish_handled":
+        assert daemon._handled_pending == T0
+    elif operation == "publish_window_done":
+        assert daemon._window_done_pending == at(-1)
+        assert cache.load().window_done_pending == at(-1)
+    elif operation == "publish_audio_failed":
+        assert daemon._audio_reported is None
+    else:
+        assert daemon._last_heartbeat is None
+    if raises:
+        assert caplog.messages == [f"alarm daemon: {operation} failed: RuntimeError"]
+    else:
+        assert not caplog.messages
+    assert "private callback payload" not in caplog.text
+
+    clock[0] = at(0.1)
+    assert daemon.run_once() == 2.0
+    assert failed.call_count == 2
+    assert player.tick.call_count == 2
+    player.start.assert_called_once()
+    player.stop.assert_not_called()
+    assert daemon._published_mode == "ringing"
+    assert daemon._handled_pending is None
+    assert daemon._window_done_pending is None
+    assert cache.load().window_done_pending is None
+    assert daemon._audio_reported is False
+    assert daemon._last_heartbeat == (clock[0] if operation == "heartbeat" else T0)
+    daemon.run_once()
+    assert failed.call_count == 2  # Acknowledged paths stop retrying; heartbeat is throttled.
+    assert player.tick.call_count == 3
+
+
+def test_raising_mode_callback_retries_current_mode(tmp_path: Path) -> None:
+    clock = [at(0)]
+    feed = [inp()]
+    modes = Mock(side_effect=[RuntimeError("unavailable"), True])
+    player = Mock(spec=FakePlayer)
+    daemon = AlarmDaemon(
+        reader=lambda: feed[0], player=player, cache=AlarmCache(tmp_path / "c.json"),
+        settings=S, clock=lambda: clock[0], publish_state=modes,
+    )
+    daemon.run_once()
+    assert daemon._published_mode is None
+    player.tick.assert_called_once()
+    clock[0] = at(1)
+    feed[0] = inp(stop_pressed_at=at(0.5))
+    daemon.run_once()
+    assert [call.args[0] for call in modes.call_args_list] == ["ringing", "idle"]
+    assert daemon._published_mode == "idle"
+    player.stop.assert_called_once()
+
+
+@pytest.mark.parametrize("audio_stage", ["start", "tick"])
+def test_audio_failure_callback_exception_preserves_dead_man_until_playback_recovers(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, audio_stage: str,
+) -> None:
+    clock = [at(0)]
+    feed = [inp()]
+    player = Mock(spec=FakePlayer)
+    getattr(player, audio_stage).side_effect = RuntimeError("offline audio failure")
+    failed = Mock(side_effect=[RuntimeError("private failure payload"), True,
+                               RuntimeError("private recovery payload"), True])
+    beats = Mock(return_value=True)
+    handled = Mock(return_value=True)
+    daemon = AlarmDaemon(
+        reader=lambda: feed[0], player=player, cache=AlarmCache(tmp_path / "c.json"),
+        settings=S, clock=lambda: clock[0], publish_audio_failed=failed, heartbeat=beats,
+        publish_handled=handled,
+    )
+    daemon.run_once()
+    assert daemon.state.audio_failed and daemon.cache.load().audio_failed
+    assert daemon._audio_reported == (False if audio_stage == "start" else None)
+    beats.assert_not_called()
+    handled.assert_not_called()
+    clock[0] = at(1)
+    daemon.run_once()
+    assert daemon._audio_reported is True
+    clock[0] = at(2)
+    feed[0] = inp(stop_pressed_at=at(1.5))
+    daemon.run_once()
+    assert daemon.state.mode == "idle" and daemon.state.audio_failed
+    assert daemon.cache.load().audio_failed
+    beats.assert_not_called()  # Neither successful publication nor idle clears audio health.
+    assert failed.call_count == 2
+    assert getattr(player, audio_stage).call_count == 1  # Failed audio is not ticked/restarted.
+
+    player = Mock(spec=FakePlayer)
+    daemon.player = player
+    clock[0] = at(3)
+    feed[0] = inp(at(3))
+    daemon.run_once()
+    assert not daemon.state.audio_failed and not daemon.cache.load().audio_failed
+    assert daemon._audio_reported is None  # Failed recovery publication remains dirty.
+    beats.assert_called_once_with(clock[0])
+    handled.assert_called_once_with(clock[0])
+    player.start.assert_called_once()
+    player.tick.assert_called_once()
+    clock[0] = at(3.1)
+    daemon.run_once()
+    assert daemon._audio_reported is False
+    assert [call.args[0] for call in failed.call_args_list] == [True, True, False, False]
+    assert player.tick.call_count == 2
+    assert "private failure payload" not in caplog.text
+    assert "private recovery payload" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", [
+    "publish_state", "publish_handled", "publish_window_done", "publish_audio_failed",
+    "heartbeat", "publish_status",
+])
+@pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
+def test_optional_callbacks_propagate_process_control_exceptions(
+    tmp_path: Path, operation: str, exception: type[BaseException],
+) -> None:
+    cache = AlarmCache(tmp_path / "c.json")
+    cache.save(DaemonState(window_done_pending=at(-1)))
+    daemon = AlarmDaemon(
+        reader=lambda: inp(), player=FakePlayer(), cache=cache, settings=S, clock=lambda: T0,
+    )
+    setattr(daemon, operation, Mock(side_effect=exception))
+    with pytest.raises(exception):
+        daemon.run_once()
+
+
+def test_status_callback_exception_stays_isolated_and_redacted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    player = Mock(spec=FakePlayer)
+    status = Mock(side_effect=[RuntimeError("private status payload"), True])
+    daemon = AlarmDaemon(
+        reader=lambda: inp(), player=player, cache=AlarmCache(tmp_path / "c.json"),
+        settings=S, clock=lambda: T0, publish_status=status,
+    )
+    daemon.run_once()
+    daemon.run_once()
+    assert daemon.state.mode == "ringing"
+    assert player.tick.call_count == 2
+    assert status.call_count == 2
+    assert caplog.messages == ["alarm daemon: publish_status failed: RuntimeError"]
+    assert "private status payload" not in caplog.text
 
 
 def test_failed_mode_publication_retries_current_not_stale_mode(tmp_path: Path) -> None:

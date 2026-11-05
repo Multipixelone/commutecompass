@@ -1455,7 +1455,9 @@ class AlarmDaemon:
         if (
             inputs.ha_ok
             and self._window_done_pending is not None
-            and self.publish_window_done(self._window_done_pending)
+            and self._safe_callback(
+                "publish_window_done", self.publish_window_done, self._window_done_pending
+            )
         ):
             self._window_done_pending = None
             self.state = replace(self.state, window_done_pending=None)
@@ -1464,7 +1466,7 @@ class AlarmDaemon:
         if (
             inputs.ha_ok
             and self._handled_pending is not None
-            and self.publish_handled(self._handled_pending)
+            and self._safe_callback("publish_handled", self.publish_handled, self._handled_pending)
         ):
             self._handled_pending = None
         if self.state.ring is not None and self.state.mode == "ringing":
@@ -1478,19 +1480,21 @@ class AlarmDaemon:
         if (
             inputs.ha_ok
             and self._audio_reported != self.state.audio_failed
-            and self.publish_audio_failed(self.state.audio_failed)
+            and self._safe_callback(
+                "publish_audio_failed", self.publish_audio_failed, self.state.audio_failed
+            )
         ):
             self._audio_reported = self.state.audio_failed
         if inputs.ha_ok and self._audio_healthy and (
             self._last_heartbeat is None
             or (now.astimezone(UTC) - self._last_heartbeat.astimezone(UTC)).total_seconds() >= self.poll_seconds
-        ) and self.heartbeat(now):
+        ) and self._safe_callback("heartbeat", self.heartbeat, now):
             self._last_heartbeat = now
         if inputs.ha_ok and self.publish_status is not None:
             try:
                 self.publish_status(status_snapshot(self.state, self.clock()))
             except Exception as exc:  # noqa: BLE001 — advisory export must never gate controls
-                logger.warning("alarm daemon: status export failed: %s", exc)
+                logger.warning("alarm daemon: publish_status failed: %s", type(exc).__name__)
         return RINGING_POLL_SECONDS if self.state.mode != "idle" else self.poll_seconds
 
     def _apply(self, action: Action) -> None:
@@ -1519,13 +1523,21 @@ class AlarmDaemon:
         # PublishState actions are coalesced to the final current mode below;
         # failed writes stay dirty and are retried on subsequent healthy polls.
 
+    def _safe_callback[T](
+        self, operation: str, callback: Callable[[T], bool], value: T,
+    ) -> bool:
+        """Optional publishers fail independently without acknowledging their payload."""
+        try:
+            return callback(value)
+        except Exception as exc:  # noqa: BLE001 — local ringing must survive optional HA callbacks
+            logger.warning("alarm daemon: %s failed: %s", operation, type(exc).__name__)
+            return False
+
     def _reconcile_mode(self) -> None:
         if self._published_mode == self.state.mode:
             return
-        if self.publish_state(self.state.mode):
+        if self._safe_callback("publish_state", self.publish_state, self.state.mode):
             self._published_mode = self.state.mode
-        else:
-            logger.warning("alarm daemon: failed to publish state %s", self.state.mode)
 
     def _stop_audio(self) -> None:
         try:
