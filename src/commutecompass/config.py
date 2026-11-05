@@ -471,10 +471,10 @@ class ConfigError(Exception):
     that's broken in one error, not one per restart.
     """
 
-    def __init__(self, missing: list[str]) -> None:
+    def __init__(self, missing: list[str], *, message: str | None = None) -> None:
         self.missing = missing
         names = ", ".join(missing)
-        super().__init__(f"missing required environment variables: {names}")
+        super().__init__(message or f"missing required environment variables: {names}")
 
 
 # ─────────── Public API ───────────
@@ -522,14 +522,37 @@ def load_from_env(
 
 def load_config(toml_path: Path) -> Config:
     """Load and validate config from TOML file, merging in required env vars."""
-    with open(toml_path, "rb") as fh:
-        raw = tomllib.load(fh)
+    try:
+        with open(toml_path, "rb") as fh:
+            raw = tomllib.load(fh)
+    except OSError:
+        raise ConfigError([], message="cannot read config file") from None
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        raise ConfigError([], message="invalid TOML config file") from None
+
+    # Reject malformed sections before dict access, without displaying input.
+    for name, field in Config.model_fields.items():
+        annotation = field.annotation
+        if (
+            isinstance(annotation, type)
+            and issubclass(annotation, BaseModel)
+            and name in raw
+            and not isinstance(raw[name], dict)
+        ):
+            raise ConfigError([], message=f"{name}: expected section/table")
 
     # Coerce morning_run_time from string to time (TOML has "06:00", pydantic expects time)
     if "scheduling" in raw:
         sched = raw["scheduling"]
         if "morning_run_time" in sched and isinstance(sched["morning_run_time"], str):
-            sched["morning_run_time"] = datetime.strptime(sched["morning_run_time"], "%H:%M").time()
+            try:
+                sched["morning_run_time"] = datetime.strptime(
+                    sched["morning_run_time"], "%H:%M"
+                ).time()
+            except ValueError:
+                raise ConfigError(
+                    [], message="scheduling.morning_run_time: expected HH:MM time"
+                ) from None
 
     # Notify mode controls whether Telegram credentials are required.
     notify_mode = str(raw.get("notify", {}).get("mode", "stdout"))
@@ -548,7 +571,10 @@ def load_config(toml_path: Path) -> Config:
     raw["opencode_go_token"] = env["OPENCODE_GO_TOKEN"]
     if require_telegram:
         raw["telegram_bot_token"] = env["TELEGRAM_BOT_TOKEN"]
-        raw["telegram_chat_id"] = int(env["TELEGRAM_CHAT_ID"])
+        try:
+            raw["telegram_chat_id"] = int(env["TELEGRAM_CHAT_ID"])
+        except ValueError:
+            raise ConfigError([], message="TELEGRAM_CHAT_ID: expected integer") from None
     if ha_enabled:
         raw["home_assistant_token"] = env[_HA_TOKEN_ENV_VAR]
 
@@ -774,6 +800,8 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
         Config.model_validate(doc.unwrap())
     except ValidationError as exc:
         raise ConfigSetValidationError(format_validation_error(exc)) from None
+    except ConfigError as exc:
+        raise ConfigSetValidationError(str(exc)) from None
 
     _atomic_write_config(toml_path, tomlkit.dumps(doc))
 

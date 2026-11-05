@@ -6,7 +6,34 @@ from pathlib import Path
 
 import pytest
 
-from commutecompass.config import delete_config_field, update_config_field
+from commutecompass.config import (
+    ConfigSetValidationError,
+    delete_config_field,
+    update_config_field,
+)
+
+
+@pytest.mark.parametrize("invalid_section", [
+    'notify = "SYNTHETIC_SECRET"',
+    '[monitoring]\nheartbeat_url = "ftp://example.invalid/SYNTHETIC_SECRET"',
+])
+def test_rejected_edit_preserves_bytes_and_permissions(
+    tmp_path: Path, invalid_section: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "synthetic.toml"
+    path.write_text(invalid_section + "\n[prep]\nprep_minutes = 20\n")
+    path.chmod(0o640)
+    before = path.read_bytes()
+    inode = path.stat().st_ino
+    for key in ("GOOGLE_MAPS_API_KEY", "GOOGLE_OAUTH_CLIENT_SECRET", "OPENCODE_GO_TOKEN"):
+        monkeypatch.setenv(key, "synthetic")
+    with pytest.raises(ConfigSetValidationError) as exc:
+        update_config_field(path, "prep.prep_minutes", "30")
+    assert "SYNTHETIC_SECRET" not in str(exc.value)
+    assert path.read_bytes() == before
+    assert path.stat().st_ino == inode
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.mark.parametrize("delete", [False, True])

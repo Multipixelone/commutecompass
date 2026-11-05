@@ -111,6 +111,30 @@ def test_validation_formatter_only_renders_schema_fields() -> None:
     )
 
 
+@pytest.mark.parametrize(("content", "diagnostic"), [
+    ('scheduling = "SYNTHETIC_SECRET"', "scheduling: expected section/table"),
+    ('notify = 42', "notify: expected section/table"),
+    ('home_assistant = []', "home_assistant: expected section/table"),
+    ('[scheduling]\nmorning_run_time = "99:99SYNTHETIC_SECRET"',
+     "scheduling.morning_run_time: expected HH:MM time"),
+    ('bad = "SYNTHETIC_SECRET', "invalid TOML config file"),
+])
+def test_loader_normalizes_expected_errors(
+    tmp_path: Path, content: str, diagnostic: str,
+) -> None:
+    path = tmp_path / "synthetic.toml"
+    path.write_text(content)
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert str(exc.value) == diagnostic
+    assert exc.value.missing == []
+
+
+def test_loader_normalizes_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="cannot read config file"):
+        load_config(tmp_path / "missing.toml")
+
+
 # ─────────── Tests ───────────
 
 class TestLoadFromEnv:

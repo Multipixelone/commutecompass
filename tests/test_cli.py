@@ -126,6 +126,10 @@ def test_validation_diagnostics_never_disclose_input(
     runner: CliRunner, synthetic_config: Path, env_block: None,
     caplog: pytest.LogCaptureFixture, invalid_field: str,
 ) -> None:
+    from commutecompass.config import load_config
+
+    # Prove the complete fixture reaches schema validation, not missing-env handling.
+    load_config(synthetic_config)
     sentinel = "SYNTHETIC_SECRET_DO_NOT_DISPLAY"
     content = synthetic_config.read_text()
     if invalid_field == "heartbeat":
@@ -144,12 +148,68 @@ def test_validation_diagnostics_never_disclose_input(
     ):
         result = runner.invoke(cli, ["--config", str(synthetic_config), "init-db"])
     assert result.exit_code == 78
-    assert "Invalid config" in result.output
+    assert "Error:" in result.output
     assert sentinel not in result.output + caplog.text
     assert "input_value" not in result.output
     store.assert_not_called()
     connect.assert_not_called()
     send.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [
+    "missing", "directory", "permission", "toml", "utf8", "time", "chat_id",
+    "notify", "home_assistant", "scheduling", "origin", "prep", "paths",
+    "opencode_go", "mta", "monitoring", "alarm", "realtime", "weather",
+])
+def test_expected_config_failures_exit_78_without_side_effects(
+    runner: CliRunner, synthetic_config: Path, env_block: None,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str,
+) -> None:
+    sentinel = "SYNTHETIC_SECRET_DO_NOT_DISPLAY"
+    content = synthetic_config.read_text()
+    if failure == "missing":
+        synthetic_config.unlink()
+    elif failure == "directory":
+        synthetic_config.unlink()
+        synthetic_config.mkdir()
+    elif failure == "permission":
+        monkeypatch.setattr("builtins.open", mock.Mock(side_effect=PermissionError(sentinel)))
+    elif failure == "utf8":
+        synthetic_config.write_bytes(b"\xff" + sentinel.encode())
+    elif failure == "toml":
+        synthetic_config.write_text(f'bad = "{sentinel}')
+    elif failure == "time":
+        synthetic_config.write_text(content.replace('"06:00"', f'"99:99{sentinel}"'))
+    elif failure == "chat_id":
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", sentinel)
+        synthetic_config.write_text(content.replace('mode = "stdout"', 'mode = "telegram"'))
+    else:
+        # Replace the complete table with a malformed top-level section value.
+        import re
+
+        content = re.sub(rf"\n\[{failure}\]\n[^[]*", "\n", content)
+        synthetic_config.write_text(f'{failure} = "{sentinel}"\n' + content)
+    with (
+        mock.patch("commutecompass.store.Store") as store,
+        mock.patch("socket.socket.connect") as connect,
+        mock.patch("httpx.Client.send") as send,
+    ):
+        result = runner.invoke(cli, ["--config", str(synthetic_config), "init-db"])
+    assert result.exit_code == 78, result.output
+    assert "Error:" in result.output
+    assert sentinel not in result.output + caplog.text
+    store.assert_not_called()
+    connect.assert_not_called()
+    send.assert_not_called()
+
+
+def test_config_loader_does_not_swallow_programming_errors(
+    runner: CliRunner, synthetic_config: Path,
+) -> None:
+    with mock.patch("commutecompass.config.tomllib.load", side_effect=RuntimeError("bug")):
+        result = runner.invoke(cli, ["--config", str(synthetic_config), "init-db"])
+    assert isinstance(result.exception, RuntimeError)
+    assert result.exit_code != 78
 
 
 # ─────────── Help text tests ──────────────────────────────────────────────────
