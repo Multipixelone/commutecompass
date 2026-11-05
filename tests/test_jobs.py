@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -916,11 +916,12 @@ def _seed_morning_reminders(store: Store, now: datetime) -> None:
             prep_at=start - timedelta(minutes=50),
             leave_at=start - timedelta(minutes=30),
         ))
-        for suffix, kind, fired, attempts in (
+        reminders: tuple[tuple[str, Literal["prep", "leave"], bool, int], ...] = (
             ("history", "prep", True, 3),
             ("prep", "prep", False, 2),
             ("leave", "leave", False, 1),
-        ):
+        )
+        for suffix, kind, fired, attempts in reminders:
             store.schedule_ping(PingEntry(
                 id=f"{day}-{suffix}", event_id=day, kind=kind,
                 fire_at=start - timedelta(minutes=50), fired=fired,
