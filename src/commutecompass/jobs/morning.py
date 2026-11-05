@@ -61,6 +61,7 @@ def run(config: Config) -> None:
     )
     events: list[Event] = []
     auth_failed = False
+    calendar_available = False
     try:
         events = calendar_client.fetch_events(
             calendars=[
@@ -70,16 +71,15 @@ def run(config: Config) -> None:
             start=today_start,
             end=today_end,
         )
+        calendar_available = True
     except AuthError as exc:
-        # An expired/invalid OAuth token degrades to "no events" — but unlike a
-        # transient API blip it will NOT fix itself, so surface it loudly in the
-        # digest footer instead of letting the user think their day is empty.
+        # Preserve reminders on failure and surface the required re-auth action.
         logger.error("Calendar auth failed — re-auth needed: %s", exc)
         auth_failed = True
         events = []
     except Exception as exc:
         logger.error("Failed to fetch calendar events: %s", exc)
-        # Continue with empty events list — digest will reflect no events
+        # An unavailable calendar is not evidence that stored events were removed.
         events = []
 
     logger.info("morning job: fetched %d events", len(events))
@@ -139,15 +139,18 @@ def run(config: Config) -> None:
     logger.info("morning job: planned %d events", len(plans))
 
     # ── 3. Cancel stale pings for events that no longer exist ─────────────────
-    event_ids_today = {e.id for e in events}
-    for existing_plan in store.today_plans():
-        if existing_plan.event.id not in event_ids_today:
-            cancelled = store.cancel_pings(existing_plan.event.id)
-            logger.debug(
-                "cancelled %d stale pings for removed event %s",
-                cancelled,
-                existing_plan.event.id,
-            )
+    # Only a successful fetch can establish absence; failure must leave all
+    # stored plans and pings (including fired history and retries) untouched.
+    if calendar_available:
+        event_ids_today = {e.id for e in events}
+        for existing_plan in store.today_plans():
+            if existing_plan.event.id not in event_ids_today:
+                cancelled = store.cancel_pings(existing_plan.event.id)
+                logger.debug(
+                    "cancelled %d stale pings for removed event %s",
+                    cancelled,
+                    existing_plan.event.id,
+                )
 
     # ── 4. Schedule future prep + leave pings ─────────────────────────────────
     for plan in plans:
@@ -232,7 +235,11 @@ def run(config: Config) -> None:
     ops_notes = _operations_notes(
         plans, all_alerts, auth_failed=auth_failed, poll_stale=poll_stale
     )
-    digest = format_digest(plans, affecting_alerts, operations_notes=ops_notes)
+    digest = format_digest(
+        plans, affecting_alerts,
+        operations_notes=ops_notes,
+        calendar_available=calendar_available,
+    )
     notifier = build_notifier(config)
     sent = notifier.send(digest)
     if sent:

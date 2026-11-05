@@ -191,6 +191,7 @@ def format_digest(
     alerts: list[Alert],
     *,
     operations_notes: list[str] | None = None,
+    calendar_available: bool = True,
 ) -> str:
     """Format the daily digest message.
 
@@ -201,6 +202,8 @@ def format_digest(
             as an "Operations" footer (e.g. "MTA Subway alerts unavailable").
             Each note is sanitised+escaped.  An empty list (or None) hides
             the footer entirely.
+        calendar_available: Whether today's calendar fetch succeeded. If False,
+            show an unavailable notice instead of plans or a verified empty day.
 
     Returns:
         Formatted digest string ready for Telegram.
@@ -211,7 +214,9 @@ def format_digest(
     date_str = f"{today.strftime('%A, %b')} {_fmt_day_of_month(today)}"
     lines = [f"*Today — {date_str}*\n"]
 
-    if not plans:
+    if not calendar_available:
+        lines.append("⚠️ Calendar unavailable — today's schedule could not be verified")
+    elif not plans:
         # Keep this MarkdownV2-safe ('.' must be escaped otherwise)
         lines.append("No events scheduled for today")
     else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from instants import same_plan, utc
 
 from commutecompass import timeutil
+from commutecompass.calendar_client import AuthError
 from commutecompass.config import (
     CalendarSpec,
     Config,
@@ -900,32 +902,111 @@ def sample_route() -> Route:
 
 # ─────────── Morning job tests ────────────────────────────────────────────────
 
-def test_morning_run_surfaces_calendar_auth_failure(
+def _seed_morning_reminders(store: Store, now: datetime) -> None:
+    """Synthetic current/other-day plans with pending retries and fired history."""
+    for day, offset in (("today", 0), ("other-day", 1)):
+        start = now + timedelta(days=offset, hours=4)
+        event = Event(
+            id=day, calendar_id="test-cal", calendar_name="Test",
+            title=f"Synthetic {day}", start=start, end=start + timedelta(hours=1),
+            location_raw="Example venue",
+        )
+        store.upsert_plan(Plan(
+            event=event, route=None,
+            prep_at=start - timedelta(minutes=50),
+            leave_at=start - timedelta(minutes=30),
+        ))
+        for suffix, kind, fired, attempts in (
+            ("history", "prep", True, 3),
+            ("prep", "prep", False, 2),
+            ("leave", "leave", False, 1),
+        ):
+            store.schedule_ping(PingEntry(
+                id=f"{day}-{suffix}", event_id=day, kind=kind,
+                fire_at=start - timedelta(minutes=50), fired=fired,
+                fired_at=now - timedelta(minutes=5) if fired else None,
+                message=f"Synthetic {suffix}", send_attempts=attempts,
+            ))
+
+
+def _morning_state_snapshot(config: Config) -> dict[str, list[tuple[Any, ...]]]:
+    """Compare every persisted plan/ping column, not just unfired reminders."""
+    with sqlite3.connect(config.paths.db_path) as conn:
+        return {
+            "plans": conn.execute("SELECT * FROM plans ORDER BY event_id").fetchall(),
+            "pings": conn.execute("SELECT * FROM pings ORDER BY id").fetchall(),
+        }
+
+
+@pytest.mark.parametrize("failure", [AuthError("synthetic auth failure"), RuntimeError("offline")])
+@pytest.mark.parametrize("with_stored_plans", [False, True])
+def test_morning_calendar_failure_preserves_all_reminder_state(
     minimal_config: Config,
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    with_stored_plans: bool,
 ) -> None:
-    """An expired OAuth token must be reported in the digest, not silently empty."""
-    from commutecompass.calendar_client import AuthError
+    """Neither outage type may reconcile absence, replan, or reschedule cached rows."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    if with_stored_plans:
+        _seed_morning_reminders(store, now)
+    before = _morning_state_snapshot(minimal_config)
+    notifier = MagicMock()
 
-    with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
-        "commutecompass.jobs.morning.fetch_alerts"
-    ) as mock_fetch_alerts, patch(
-        "commutecompass.jobs.morning.build_notifier"
-    ) as mock_notifier_class:
-        mock_cal = MagicMock()
-        mock_cal.fetch_events.side_effect = AuthError("token refresh failed")
-        mock_cal_class.return_value = mock_cal
-        mock_fetch_alerts.return_value = []
-        mock_notifier = MagicMock()
-        mock_notifier.send.return_value = True
-        mock_notifier_class.return_value = mock_notifier
-
+    with (
+        patch("commutecompass.jobs.morning.now_nyc", return_value=now),
+        patch("commutecompass.jobs.morning.CalendarClient") as calendar,
+        patch("commutecompass.jobs.morning.fetch_alerts", return_value=[]),
+        patch("commutecompass.jobs.morning.build_notifier", return_value=notifier),
+        patch("commutecompass.jobs.morning.plan_event") as plan_event,
+        patch.object(Store, "upsert_plan") as upsert_plan,
+        patch.object(Store, "today_plans") as today_plans,
+        patch.object(Store, "cancel_pings") as cancel_pings,
+        patch.object(Store, "schedule_ping") as schedule_ping,
+    ):
+        calendar.return_value.fetch_events.side_effect = failure
         morning_run(minimal_config)
 
-    # Digest still sent, and it tells the user to re-auth.
-    mock_notifier.send.assert_called_once()
-    sent_text = mock_notifier.send.call_args.args[0]
-    assert "oauth" in sent_text.lower()
+    for operation in (plan_event, upsert_plan, today_plans, cancel_pings, schedule_ping):
+        operation.assert_not_called()
+    assert _morning_state_snapshot(minimal_config) == before
+    notifier.send.assert_called_once()
+    sent_text = notifier.send.call_args.args[0]
+    assert "Calendar unavailable" in sent_text
+    assert "could not be verified" in sent_text
+    assert "No events scheduled" not in sent_text
+    assert "Synthetic today" not in sent_text  # Cached plans are not presented as current.
+    if isinstance(failure, AuthError):
+        assert "oauth" in sent_text.lower()
+        assert r"re\-run" in sent_text.lower()
+        assert "commutecompass oauth" in sent_text
+
+
+def test_morning_successful_empty_calendar_cancels_only_today_pings(
+    minimal_config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verified removal still deletes pending and fired pings, but not another day."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    _seed_morning_reminders(store, now)
+    before = _morning_state_snapshot(minimal_config)
+    assert len(before["pings"]) == 6
+
+    with patch("commutecompass.jobs.morning.now_nyc", return_value=now):
+        digest = _run_morning_capture_digest(minimal_config)
+
+    after = _morning_state_snapshot(minimal_config)
+    assert after["plans"] == before["plans"]
+    # SELECT * starts with (id, event_id); compare all columns for the other day.
+    assert after["pings"] == [row for row in before["pings"] if row[1] == "other-day"]
+    assert len(after["pings"]) == 3
+    assert "No events scheduled for today" in digest
+    assert "Calendar unavailable" not in digest
 
 
 def _run_morning_capture_digest(config: Config) -> str:

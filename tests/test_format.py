@@ -398,6 +398,27 @@ class TestFormatDigest:
         result = format_digest([], [])
         assert "No events scheduled for today" in result
 
+    @pytest.mark.parametrize("with_cached_plan", [False, True])
+    def test_format_digest_unavailable_calendar(self, with_cached_plan: bool) -> None:
+        """Unavailable is distinct from empty, and never presents cached plans as current."""
+        event = make_event(
+            id="cached", title="Cached event",
+            start=datetime(2026, 11, 4, 14, tzinfo=UTC),
+        )
+        plans = [Plan(event=event, route=None)] if with_cached_plan else []
+        result = format_digest(
+            plans, [], calendar_available=False,
+            operations_notes=["Calendar auth failed — run `commutecompass oauth` to re-auth"],
+        )
+
+        assert "Calendar unavailable" in result
+        assert "could not be verified" in result
+        assert "No events scheduled" not in result
+        assert "Cached event" not in result
+        assert "*Operations:*" in result
+        assert "\\`commutecompass oauth\\`" in result
+        assert "Refer to an event" not in result
+
     def test_format_digest_error_plan(self) -> None:
         """format_digest shows error plans with a human-readable failure reason."""
         event = make_event(id="evt1", title="Bad Event", start=datetime(2026, 5, 12, 9, 30, tzinfo=UTC))
