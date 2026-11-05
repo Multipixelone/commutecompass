@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from commutecompass.config import WeatherConfig
 from commutecompass.timeutil import NYC_TZ
 from commutecompass.weather import weather_buffer
@@ -46,6 +48,28 @@ def test_fall_back_forecast_distinguishes_repeated_hour() -> None:
     cfg = WeatherConfig(enabled=True, rain_buffer_minutes=12)
     assert weather_buffer(40.7, -74.0, first, cfg, fetcher=_fetcher(hourly)) == (0, None)
     assert weather_buffer(40.7, -74.0, second, cfg, fetcher=_fetcher(hourly)) == (12, "rain")
+
+
+@pytest.mark.parametrize("field", ["precipitation", "precipitation_probability", "snowfall"])
+@pytest.mark.parametrize("invalid", [10**1000, float("nan"), float("inf"), float("-inf")])
+def test_malformed_forecast_numeric_values_fail_clear(field: str, invalid: object) -> None:
+    hourly = _hourly(precip=2.0, prob=100, snow=1.0)
+    hourly[field][1] = invalid
+    cfg = WeatherConfig(enabled=True)
+    assert weather_buffer(40.7, -74.0, AT, cfg, fetcher=_fetcher(hourly)) == (0, None)
+
+
+def test_spring_forward_forecast_uses_utc_hour() -> None:
+    before = datetime(2026, 3, 8, 6, tzinfo=UTC)
+    after = datetime(2026, 3, 8, 7, tzinfo=UTC)
+    hourly = {
+        "time": [int(before.timestamp()), int(after.timestamp())],
+        "precipitation": [0.0, 1.0], "precipitation_probability": [0, 100],
+        "snowfall": [0.0, 0.0],
+    }
+    cfg = WeatherConfig(enabled=True, rain_buffer_minutes=12)
+    assert weather_buffer(40.7, -74.0, before, cfg, fetcher=_fetcher(hourly)) == (0, None)
+    assert weather_buffer(40.7, -74.0, after, cfg, fetcher=_fetcher(hourly)) == (12, "rain")
 
 
 def test_disabled_returns_zero() -> None:

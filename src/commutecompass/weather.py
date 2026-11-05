@@ -8,6 +8,7 @@ alarm fires earlier.  Open-Meteo is free and keyless, so this needs no secret.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
@@ -51,7 +52,11 @@ def weather_buffer(
         logger.debug("weather fetch failed (lat=%s lon=%s): %s", lat, lon, exc)
         return _CLEAR
 
-    return _buffer_from_hourly(hourly, at_time, config)
+    try:
+        return _buffer_from_hourly(hourly, at_time, config)
+    except (ValueError, OverflowError, TypeError):
+        # Malformed numeric forecasts must not break planning or add a buffer.
+        return _CLEAR
 
 
 def _fetch_forecast(lat: float, lon: float, forecast_url: str) -> dict[str, Any]:
@@ -114,5 +119,8 @@ def _at(series: Any, idx: int) -> float | None:
         return None
     value = series[idx]
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite forecast value")
+        return number
     return None
