@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from collections.abc import Mapping
 from typing import TextIO
 
 import httpx
@@ -107,8 +108,10 @@ class TelegramNotifier:
             parse_mode: Telegram parse mode (default MarkdownV2).
 
         Returns:
-            True if the message was sent successfully (HTTP 200).
-            False on any non-200 response or network error.
+            True only if every chunk receives HTTP 200 and JSON {"ok": true}.
+            False on HTTP/network errors or malformed/negative acknowledgements.
+            Stops at the first failed chunk; an external whole-message retry may
+            duplicate chunks already accepted (there are no notifier retries).
         """
         url = _TELEGRAM_API_URL.format(token=self.bot_token)
         chunks = _chunk_message(text)
@@ -132,6 +135,15 @@ class TelegramNotifier:
                     "Telegram API returned status=%d",
                     response.status_code,
                 )
+                return False
+
+            try:
+                acknowledgement = response.json()
+            except ValueError:
+                _logger.warning("Telegram acknowledgement invalid JSON")
+                return False
+            if not isinstance(acknowledgement, Mapping) or acknowledgement.get("ok") is not True:
+                _logger.warning("Telegram acknowledgement missing or not true")
                 return False
 
         return True

@@ -97,6 +97,78 @@ def test_private_request_does_not_hide_concurrent_httpx_logs(
     assert "CONCURRENT_PRIVATE_TOKEN" not in repr([vars(r) for r in caplog.records])
 
 
+@pytest.mark.parametrize(
+    "body,accepted",
+    [
+        (b'{"ok":true}', True),
+        (b'{"ok":true,"result":{"message_id":1}}', True),
+        (b'{"ok":false,"description":"SYNTHETIC_NEGATIVE_BODY"}', False),
+        (b'{"ok":1}', False),
+        (b'{"ok":0}', False),
+        (b'{"ok":"true"}', False),
+        (b'{"ok":null}', False),
+        (b'{"ok":[]}', False),
+        (b'{"ok":{}}', False),
+        (b'{}', False),
+        (b'[]', False),
+        (b'[{"ok":true}]', False),
+        (b'null', False),
+        (b'true', False),
+        (b'1', False),
+        (b'"SYNTHETIC_STRING_BODY"', False),
+        (b'<html>SYNTHETIC_MALFORMED_BODY</html>', False),
+        (b'', False),
+    ],
+)
+def test_telegram_requires_strict_acknowledgement(
+    body: bytes, accepted: bool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    def transport(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    client = httpx.Client(transport=httpx.MockTransport(transport))
+    with caplog.at_level(logging.DEBUG), patch("httpx.Client", return_value=client):
+        assert TelegramNotifier("SYNTHETIC_ACK_TOKEN", 246813579).send("SYNTHETIC_TEXT") is accepted
+    assert "SYNTHETIC" not in caplog.text
+    assert "SYNTHETIC" not in repr([vars(r) for r in caplog.records])
+    if not accepted:
+        assert "acknowledgement" in caplog.text
+
+
+@pytest.mark.parametrize("failure_index", [0, 1, 2, None])
+@pytest.mark.parametrize("failure_kind", ["negative", "malformed", "http", "network"])
+def test_telegram_chunk_acknowledgements_stop_on_first_failure(
+    failure_index: int | None, failure_kind: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = "a" * _MAX_MESSAGE_CHARS + "b" * _MAX_MESSAGE_CHARS + "c" * 20
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        index = len(requests)
+        requests.append(request)
+        if index == failure_index:
+            if failure_kind == "negative":
+                return httpx.Response(200, json={"ok": False, "description": "SYNTHETIC_BODY"})
+            if failure_kind == "malformed":
+                return httpx.Response(200, content=b"SYNTHETIC_INVALID_JSON")
+            if failure_kind == "http":
+                return httpx.Response(400, content=b"SYNTHETIC_HTTP_BODY")
+            raise httpx.ConnectError(f"SYNTHETIC_ERROR {request.url}", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.Client
+    with caplog.at_level(logging.DEBUG), patch(
+        "httpx.Client",
+        side_effect=lambda **kw: real_client(transport=httpx.MockTransport(transport), **kw),
+    ):
+        assert TelegramNotifier("SYNTHETIC_CHUNK_TOKEN", 246813579).send(text) is (
+            failure_index is None
+        )
+    assert len(requests) == (3 if failure_index is None else failure_index + 1)
+    assert "SYNTHETIC" not in caplog.text
+    assert "SYNTHETIC" not in repr([vars(r) for r in caplog.records])
+
+
 class TestTelegramNotifierSend:
     """Tests for TelegramNotifier.send()."""
 
