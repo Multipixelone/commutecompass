@@ -13,6 +13,7 @@ import logging
 
 import httpx
 
+from commutecompass.http_logging import sensitive_http_logging
 from commutecompass.retry import retry
 
 logger = logging.getLogger(__name__)
@@ -28,12 +29,12 @@ def ping_heartbeat(url: str, *, timeout: float = 5.0) -> bool:
         return False
 
     def _do() -> None:
-        with httpx.Client(timeout=timeout) as client:
+        with sensitive_http_logging(), httpx.Client(timeout=timeout) as client:
             client.get(url).raise_for_status()
 
     try:
         retry(_do, attempts=2, label="heartbeat")
         return True
     except Exception as exc:  # noqa: BLE001  # pragma: no cover - heartbeat must never break a job
-        logger.debug("heartbeat ping failed for %s: %s", url, exc)
+        logger.debug("heartbeat ping failed exception=%s", type(exc).__name__)
         return False

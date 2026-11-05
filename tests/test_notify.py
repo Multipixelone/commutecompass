@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import io
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from commutecompass.config import Config
 from commutecompass.notify import (
@@ -20,6 +24,77 @@ from commutecompass.notify import (
     build_ha_alarm_notifier,
     build_notifier,
 )
+
+
+@pytest.mark.parametrize("outcome", [200, 400, 503, "network"])
+def test_telegram_transport_log_privacy(
+    outcome: int | str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    notifier = TelegramNotifier("SYNTHETIC_BOT_TOKEN", chat_id=246813579)
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        try:
+            raise RuntimeError("SYNTHETIC_TELEGRAM_EXCEPTION")
+        except RuntimeError:
+            logging.getLogger("httpcore.http11").debug(
+                "send %s %s", request.url, request.content, exc_info=True,
+            )
+        if outcome == "network":
+            raise httpx.ConnectError(f"failed {request.url}", request=request)
+        assert isinstance(outcome, int)
+        return httpx.Response(outcome, json={"ok": True, "description": "SYNTHETIC_BODY"})
+
+    client = httpx.Client(transport=httpx.MockTransport(transport))
+    with caplog.at_level(logging.DEBUG), patch("httpx.Client", return_value=client):
+        assert notifier.send("SYNTHETIC_MESSAGE") is (outcome == 200)
+    assert len(requests) == 1  # no new notifier retries
+    assert any(r.name == "httpcore.http11" for r in caplog.records)
+    if outcome != "network":
+        assert any(r.name == "httpx" for r in caplog.records)
+    retained = repr([vars(r) for r in caplog.records])
+    for secret in ("SYNTHETIC", "246813579", "api.telegram.org"):
+        assert secret not in caplog.text
+        assert secret not in retained
+    if outcome == "network":
+        assert "exception=ConnectError" in caplog.text
+    elif outcome != 200:
+        assert f"status={outcome}" in caplog.text
+
+
+def test_private_request_does_not_hide_concurrent_httpx_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Both threads use real clients; only the Telegram operation is private."""
+    barrier = Barrier(2)
+    real_client = httpx.Client
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.telegram.org":
+            barrier.wait(timeout=5)
+            barrier.wait(timeout=5)
+        return httpx.Response(200, json={"ok": True})
+
+    def unrelated() -> None:
+        barrier.wait(timeout=5)
+        try:
+            with real_client(transport=httpx.MockTransport(transport)) as client:
+                client.get("https://public.example/UNRELATED_REQUEST_VISIBLE")
+        finally:
+            barrier.wait(timeout=5)
+
+    with caplog.at_level(logging.DEBUG), patch(
+        "httpx.Client",
+        side_effect=lambda **kw: real_client(transport=httpx.MockTransport(transport), **kw),
+    ), ThreadPoolExecutor(max_workers=2) as pool:
+        other = pool.submit(unrelated)
+        private = pool.submit(TelegramNotifier("CONCURRENT_PRIVATE_TOKEN", 246813579).send, "text")
+        assert private.result(timeout=10) is True
+        other.result(timeout=10)
+    assert "UNRELATED_REQUEST_VISIBLE" in caplog.text
+    assert "CONCURRENT_PRIVATE_TOKEN" not in caplog.text
+    assert "CONCURRENT_PRIVATE_TOKEN" not in repr([vars(r) for r in caplog.records])
 
 
 class TestTelegramNotifierSend:

@@ -11,6 +11,7 @@ import httpx
 
 from commutecompass.config import Config
 from commutecompass.ha_client import call_service as _ha_call_service
+from commutecompass.http_logging import sensitive_http_logging
 
 _logger = logging.getLogger(__name__)
 
@@ -120,17 +121,16 @@ class TelegramNotifier:
             }
 
             try:
-                with httpx.Client(timeout=10.0) as client:
+                with sensitive_http_logging(), httpx.Client(timeout=10.0) as client:
                     response = client.post(url, json=payload)
             except httpx.HTTPError as exc:
-                _logger.error("Telegram request failed: %s", exc)
+                _logger.error("Telegram request failed exception=%s", type(exc).__name__)
                 return False
 
             if response.status_code != 200:
                 _logger.warning(
-                    "Telegram API returned %d: %s",
+                    "Telegram API returned status=%d",
                     response.status_code,
-                    response.text[:200],
                 )
                 return False
 
