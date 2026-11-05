@@ -1,46 +1,185 @@
-# Repository audit — 2026-11-04
+# Repository audit and isolated fixer handoffs
 
-Audit of `commutecompass` at `469bf08`. Six areas were audited in parallel; findings were
-spot-checked against source (items with a P0/P1 rating were verified by reading the code).
-Baseline at audit time: `ruff check .` clean, `mypy src` clean, `pytest` 1653 passed.
+**Audited source:** `4df247f` (2026-11-04). This replaces the stale audit against
+`469bf08`. This pass changes documentation only: no production fixes, deployments,
+credential reads, personal-origin inspection, or live calendar/Telegram/HA calls.
 
-Each brief below is a **self-contained work order for one fixer in its own git worktree**.
-Write scopes do not overlap, so worktrees can run in parallel and merge in any order.
+Six read-only explorer lanes audited the categories below. Findings were reconciled
+against current source; targeted offline probes used fake data and mocked HTTP.
+Explorer suggestions that were stale or unsupported were withdrawn rather than
+turned into implementation orders. This is a scoped audit, not a security guarantee.
 
-| Worktree | Brief | Scope | Top item |
+## Categories and outcomes
+
+| Category | Coverage | Current outcome |
+|---|---|---|
+| A — persistence/jobs | SQLite, locks, morning/poll, heartbeat | Morning outage reconciliation; sensitive heartbeat logs |
+| B — calendar/resolution | OAuth, calendars, selectors, resolver, geocode, LLM, venues | Calendar container validation and atomic token writes |
+| C — routing/realtime/weather | Directions, GTFS bridge/index, MTA, realtime, weather | Overall endpoint and weather numeric parsing |
+| D — interface/config/notification | CLI, TOML/env, Telegram/stdout, OpenClaw skill/glue | Config exit classification; Telegram logging/acknowledgement |
+| E — alarm/HA | Wake computation, daemon, publication, presence, tomorrow | Optional callback isolation; geographic input validation |
+| F — platform | Nix module/flake, CI, packaging, examples, dependency policy | Check-execution evidence gap; no confirmed production defect |
+
+## Confirmed backlog
+
+P1 = reminder loss or credential exposure; P2 = malformed-input/operational robustness;
+P3 = defense in depth. These are audit priorities, not externally assigned CVSS scores.
+“Confirmed” means the source path or offline behavior is established, not that a real
+user incident or provider failure was observed. Each brief states its evidence level.
+
+| ID | Priority | Finding | Fixer brief |
 |---|---|---|---|
-| `audit/wt-a-store-jobs` | [wt-a-store-jobs.md](wt-a-store-jobs.md) | store, joblock, poll job | **P0 JOB-1**: `init_schema` deletes all fired pings on every start |
-| `audit/wt-b-resolution` | [wt-b-resolution.md](wt-b-resolution.md) | llm, geocode, resolver, venues, selector, calendar | P1 LLM parse crash, prompt injection, geocoder null-island |
-| `audit/wt-c-routing` | [wt-c-routing.md](wt-c-routing.md) | routing, weather, mta, gtfs_index | P1 malformed transit API responses crash planning |
-| `audit/wt-d-interface` | [wt-d-interface.md](wt-d-interface.md) | format, config, openclaw-send.sh, skill | P1 unsanitized feed text in Telegram messages |
-| `audit/wt-e-alarm` | [wt-e-alarm.md](wt-e-alarm.md) | alarm, alarm_daemon, ha_client, tomorrow job | P2 daemon dies on reader exception |
-| `audit/wt-f-platform` | [wt-f-platform.md](wt-f-platform.md) | nix module, CI, renovate, examples, README | P2 no systemd timeouts; timer timezones |
+| STORE-JOB-1 | P1 | Failed calendar fetch is reconciled as an empty day, cancelling pending reminders | [WT-A](wt-a-store-jobs.md) |
+| MONITORING-1 | P1 | Secret-bearing heartbeat URL reaches application/transport logs | [WT-G](wt-g-sensitive-logging.md) |
+| NOTIFY-1 | P1 | Telegram bot-token URL reaches exception/transport logs | [WT-G](wt-g-sensitive-logging.md) |
+| RES-10 | P2 | Malformed event container escapes per-item handling | [WT-B](wt-b-resolution.md) |
+| RES-13 | P2 | OAuth token writes are non-atomic and chmod happens after creation | [WT-B](wt-b-resolution.md) |
+| RTE-NEW1 | P2 | Huge overall route endpoint timestamp raises outside parser boundary | [WT-C](wt-c-routing.md) |
+| WX-NEW1 | P2 | Huge JSON integer in weather series escapes fail-open fallback | [WT-C](wt-c-routing.md) |
+| CFG-1 | P2 | Expected config load errors exit 1 instead of config exit 78 | [WT-D](wt-d-interface.md) |
+| NOTIFY-3 | P2 | HTTP 200 is accepted without a valid Telegram `ok:true` acknowledgement | [WT-G](wt-g-sensitive-logging.md) |
+| ALM-9 | P3 | Unexpected optional publisher/heartbeat callback exceptions escape daemon iteration | [WT-E](wt-e-alarm.md) |
+| ALM-10 | P3 | Non-finite/out-of-range HA geometry and invalid accuracy/radius are accepted | [WT-H](wt-h-ha-validation.md) |
 
-## Priority order (if not running all in parallel)
+**Not confirmed implementation work:** [WT-F](wt-f-platform.md) investigates PLT-8's
+zero-check-derivation result and optional fork-PR Attic behavior. Raw LLM input size,
+validation-error secret disclosure, and arbitrary non-httpx exceptions in tomorrow's
+injected publisher need evidence before expanding scope. Briefs record legacy-ID
+resolutions/withdrawals, including intentional dead-man heartbeat suppression.
 
-1. WT-A (JOB-1 is active data loss — merge first)
-2. WT-B, WT-C, WT-D (crash/security hardening of external inputs)
-3. WT-E, WT-F
+## Baseline evidence
 
-## Rules for every fixer
+All commands below completed at audited source, before documentation changes. The
+orchestrator inspected the captured outputs. No suite rerun is needed for this
+docs-only handoff; future implementation requires the validation gate below.
 
-- Start from `main` in a fresh worktree: `git worktree add ../commutecop-<wt> -b audit/<wt>`.
-- Read `AGENTS.md` first; its "Known gotchas" are binding.
-- Edit **only** files in your brief's write scope. If a fix seems to need another scope, stop
-  and note it in your report instead.
-- One Conventional Commit per finding ID (`fix(store): keep fired pings in dedupe migration`),
-  ID in the commit body (`Audit: JOB-1`).
-- Every behavior change gets a test that fails before the fix.
-- Before reporting: `ruff check .`, `mypy src`, and the targeted pytest command in your brief
-  all pass; run full `pytest -q` once at the end.
-- Items marked **decision / owner check** — follow the stated default and record it in the
-  commit body; don't block.
-- Report: commits (hash + ID), commands run with exit codes, anything skipped and why.
+| Check | Result |
+|---|---|
+| `pytest -q --cov=commutecompass --cov-report=term-missing --cov-fail-under=80` | **1847 passed**, 9 warnings, 61.28s; 90.54% coverage (terminal total rounds to 91%) |
+| `ruff check .` | Passed |
+| `mypy src tests` | Passed; 77 source files |
+| `nix flake check --print-build-logs` | Exit 0; check attributes evaluated, **0 check derivations executed**; not proof all build checks ran |
+| `nix build --no-link .#packages.x86_64-linux.default` | Passed; package/wheel build |
 
-## Not issues (checked, no action)
+Python checks used `nix develop . --command` (Python 3.14.8). Full logs are local,
+not repository artifacts; future agents must rerun rather than assume these paths
+exist on another machine:
 
-- No `%-` strftime specifiers; config allowlist doc in sync today (UI-8 adds a guard test).
-- GTFS identity is only set by `gtfs_bridge.validate_leg`; invariant holds.
-- HA calls all have finite timeouts and keep the token in headers only.
-- No tracked secrets, `.env`, `state.db`, or `result`.
-- Bash shebangs in shipped glue are intentional (UI-12, WONTFIX).
+- `/tmp/opencode/agent-run-long.python-pytest-4df247f.YQHt9eOD2R/output.log`
+- `/tmp/opencode/agent-run-long.python-ruff-4df247f.tTiAupJ7w9/output.log`
+- `/tmp/opencode/agent-run-long.python-mypy-4df247f.vP9tSvOoUe/output.log`
+- `/tmp/opencode/agent-run-long.audit-nix-baseline.tDauheyuYB/output.log`
+- `/tmp/opencode/agent-run-long.audit-nix-package-baseline.vtea2AYs0x/output.log`
+
+## Worktree ownership and merge order
+
+The six audit categories become **eight** narrower implementation/investigation
+lanes. WT-G owns both secret-bearing HTTP clients so transport-log policy has one
+writer; WT-H alone owns shared geographic models. All listed write scopes are
+exclusive, including test files. Each brief has focused tests and a validation owner.
+
+| Lane | Worktree slug | Owned application area | Order |
+|---|---|---|---|
+| A | `audit-morning-preserve` | `jobs/morning.py`, `test_jobs.py` | First priority |
+| G | `audit-sensitive-http` | monitoring, notify, optional new HTTP-log helper and their tests | First priority; parallel with A |
+| B | `audit-calendar` | calendar client and its tests | Can implement in parallel; merge after A |
+| C | `audit-provider-parsing` | routing/weather and their tests | Independent |
+| D | `audit-config-errors` | config/CLI and their tests | Independent |
+| E | `audit-alarm-callbacks` | daemon and its tests | Independent |
+| H | `audit-ha-geometry` | models/HA client and their tests | Independent; integration checks consumers |
+| F | `audit-check-execution` | conditional CI/flake/module-eval edits | Optional investigation; serialize Nix validation |
+
+A must be integrated before B: invalid calendar containers must produce a controlled
+fetch failure, never an authoritative empty list that loses reminders. G owns any
+new logging helper; nobody edits `retry.py` on the mistaken premise that it logs
+exception text (it already logs class names). If a lane needs another lane's file,
+stop and ask the integration owner to transfer scope or schedule a serialized
+follow-up. No opportunistic fixes outside a brief.
+
+## Execution rules
+
+1. **Start from the committed handoff.** Integration owner selects one commit containing
+   these docs and source based on `4df247f`; use that same start point for all worktrees.
+   Read repo `AGENTS.md`, the chosen brief, and relevant existing tests before edits.
+   Reproduce each assigned issue with a failing regression test, then implement the
+   bounded fix. Findings already fixed since the base get evidence, not duplicate code.
+2. **Private data stays private.** Use synthetic config, temporary SQLite databases,
+   fake credentials and mocked services. Do not read `.env`, OAuth files, local
+   `state.db`/`examples/state.db`, or private origin settings. Do not commit tokens,
+   personal addresses/coordinates, captured provider bodies or full logs. This is an
+   application repo task, not permission to change host configuration or deploy.
+3. **Isolate each writer.** Worktrees belong under `.slim/worktrees/<slug>`, never
+   sibling directories. The path is not currently project-ignored; add a **local**
+   git exclude first. Run this Python snippet from the primary checkout (idempotent):
+
+   ```python
+   from pathlib import Path
+   import subprocess
+   p = Path(subprocess.check_output(
+       ["git", "rev-parse", "--git-path", "info/exclude"], text=True
+   ).strip())
+   p.parent.mkdir(parents=True, exist_ok=True)
+   old = p.read_text() if p.exists() else ""
+   rule = "/.slim/worktrees/"
+   if rule not in old.splitlines():
+       p.write_text(old + ("\n" if old and not old.endswith("\n") else "") + rule + "\n")
+   ```
+
+   For example, after selecting the committed handoff as HEAD:
+
+   ```sh
+   git worktree add .slim/worktrees/audit-morning-preserve -b fix/audit-morning-preserve HEAD
+   git check-ignore .slim/worktrees/audit-morning-preserve
+   ```
+
+   Substitute the brief's slug/branch, keep the shared start point fixed, and run
+   checks from that worktree. Do not remove or force-clean another agent's worktree.
+4. **Validate proportionately.** Lane fixer owns its focused command, lint/type checks
+   on touched code, and regression evidence. Load the `agent-run-long` skill on Linux
+   before long tests/builds/Nix validation. Delegate each independent long validation
+   to a background fixer; serialize commands that share a checkout/cache. Example:
+
+   ```sh
+   agent-run-long --label audit-morning-tests --timeout 30m -- nix develop . --command pytest -q tests/test_jobs.py
+   ```
+
+   Use outer tool timeout >=1860000ms for 30m; the helper owns timing/logging/status,
+   so add no wrappers. Report `label`, `status`, `exit_code`, `duration`, `log_path`,
+   and decisive summary/failure excerpt. Report unavailable tooling rather than
+   claiming validation passed. Full-suite work belongs to integration, not every lane.
+5. **Commit and hand back.** One logical Conventional Commit per finding. Before
+   staging, inspect paths and diff for scope/privacy. Return commit IDs, findings
+   addressed, changed files, focused evidence, and unresolved risks. Do not merge,
+   push or deploy autonomously. Leave worktree removal to the integration owner.
+
+### Ready-to-use fixer prompt
+
+Replace the bracketed values and pass the prompt to an independent fixer:
+
+> Work only in `[absolute .slim/worktrees/slug]` on `[branch]`, from the shared audit
+> handoff commit `[commit]`. Read `AGENTS.md`, `docs/audit/README.md`, and
+> `docs/audit/[brief].md`. Implement only that brief's confirmed findings within its
+> exclusive write scope; for WT-F investigate first and patch only a proven gap.
+> You own focused validation and one Conventional Commit per logical fix. Add failing
+> offline regression tests before fixing. Preserve privacy and existing public
+> contracts. Use the agent-run-long skill/helper for long validation; do not run the
+> entire suite or change another lane's files. Return commit IDs, changed paths,
+> regression evidence, compact validation reports and any unresolved dependency.
+> Integration owner owns merge order, cross-lane review and final validation.
+
+## Integration gate
+
+Reconcile every lane's actual diff before accepting its summary. Merge A before B;
+review G's transport logging policy under concurrency and H's model constraints
+against all consumers. After all writers settle, run **one final full Python gate**
+using the baseline pytest/coverage, Ruff and `mypy src tests` commands. Delegate long
+checks to background fixers, serializing overlapping cache/checkout use. Build the
+package, and if F changes Nix/CI explicitly realize the intended native check
+attributes rather than relying on the zero-check baseline. Compare warnings/coverage
+with the baseline; any new failure needs attribution, not a baseline waiver.
+
+Before accepting commits, verify secrets are absent, stdout framing and exit codes
+remain compatible, datetimes are aware/NYC-correct, and poll claiming/retry/GTFS
+provenance contracts remain intact. Record final evidence and residual investigations.
+The tracked `.coverage` file can be dirtied by coverage tooling: inspect and restore
+only that generated file when appropriate, never broadly restore a worktree.

@@ -1,67 +1,53 @@
-# WT-D — Messages, config CLI, OpenClaw glue
+# WT-D — Normalize configuration failures at the CLI boundary
 
-**Branch / worktree:** `audit/wt-d-interface`
-**Write scope (exclusive):** `src/commutecompass/{format,config}.py`, `contrib/openclaw-send.sh`,
-`skills/commutecompass/**`, `tests/test_format.py`, `tests/test_config*.py`, new
-`tests/test_skill_dispatch.py`, `tests/test_openclaw_send.py`.
-Do not edit `notify.py` unless strictly needed for UI-4 (no other worktree owns it).
-**Validation:** `pytest -q` on the files above, `ruff check .`, `mypy src`, `bash -n contrib/openclaw-send.sh`.
-**Rules:** AGENTS.md gotchas 2, 4, 7 and the "When changing behavior" list (keep SKILL.md and
-`references/config-allowlist.md` in sync).
+**Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
+**Slug / branch:** `audit-config-errors` / `fix/audit-config-errors`.
+**Exclusive write scope:** `src/commutecompass/config.py`, `src/commutecompass/cli.py`,
+`tests/test_config.py`, `tests/test_cli.py`, `tests/test_config_atomic.py`.
+**Validation owner:** this lane's fixer; integration owner runs the final suite.
 
-## UI-1 — P1 — alert routes not sanitized
-- **Where:** `format.py:249-252`. `affected_routes` are `escape_md`'d but not `_sanitize_text`'d
-  (feed-controlled text; bidi/control chars reach Telegram). Sanitize each route first. Test with
-  a route containing `\u202e` and a control char.
+## CFG-1 — P2 — invalid configuration bypasses exit 78
 
-## UI-2 — P1 — route detail fields not sanitized
-- **Where:** `format.py:438-460` `_route_summary_detailed`. Wrap `leg.line`, stop names,
-  headsigns with `_sanitize_text` before `escape_md`. Test.
+**Source:** `load_config`, `config.py:475-507`, opens/parses TOML and performs time,
+section and environment conversions outside a normalized `ConfigError` boundary.
+`cli.py:42-51` only maps `ConfigError`/`ValidationError` to `EXIT_CONFIG=78`.
+The Click config path option (`:92-99`) does not require an existing file.
 
-## UI-5 — P2 — send failure logs message body
-- **Where:** `contrib/openclaw-send.sh:53-57` prints the first 80 chars of the message (event
-  titles/locations) to stderr/journal. Log message ordinal and byte length only.
+**Reproduced offline:** isolated `CliRunner` calls to `init-db` with a missing config,
+malformed TOML, `99:99` time, or `notify=42` exit 1 with respectively
+`FileNotFoundError`, `TOMLDecodeError`, `ValueError`, or `AttributeError`, rather than
+78. They fail before DB or network activity. `int(TELEGRAM_CHAT_ID)` is another
+conversion requiring a regression test. A claim that validation output exposes
+secrets remains **unconfirmed**; do not present it as an observed leak.
 
-## UI-3 — P2 — silent framing errors in openclaw-send.sh
-- **Where:** `openclaw-send.sh:61-90`. Unframed output is dropped silently, a nested START
-  resets the buffer, a stray END is ignored. Warn on stderr for each case and exit non-zero at
-  the end if any framing error occurred (still send well-formed messages).
+### Fix boundary
 
-## UI-4 — P2 — no end-to-end framing test
-- Add `tests/test_openclaw_send.py`: run `StdoutNotifier` output (multiple messages, a body line
-  equal to the delimiter) through the script with a fake `openclaw` on `PATH` that records argv;
-  assert exact messages delivered. Skip if `bash` missing.
+Validate section mapping shapes and normalize expected file/parse/conversion failures
+as safe `ConfigError`s. Preserve existing missing-environment diagnostics and CLI
+exit constants. Do not catch every programming error at the top-level CLI: expected
+user errors should be classified near the load boundary. Error messages may name
+fields/files but must not echo credentials or entire input sections. Preserve valid
+config loading, redaction, atomic config updates, and the set allowlist.
 
-## UI-9 — P2 — `config set` can write an unloadable config
-- **Where:** `config.py:549-554` `_coerce_int` (no bounds), `update_config_field`.
-  `config set scheduling.poll_interval_seconds 0` writes a file that later fails validation.
-- **Fix:** after applying the edit in memory, validate the whole document with the same pydantic
-  model used by `load_config`; on failure, do not write and exit `EXIT_CONFIG` with the error.
-- **Test:** invalid value → file unchanged, error raised.
+### Regression tests / acceptance
 
-## UI-10 — P2 — non-atomic config writes
-- **Where:** `config.py:689,720` (`update_config_field`, `delete_config_field`) use `open(path,"w")`.
-- **Fix:** write to a temp file in the same dir, `fsync`, `os.replace`, preserve original mode.
-  Test that mode is preserved and a failure mid-write leaves the original intact.
+- The reproduced cases and invalid `TELEGRAM_CHAT_ID` exit 78 with a concise error,
+  no traceback, and no command execution/DB creation/network access.
+- Non-mapping TOML sections are rejected intentionally rather than crashing `.get`.
+- Permission-denied/open errors become config errors; use mocked file operations.
+- Secret sentinel values do not appear in any new diagnostic, including invalid
+  secret-bearing sections. Use fake values, not real environment/credential files.
+- Valid configs and existing `config set`/redaction/exit-code tests remain green.
 
-## UI-6 — P2 — redaction relies on keyword heuristic
-- **Where:** `config.py:521-534` `redact_for_display`. Add an explicit set of secret field paths
-  plus extend keywords (`password`, `credential`, `bearer`). Test every secret field in `Config`
-  is redacted.
+**Focused command:** `pytest -q tests/test_config.py tests/test_config_atomic.py tests/test_cli.py`.
+**Suggested commit:** `fix(config): normalize load failures to config errors`.
 
-## UI-7 — P2 — skill dispatch drift test
-- `tests/test_skill_dispatch.py`: each script referenced by `skills/commutecompass/SKILL.md`
-  exists and is executable; each wrapper's CLI subcommand exists in the click group.
+## Legacy audit disposition
 
-## UI-8 — P2 — allowlist doc sync test
-- Assert `CONFIG_SET_ALLOWLIST` keys == keys listed in
-  `skills/commutecompass/references/config-allowlist.md`.
-
-## UI-11 — P3 — allowlisted keys not read at runtime
-- `scheduling.morning_run_time` / `scheduling.poll_interval_seconds` are settable but timers come
-  from Nix. Default decision: keep them, but make `config set` print a warning that the systemd
-  timer (Nix module) must also change, and note it in the allowlist doc.
-
-## UI-12 — P3 — WONTFIX
-- Bash shebangs in `contrib/` and skill scripts are intentional (portable OpenClaw hosts); the
-  user's fish preference applies to personal shell scripts, not shipped glue. No change.
+UI-1 through UI-11 are resolved: current code/tests cover command error boundaries,
+output framing and sanitization, config redaction/allowlisting/atomic writes, and
+skill dispatch synchronization. UI-12 is withdrawn: the contributed sender's bash
+implementation is intentional, not a porting requirement. The re-audit NOTIFY2
+byte-count claim is also withdrawn. Notification logging and acknowledgement work
+has a separate exclusive owner in [WT-G](wt-g-sensitive-logging.md); do not edit
+`notify.py`, transport logging policy, formatting, or skill scripts in this lane.

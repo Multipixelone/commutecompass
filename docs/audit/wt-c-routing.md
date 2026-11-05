@@ -1,53 +1,63 @@
-# WT-C — Routing, weather, MTA alerts, GTFS
+# WT-C — Route endpoint and weather parsing
 
-**Branch / worktree:** `audit/wt-c-routing`
-**Write scope (exclusive):** `src/commutecompass/{routing,weather,mta,gtfs_index}.py` and their
-tests (`tests/test_routing*.py`, `tests/test_weather.py`, `tests/test_mta*.py`, `tests/test_gtfs*.py`).
-**Invariant (AGENTS.md gotcha 8):** only `gtfs_bridge.validate_leg` sets `gtfs_*` identity; do not
-touch `gtfs_bridge.py`. Bridge/refresh failures must fail open.
-**Validation:** `pytest -q` on the files above, `ruff check .`, `mypy src`.
+**Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
+**Slug / branch:** `audit-provider-parsing` / `fix/audit-provider-parsing`.
+**Exclusive write scope:** `src/commutecompass/routing.py`, `src/commutecompass/weather.py`,
+`tests/test_routing.py`, `tests/test_weather.py`.
+**Validation owner:** this lane's fixer; integration owner runs the final suite.
 
-## RTE-2 — P1 — plan_route lets parse errors escape
-- **Where:** `routing.py:515-532`. Only `httpx.HTTPError` is caught; `response.json()`
-  `ValueError` and any `_parse_route` error propagate into planning/morning/poll.
-- **Fix:** catch `ValueError, TypeError, KeyError, AttributeError` around decode+parse → log
-  (type only) and return `None`.
-- **Test:** non-JSON body and `{"routes": [None]}` → `None`, no raise.
+## RTE-NEW1 — P2 — overall endpoint timestamps bypass validation
 
-## RTE-3 — P1 — _parse_route assumes dict shapes
-- **Where:** `routing.py:385-405`. Skip non-dict routes/legs/steps instead of raising
-  `AttributeError`; if no valid alternative remains, return `None`.
-- **Test:** mixed list with one malformed and one valid route → valid one chosen.
+**Source:** `routing.py:454-467` converts provider departure/arrival values directly
+with `datetime.fromtimestamp`; missing/zero values fall back to wall-clock now.
+`plan_route` at `:547-562` catches several parse exceptions, but not `OverflowError`
+or `OSError`. **Reproduced offline:** an otherwise usable mocked Directions response
+with overall departure `1e100` raises `OverflowError` through `plan_route`.
+Infinity was contained as `ValueError` on the audit platform; do not claim every
+invalid timestamp escapes. Severity is P2 because this needs malformed provider data.
 
-## RTE-1 — P1 — unvalidated non-transit step timestamps
-- **Where:** `routing.py:240-255`. Walking/other step departure/arrival values go straight to
-  `datetime.fromtimestamp` (str/NaN/huge → `TypeError`/`ValueError`/`OverflowError`/`OSError`),
-  and the fallback uses `datetime.now` (wall clock in the middle of a parse).
-- **Fix:** reuse the existing validated `_scheduled_time()` helper; derive fallback from the
-  neighbouring leg times / request time, not `now()`. Results must be tz-aware NYC.
-- **Test:** step timestamps `"abc"`, `float("nan")`, `1e20` → no raise, sensible times.
+Use the existing safe timestamp validator for overall endpoints as well as steps.
+Choose a deterministic fallback from validated route legs/request time, or reject
+the route through the existing no-route path. Avoid fabricating current-time endpoints.
+Defensive outer exception handling is useful but does not replace input validation.
+Preserve valid schedules, routing modes, and bridge-only GTFS identity provenance.
 
-## RTE-4 — P2 — weather forecast ambiguous across DST fall-back
-- **Where:** `weather.py:87-92`. Matches hourly forecast by naive local-hour string with
-  `.index()`; on 2026-11-01 the 01:00 hour occurs twice and the first is always chosen.
-- **Fix:** request UTC/unix times (Open-Meteo `timeformat=unixtime` or `timezone=GMT`) and match
-  by instant.
-- **Test:** fixture covering 2026-11-01 05:00Z and 06:00Z (both 01:00 local) → distinct entries.
+**Acceptance/tests:** parameterize departure and arrival independently with strings,
+bools, NaN, infinity, `1e100`, huge integers, zero, negative, and absent values. No
+uncaught exception from the public planner; each case gives a documented safe fallback
+or no-route result. Valid endpoints remain NYC-aware, and fallbacks are independent
+of wall-clock time. Keep existing valid/multi-leg parsing coverage.
 
-## RTE-5 — P2 — inverted alert active periods accepted
-- **Where:** `mta.py:125-136, 537-548`. Drop periods with `end < start` (log). Test.
+## WX-NEW1 — P2 — numeric weather parsing escapes fail-open boundary
 
-## RTE-6 — P2 — negative alert timestamps accepted
-- **Where:** `mta.py:200-208` `_parse_timestamp` rejects only `0`. Use `seconds <= 0`. Test `-1`.
+**Source:** `weather.py:47-54` protects fetching but calls `_buffer_from_hourly`
+outside the try. `_at` at `:111-118` converts numeric series entries with `float`.
+**Reproduced offline:** a response-shaped hourly dict with a matching epoch hour and
+`precipitation=[10**1000]` raises `OverflowError`. This is a JSON-compatible arbitrary-
+precision integer trigger, not an unrealistic replacement of the fetcher's return type.
 
-## RTE-7 — P2 — GTFS refresh fallback too narrow
-- **Where:** `gtfs_index.py:713-727`. Supplemented-feed failure only falls back on
-  `AllowlistMismatchError/GtfsImportError/OSError/sqlite3.Error`; `ValueError`, `BadZipFile`,
-  `KeyError`, `UnicodeError` abort before the regular-feed attempt.
-- **Fix:** per-feed-attempt `except Exception` (log exception type + feed name), then try the
-  regular feed; the final failure still exits non-zero and leaves the previous `gtfs.db` intact.
-- **Test:** supplemented import raises `BadZipFile` → regular feed is used.
+Contain malformed numeric parsing and reject non-finite values. The documented
+clear-weather fallback is `WeatherBuffer(0, None)`; preserve real thresholds and
+UTC-epoch hour matching across NYC DST. Prefer a narrow conversion fix plus an
+explicit public-boundary contract over unrelated weather refactoring.
 
-## RTE-8 — P2 — download() leaks OSError and partial files
-- **Where:** `gtfs_index.py:673-688`. Wrap dest open/write `OSError` as `FeedError`, write to a
-  temp file and `os.replace` on success, unlink the partial on failure. Test with an unwritable dest.
+**Acceptance/tests:** huge integers, non-finite values, missing/short series, and
+ordinary malformed values cannot crash `weather_buffer`; invalid data alone produces
+the clear-weather fallback. Valid precipitation/wind/snow and repeated-DST-hour tests
+still pass. Use only mocked forecast data.
+
+**Focused command:** `pytest -q tests/test_routing.py tests/test_weather.py`.
+**Commits:** separate routing and weather fixes, e.g.
+`fix(routing): validate overall route endpoint timestamps` and
+`fix(weather): contain malformed numeric forecasts`.
+
+## Legacy audit disposition
+
+RTE-1 through RTE-8 are resolved **as originally stated**: non-transit step timestamps
+use `_scheduled_time` (`routing.py:246-255`); normal response parse failures and bad
+route/leg/step shapes are contained (`:399-433`, `:547-562`); weather uses epoch-hour
+matching (`weather.py:87-90`); inverted/non-positive MTA alert times are rejected
+(`mta.py:130-134`, `:207-215`, `:549-553`); supplemented-feed refresh falls back, and
+GTFS downloads use bounded streaming/partial-file atomic replacement
+(`gtfs_index.py:673-699`, `:724-739`). RTE-NEW1 is the remaining **overall endpoint**
+case, not a reason to undo those fixes.

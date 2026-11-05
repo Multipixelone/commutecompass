@@ -1,65 +1,51 @@
-# WT-B — Location resolution & calendar ingest
+# WT-B — Calendar ingestion and OAuth persistence
 
-**Branch / worktree:** `audit/wt-b-resolution`
-**Write scope (exclusive):** `src/commutecompass/{llm,geocode,resolver,venues,selector,calendar_client}.py`
-and their tests (`tests/test_llm.py`, `tests/test_geocode.py`, `tests/test_resolver.py`,
-`tests/test_venues.py`, `tests/test_selector.py`, `tests/test_calendar*.py`).
-Do **not** edit `store.py` (WT-A owns it) — canonicalize cache keys on the resolver side.
-**Validation:** `pytest -q` on the files above, `ruff check .`, `mypy src`.
-**Privacy:** test fixtures must never contain a real home address/coordinates; use public venues.
+**Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
+**Slug / branch:** `audit-calendar` / `fix/audit-calendar`.
+**Exclusive write scope:** `src/commutecompass/calendar_client.py`, `tests/test_calendar_client.py`.
+**Validation owner:** this lane's fixer; integration owner runs the final suite.
 
-## RES-1 — P1 — LLM response parsing can crash resolution
-- **Where:** `llm.py:119-148` (`_parse_response`), called outside the `try` in `resolve_location`.
-- **Evidence:** `parsed.get(...)` is called without checking `parsed` is a dict (JSON `[]`,
-  `null`, `"str"` → `AttributeError`); a non-string `value` reaches pydantic and raises
-  `ValidationError`; the JSON-failure branch logs the full model output.
-- **Fix:** `isinstance(parsed, dict)`; validate `kind`/`value` are non-empty `str`; catch
-  `ValidationError` → `None`; log only length/type, not content.
-- **Tests:** responses `[]`, `null`, `"x"`, `{"kind":"address","value":[]}`, invalid JSON → `None`, no raise.
+## RES-10 — P2 — malformed items container escapes ingestion
 
-## RES-2 — P1 — prompt injection via calendar location text
-- **Where:** `llm.py:72-86`. Raw `event.location` is the entire user message.
-- **Fix:** fixed user template containing the location as a JSON-encoded string inside clear
-  delimiters; system prompt states that the delimited text is untrusted data and any
-  instructions in it must be ignored. Validate output: length cap (≤200), no control chars,
-  `kind` in the allowed set. Treat failures as unresolved.
-- **Tests:** location containing `Ignore previous instructions ...` is passed JSON-encoded
-  (assert request body); an over-long/garbage output is rejected.
+**Confirmed by source:** `CalendarClient.fetch_events`, `calendar_client.py:159-218`,
+gets `items` and iterates it outside the per-item exception handler. `items=None`
+or an integer raises `TypeError`; a dict/string is silently iterated as keys/chars.
+The existing per-event handler does not validate the container itself.
 
-## RES-3 — P1 — geocoder: unhandled parse errors and null-island coordinates
-- **Where:** `geocode.py:62-82`; callers `resolver.py:125,156`.
-- **Evidence:** `response.json()` and shape access are outside the `try`
-  (`JSONDecodeError`/`TypeError`/`KeyError` escape); missing `lat`/`lng` default to `0.0`,
-  producing a route to (0,0).
-- **Fix:** catch `ValueError, TypeError, KeyError, AttributeError` → `None` with a log;
-  require both coords present, numeric, finite, and within lat ±90 / lng ±180; otherwise `None`.
-- **Tests:** non-JSON body, `{"results":[{}]}`, missing lng, `NaN`, string coords → `None`.
+Validate the response mapping and `items` list shape before iteration. A malformed
+page must not masquerade as a successful, authoritative empty calendar: raise a
+controlled fetch error so morning's failed-fetch path can preserve reminders. A
+missing `items` key on a normal empty response may remain a successful empty list.
+Keep valid-event per-item isolation, enabled-calendar selection, and timezone rules.
 
-## RES-5 — P2 — placeholder locations reach the geocoder
-- **Where:** `resolver.py:123-141`. Placeholder check (e.g. "Location available once RSVP'd")
-  runs after `looks_like_address` / geocoding.
-- **Fix:** move the placeholder short-circuit to the top of the pipeline; use word-boundary
-  regexes. AGENTS.md gotcha 3 requires no network/LLM call for these.
-- **Test:** placeholder → unresolved, geocoder and LLM mocks not called.
+**Acceptance/tests:** mock the Calendar service chain, without authorization/network;
+exercise `items=None`, scalar, string, mapping, absent key, `[]`, and mixed valid/invalid
+events. Invalid containers produce the chosen controlled error, not an accidental
+iteration exception; valid records retain NYC-aware times. Do not expand pagination
+or change multi-calendar completeness semantics without a separate design decision.
 
-## RES-4 — P2 — cache key not canonical
-- **Where:** `resolver.py:87,103-105` (store side `store.py:673-707` is read-only for you).
-- **Fix:** canonical key = NFKC → casefold → collapse whitespace → strip. Look up canonical
-  key first, fall back to the raw key for existing rows; write the canonical key.
-- **Test:** `"  Joe's  Pub "` and `"joe's pub"` hit the same cache row.
+## RES-13 — P2 — credential writes are non-atomic and briefly over-permissive
 
-## RES-6 — P2 — duplicate venue aliases silently overwrite
-- **Where:** `venues.py:55-62`. Raise a clear error at load naming both venues. Test.
+**Confirmed by source:** `_save_credentials`, `calendar_client.py:98-103`, uses
+`Path.write_text` before `chmod(0600)`. New files inherit umask before chmod, and an
+interrupted overwrite can destroy a previously valid refresh token.
 
-## RES-7 — P2 — selector accepts naive `now`
-- **Where:** `selector.py:59-76`. Raise `ValueError` on naive datetimes, else convert with
-  `to_nyc`. Test both.
+Use a same-directory temporary file created with mode 0600, write/flush/fsync, then
+`os.replace`. Clean up temporary files on failure. Do not repurpose the config-file
+writer: its permission-preservation semantics differ, and another lane owns config.
+Keep credentials out of exceptions/logs and fixtures; test with fake serialized data.
 
-## RES-8 — P2 — corrupt token file not mapped to AuthError
-- **Where:** `calendar_client.py:63-88`. Only `RefreshError` maps to `AuthError`; a corrupt or
-  unreadable token raises `JSONDecodeError`/`OSError`/`ValueError`.
-- **Fix:** map these to `AuthError` with a message naming the path, never the contents. Test.
+**Acceptance/tests:** new/replaced token mode is 0600 under permissive umask; simulated
+write/fsync/replace failures preserve the old bytes and leave no temp files; successful
+replacement contains the fake new bytes. Never open a real credential file.
 
-## RES-9 — P2 — one malformed event aborts the whole fetch
-- **Where:** `calendar_client.py:172-195`. Skip items missing `id` or with unparseable
-  times, log event id/index only (no title/location), continue. Test with a mixed batch.
+**Focused command:** `pytest -q tests/test_calendar_client.py`.
+**Commits:** one per finding, e.g. `fix(calendar): reject malformed event containers`
+and `fix(calendar): persist oauth credentials atomically`.
+
+## Legacy audit disposition
+
+RES-1 through RES-9 are resolved in current LLM/resolver/geocode/venues/selector/calendar
+code and tests. Do not rework them. Re-audit claims RES-11 and RES-12 were withdrawn
+on source review. Unbounded raw LLM input is an **unconfirmed P3 investigation**, not
+an implementation order; define a concrete failure and compatibility-safe limit first.

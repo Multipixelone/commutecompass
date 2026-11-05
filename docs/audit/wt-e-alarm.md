@@ -1,59 +1,53 @@
-# WT-E — Alarm daemon, wake computation, Home Assistant
+# WT-E — Isolate optional alarm-daemon callbacks
 
-**Branch / worktree:** `audit/wt-e-alarm`
-**Write scope (exclusive):** `src/commutecompass/{alarm,alarm_daemon,ha_client}.py`,
-`src/commutecompass/jobs/tomorrow.py`, `docs/alarm-*.md`, and tests
-`tests/test_alarm*.py`, `tests/test_ha_client.py`, `tests/test_jobs_tomorrow.py`.
+**Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
+**Slug / branch:** `audit-alarm-callbacks` / `fix/audit-alarm-callbacks`.
+**Exclusive write scope:** `src/commutecompass/alarm_daemon.py`, `tests/test_alarm_daemon.py`.
 **Read first:** `docs/alarm-design.md`, `docs/alarm-ha-contract.md`.
-**Validation:** `pytest -q tests/test_alarm*.py tests/test_ha_client.py tests/test_jobs_tomorrow.py`
-(baseline: 483 passed), `ruff check .`, `mypy src`.
+**Validation owner:** this lane's fixer; integration owner runs the final suite.
 
-## ALM-2 — P2 (do first) — reader exception kills the daemon
-- **Where:** `alarm_daemon.py:1342-1346` (`run_once` → `self.reader()`), `run_forever` has only `finally`.
-- **Fix:** catch `Exception` from the reader, log type, treat as HA unavailable (`ha_ok=False`)
-  so the cached alarm still rings; keep `KeyboardInterrupt`/`SystemExit` propagating.
-- **Test:** reader raises `RuntimeError` once then recovers; daemon keeps looping; a cached due
-  alarm still enters ringing.
+## ALM-9 — P3 — optional callback exceptions escape run_once
 
-## ALM-3 — P2 — cleanup can skip final mode publication
-- **Where:** `alarm_daemon.py:1484-1502` `finally`: `activity_monitor.stop()` unguarded before
-  `_stop_audio()` and `_reconcile_mode()`.
-- **Fix:** guard each cleanup step independently (try/except-log or `ExitStack`).
-- **Test:** monitor `stop()` raises → audio stop and mode publication still happen.
+**Confirmed source paths:** handled/window-done publishers at
+`alarm_daemon.py:1458,1467`, audio-failed publisher at `:1481`, and heartbeat callback
+at `:1484-1488` are invoked without a local guard. A custom/injected callback raising
+`RuntimeError` escapes `run_once` and ends `run_forever` after cleanup.
 
-## ALM-1 — P2 — heartbeat stops after audio failure
-- **Where:** `alarm_daemon.py:1424-1428` heartbeat gated on `self._audio_healthy`.
-- **Decision needed before coding:** check `docs/alarm-design.md` /
-  `docs/alarm-ha-contract.md`. If heartbeat loss is the *designed* trigger for HA's dead-man
-  fallback on audio failure (the `noqa` comment at ~1391 says "let HA's dead-man fallback fire"),
-  this is intentional: document it in the contract doc and add a test that pins it, no code
-  change. Otherwise decouple heartbeat from audio health and rely on `audio_failed`. Record which
-  in the commit body.
+**Severity boundary:** normal Home Assistant HTTP failures already become `False`
+in `ha_client.call_service` (`ha_client.py:115-158`). This is defense in depth for
+unexpected callback exceptions, not proof that an ordinary HA outage kills the
+alarm. Keep the alarm's local ringing independent of these optional publishers.
 
-## ALM-4 — P2 — wake horizon is two logical days
-- **Where:** `alarm.py:166-195` `compute_wake` raises `AlarmError("no future wake ...")` when both
-  today's and tomorrow's wakes are ≤ now.
-- **Verify reachability first** (write the failing test): e.g. an early-morning event tomorrow with
-  a large lead time computed late at night. If reachable, extend the search to the next logical
-  day(s) (bounded, e.g. 3) while keeping the "incomplete planning raises" behavior. If not
-  reachable, document the invariant in the docstring and pin it with a test.
+### Fix boundary
 
-## ALM-5 — P2 — "tomorrow" not tested across DST
-- **Where:** `jobs/tomorrow.py:57-59` uses `now + timedelta(days=1)`; test mirrors the same
-  expression. Compute tomorrow by NYC calendar date (`logical_day_bounds_nyc`), test with frozen
-  clocks around 2026-03-08 and 2026-11-01.
+Add a narrow safe-callback boundary that catches `Exception`, logs operation and
+exception class without payloads/secrets, and returns failure for retryable
+publication paths. Preserve existing pending-publication behavior; a failed callback
+must not be reported as acknowledged. Continue propagating `KeyboardInterrupt` and
+`SystemExit`. Keep **audio-health gating of heartbeat**: deliberately suppressing
+heartbeat after audio failure enables HA's dead-man fallback. Do not alter playback,
+wake scheduling, presence gates, or cleanup behavior already fixed.
 
-## ALM-6 — P2 — HA client error-path tests
-- **Where:** `ha_client.py:16-55,110-153,156-196`. Add tests: `httpx.TimeoutException` for each
-  call → `None`/`False` without raising; service names must be exactly `domain.service`
-  (reject `a.b.c`, `.x`, `x.`); bearer token never appears in log records (use `caplog`).
+### Regression tests / acceptance
 
-## ALM-7 — P2 — signal handler tests
-- **Where:** `alarm_daemon.py:1596-1607`. Monkeypatch `signal.signal`, capture handlers, invoke:
-  SIGTERM stops loop and runs cleanup; SIGUSR1 while idle is a no-op, while ringing dismisses.
+- Each of handled, window-done, audio-failed and heartbeat callbacks raises once;
+  `run_once` remains alive, next iteration runs, and later recovery can publish.
+- Pending handled/window-done state is not falsely cleared on callback failure.
+- A cached due alarm still rings while optional publication fails.
+- Audio failure continues suppressing healthy heartbeat; ordinary false-returning
+  callbacks retain their existing semantics; process-control exceptions propagate.
+- Use fake reader/publishers/audio and frozen aware time; no HA requests.
 
-## ALM-8 — P3 — legacy tomorrow push vs v1 contract
-- **Where:** `jobs/tomorrow.py:14-15,182-196`, `ha_client.py:165-179`, `docs/alarm-ha-contract.md:9-33`.
-- **Fix (docs + validation only):** document that the `tomorrow` job uses the legacy
-  `{"alarm_at": ...}` payload and is separate from the v1 snapshot publisher; add a config
-  validation warning when both are enabled. Do not migrate the payload in this pass.
+**Focused command:** `pytest -q tests/test_alarm_daemon.py -k 'heartbeat or handled or window_done or audio_failed'`.
+**Suggested commit:** `fix(alarm): isolate optional publication callbacks`.
+
+## Legacy audit disposition
+
+ALM-1 was intentional audio-health dead-man gating, now documented; do not reverse it.
+ALM-2/3 reader/cleanup guards, ALM-4 safe/redacted HA handling, ALM-5 publication
+response checks, ALM-7 atomic state mode preservation, and ALM-8 ring-start cleanup
+are resolved. ALM-6 is **partial**: ordinary HA network errors are contained, but
+arbitrary non-httpx exceptions in tomorrow's injected publisher were not proven
+contained. That residual is an unconfirmed hardening question, not authorization
+to expand this lane into `jobs/tomorrow.py`. Geographic validation is independently
+owned by [WT-H](wt-h-ha-validation.md).

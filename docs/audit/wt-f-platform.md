@@ -1,62 +1,71 @@
-# WT-F — Nix module, CI, repo hygiene, docs
+# WT-F — Optional CI/check-execution investigation
 
-**Branch / worktree:** `audit/wt-f-platform`
-**Write scope (exclusive):** `nix/**`, `flake.nix`, `.github/**`, `renovate.json`, `.gitignore`,
-`examples/**`, `README.md`.
-**Validation:** `nix flake check`, `nix build .#default`, plus any new module-eval check.
-Use the `agent-run-long` helper for Nix builds. Baseline before this audit: ruff clean,
-mypy clean (35 files), pytest 1653 passed.
-**Privacy:** never add a real home address/coordinates or chat IDs anywhere (AGENTS.md rule 1,
-`../infra/AGENTS.md` privacy boundary).
+**Base:** `4df247f`; follow [shared execution rules](README.md#execution-rules).
+**Slug / branch:** `audit-check-execution` / `ci/audit-check-execution`.
+**Conditional exclusive write scope:** `.github/workflows/ci.yml`,
+`.github/actions/setup-nix-attic/action.yml`, `flake.nix`, `nix/module-eval.nix`.
+**Validation owner:** this lane's fixer; serialize its Nix builds with integration.
+**Status:** investigation first; no confirmed production platform defect warrants a
+blind patch. Keep Python/application code out of this lane.
 
-## PLT-6 — P2 — no systemd timeouts on oneshot jobs
-- **Where:** `nix/module.nix:37-81`. Hung HTTP/OpenClaw keeps the unit active; the poll timer
-  cannot start a new run. Add `TimeoutStartSec` per job (e.g. poll 2 min, morning/tomorrow 10 min,
-  gtfs-refresh 30 min) — expose as an option with these defaults. App HTTP timeouts must stay below.
+## PLT-8 — unresolved execution-evidence gap, not a missing module test
 
-## PLT-7 — P2 — timer timezone inconsistent
-- **Where:** `nix/module.nix:209-253, 396-426`. Only `gtfsRefreshTime` pins `America/New_York`;
-  `morningTime`, `tomorrowTime`, `alarm.publishTime` use host time. Pin defaults to
-  `America/New_York` and document that user-supplied `OnCalendar` values should carry a zone.
+`flake.nix:70-76` declares `pre-commit-check`, `renovate-policy`, and `module-eval`.
+`nix/module-eval.nix:49-75` already asserts path validation, service types, timeouts,
+and timer behavior. CI at `.github/workflows/ci.yml:54-58` invokes flake check and
+builds the default package.
 
-## PLT-5 — P2 — ExecStart built as an unescaped shell string
-- **Where:** `nix/module.nix:87-92`
-  (`bash -o pipefail -c '${exe} ${subcommand} | ${sendWrapper}'`). Generate a
-  `writeShellApplication` wrapper per job with `lib.escapeShellArg` on every interpolation;
-  keep `pipefail`.
+The audit's local `nix flake check --print-build-logs` exited 0, evaluated these
+attributes, but reported **running 0 flake checks**. It therefore does not demonstrate
+that their build phases ran. Evaluation itself can force module assertions; do not
+claim those assertions were skipped or that hosted CI necessarily behaves like the
+local machine. The separate default package build succeeded.
 
-## PLT-4 — P2 — dataDir assertion allows traversal
-- **Where:** `nix/module.nix:302-305` (`hasPrefix "/var/lib/"`). Also reject `..`, `//`,
-  trailing `/`, and require exactly `/var/lib/<name>` (regex `^/var/lib/[A-Za-z0-9._-]+$`, not `.`/`..`).
+### Investigation and conditional fix
 
-## PLT-8 — P2 — module not evaluated in CI
-- Add a flake `checks.<system>.module-eval` that evaluates a minimal NixOS config importing
-  `nixosModules.default` (enable + skill users + alarm) and asserts key service/timer attrs
-  (timeouts, OnCalendar zone, dataDir assertion failing for `/var/lib/../etc`). Runs via
-  existing `nix flake check` in CI; a VM test is optional/out of scope.
+1. Inspect selected system, effective local Nix settings/check selection, and the
+   flake output shape. Determine why zero derivations ran locally; distinguish local
+   configuration/cache behavior from a reproducible workflow flaw.
+2. Explicitly validate the three `checks.x86_64-linux` attributes using the helper
+   below. Report evaluated assertions separately from realized derivations/cache hits.
+3. If reproducible CI ambiguity remains, make the smallest workflow/check-selection
+   change that explicitly validates the intended native checks. Preserve package
+   build/Attic behavior and existing module assertions. Otherwise report no change
+   needed and retain evidence; do not alter CI for a local-only artifact.
 
-## PLT-2 — P2 (design, document) — skill users can read every service secret
-- **Where:** `nix/module.nix:15-35, 280-330`. `skill.users` join `cfg.group`, which must be able
-  to read the whole `environmentFile` (0440). This is documented, but the blast radius
-  (all API keys, Telegram/HA tokens) is not called out. **Minimum:** state it explicitly in
-  the option description and README. **Optional:** add `skill.environmentFile` (separate,
-  skill-only secrets) used by the wrapper instead of the service file when set. Do not change
-  the default behavior in this pass.
+**Focused command (through `agent-run-long`, not a bare long shell call):**
 
-## PLT-9 — P2 — Renovate automerges everything
-- **Where:** `renovate.json:7-10`. Keep automerge for patch/minor of dev tooling; disable for
-  majors, `github-actions`, `nix` (flake inputs), and `httpx`/`google-auth*`.
+```sh
+agent-run-long --label audit-explicit-checks --timeout 30m -- nix build --no-link --print-build-logs '.#checks.x86_64-linux.module-eval' '.#checks.x86_64-linux.renovate-policy' '.#checks.x86_64-linux.pre-commit-check'
+```
 
-## PLT-11 — P3 — README command index misses `alarm`
-- **Where:** `README.md:15-32`. Add the `alarm` group (`publish, status, nap, skip, on, off,
-  daemon`) and any other missing commands; compare with `commutecompass --help`.
+Use outer tool timeout >=1860000ms; pre-commit-check includes tests and must not run
+concurrently with another full validation in the same checkout. The audit did **not**
+run this explicit command. Acceptance is evidence for the intended check outputs and
+an explained zero-check result, not merely an exit-0 summary. For any workflow edit,
+validate syntax and changed expressions locally; do not dispatch hosted CI or deploy.
 
-## PLT-1 / PLT-3 — P3 — example identifiers
-- `examples/config.toml:11-15`, `examples/config.test.toml:1-5` use "123 Example Ave" with
-  Brooklyn coordinates; `examples/nixos-usage.nix:19-22` uses chat `-987654321`. These look
-  synthetic. Add a `# synthetic placeholder` comment next to each. **Owner check (not the
-  fixer's call):** confirm the coordinates are not near the real origin; if they are, replace
-  with a public landmark (e.g. Grand Central) and consider history rewrite.
+## F-PLAT-03 — unconfirmed fork-PR Attic resilience question
 
-## PLT-10 — P3 — hygiene
-- Add `/result` and `/result-*` to `.gitignore` (currently only ignored by a user-global rule).
+Setup receives a possibly empty `ATTIC_KEY` at `ci.yml:49-52`. No reproduction proves
+that Attic login fails when empty. Investigate with mocked/synthetic credentials
+only if useful; guard optional authentication only if a failure is established.
+Never print or retrieve repository secrets. This is not a confirmed P1/P2 bug.
+
+## Withdrawals and legacy disposition
+
+- F-PLAT-01 withdrawn: `examples/state.db` is ignored/untracked local state, not a
+  tracked DB leak; do not open it. F-PLAT-02 withdrawn: `TimeoutStartSec` for the simple
+  daemon is startup-only, not a runtime limit. F-PLAT-04 withdrawn: `OPENCLAW_TARGET`
+  exposure is documented nonsecret metadata with an environment-file alternative.
+- PLT-1/3: synthetic example identifiers, no confirmed personal-origin/chat-ID leak.
+- PLT-2: skill-user group access is an explicit trusted-user boundary, documented in
+  `nix/module.nix:303-327` and `README.md:149-156`, not an undisclosed implementation bug.
+- PLT-4: `dataDir` restriction and traversal tests exist (`module.nix:331-335`).
+- PLT-5: piped service arguments use `escapeShellArg` (`module.nix:87-100`); no new
+  exploitable interpolation was demonstrated in fixed Nix-controlled plain commands.
+- PLT-6/7: finite oneshot startup timeouts and NYC-qualified timers exist
+  (`module.nix:218-237`, `:264-289`). Do not add a daemon runtime limit.
+- PLT-9: Renovate automerge is restricted and policy-asserted (`renovate.json:7-29`).
+- PLT-10: result links are ignored (`.gitignore:24-25`). PLT-11: README includes alarm
+  commands (`README.md:33`). These are resolved/no-finding, not new implementation work.
