@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -107,6 +109,108 @@ def test_saved_credentials_have_restricted_permissions(
 
     mode = token_path.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_save_credentials_atomic_private_file(
+    client_secret_json: str, token_path: Path, existing: bool,
+) -> None:
+    old_bytes = b"synthetic-old-credentials"
+    new_bytes = b'{"token": "synthetic-new-token"}'
+    if existing:
+        token_path.write_bytes(old_bytes)
+        token_path.chmod(0o666)
+    client = CalendarClient(client_secret_json, token_path)
+    creds = MagicMock()
+    creds.to_json.return_value = new_bytes.decode()
+    create_temp = tempfile.NamedTemporaryFile
+    replace = os.replace
+    created: list[Path] = []
+
+    def private_temp(*args: Any, **kwargs: Any) -> Any:
+        stream = create_temp(*args, **kwargs)
+        path = Path(stream.name)
+        created.append(path)
+        assert path.parent == token_path.parent
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.read_bytes() == b""
+        return stream
+
+    def replace_after_sync(src: str | Path, dst: str | Path) -> None:
+        assert sync.call_count == 1
+        assert Path(src).read_bytes() == new_bytes
+        assert Path(src).stat().st_mode & 0o777 == 0o600
+        assert Path(dst) == token_path
+        if existing:
+            assert token_path.read_bytes() == old_bytes
+        else:
+            assert not token_path.exists()
+        replace(src, dst)
+
+    previous_umask = os.umask(0)
+    try:
+        with (
+            patch("tempfile.NamedTemporaryFile", side_effect=private_temp),
+            patch("commutecompass.calendar_client.os.fsync", wraps=os.fsync) as sync,
+            patch("commutecompass.calendar_client.os.replace", side_effect=replace_after_sync),
+        ):
+            client._save_credentials(creds)
+    finally:
+        os.umask(previous_umask)
+
+    assert len(created) == 1
+    assert token_path.read_bytes() == new_bytes
+    assert token_path.stat().st_mode & 0o777 == 0o600
+    assert list(token_path.parent.iterdir()) == [token_path]
+
+
+@pytest.mark.parametrize("stage", ["write", "flush", "fsync", "replace"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_save_credentials_failure_preserves_old_file(
+    client_secret_json: str, token_path: Path, stage: str, existing: bool,
+) -> None:
+    old_bytes = b"synthetic-old-credentials"
+    if existing:
+        token_path.write_bytes(old_bytes)
+        token_path.chmod(0o640)
+    client = CalendarClient(client_secret_json, token_path)
+    creds = MagicMock()
+    creds.to_json.return_value = '{"token": "synthetic-new-token"}'
+    create_temp = tempfile.NamedTemporaryFile
+
+    def failing_temp(*args: Any, **kwargs: Any) -> Any:
+        stream = create_temp(*args, **kwargs)
+        wrapped = MagicMock(wraps=stream)
+        wrapped.name = stream.name
+        wrapped.__enter__.return_value = wrapped
+        wrapped.__exit__.side_effect = stream.__exit__
+        if stage == "write":
+            def partial_write(_data: str) -> None:
+                stream.write("partial-synthetic-data")
+                raise OSError("simulated credential write failure")
+            wrapped.write.side_effect = partial_write
+        elif stage == "flush":
+            wrapped.flush.side_effect = OSError("simulated credential flush failure")
+        return wrapped
+
+    with (
+        patch("tempfile.NamedTemporaryFile", side_effect=failing_temp),
+        patch("commutecompass.calendar_client.os.fsync", wraps=os.fsync) as sync,
+        patch("commutecompass.calendar_client.os.replace", wraps=os.replace) as replace_mock,
+    ):
+        if stage == "fsync":
+            sync.side_effect = OSError("simulated credential fsync failure")
+        elif stage == "replace":
+            replace_mock.side_effect = OSError("simulated credential replace failure")
+        with pytest.raises(OSError, match="simulated credential"):
+            client._save_credentials(creds)
+
+    if existing:
+        assert token_path.read_bytes() == old_bytes
+        assert token_path.stat().st_mode & 0o777 == 0o640
+    else:
+        assert not token_path.exists()
+    assert list(token_path.parent.iterdir()) == ([token_path] if existing else [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

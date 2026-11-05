@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -101,11 +102,25 @@ class CalendarClient:
         return creds
 
     def _save_credentials(self, creds: Credentials) -> None:
-        """Persist credentials to token file with restricted permissions."""
+        """Atomically replace credentials using a private, synced temporary file."""
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         creds_data = creds.to_json()  # type: ignore[no-untyped-call]
-        self.token_path.write_text(creds_data)
-        os.chmod(self.token_path, 0o600)
+        temp_path: Path | None = None
+        try:
+            # NamedTemporaryFile creates mode 0600 from the outset, even with a
+            # permissive umask. Same-directory replacement stays atomic.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.token_path.parent,
+                prefix=f".{self.token_path.name}.", delete=False,
+            ) as stream:
+                temp_path = Path(stream.name)
+                stream.write(creds_data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, self.token_path)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     def authorize_interactive(self) -> None:
         """For first-run `commutecompass oauth` — opens browser OAuth flow."""
