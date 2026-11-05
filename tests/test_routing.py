@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -18,6 +18,7 @@ from commutecompass.realtime import FetchResult, Predictions, _accumulate, realt
 from commutecompass.routing import (
     _parse_route,
     _provider_time,
+    _scheduled_time,
     _unix,
     estimate_route,
     plan_route,
@@ -157,11 +158,22 @@ def test_invalid_overall_provider_time(invalid: object) -> None:
     assert _provider_time({"value": invalid}) is None
 
 
-@pytest.mark.parametrize("invalid", [0, -1])
+_INVALID_TIMES = [
+    0, -1, True, False, "invalid", None, float("nan"), float("inf"),
+    float("-inf"), 1e100, 10**1000,
+]
+
+
+@pytest.mark.parametrize("invalid", _INVALID_TIMES)
+def test_scheduled_time_contains_numeric_overflow(invalid: object) -> None:
+    assert _scheduled_time({"value": invalid}, NYC_TZ) is None
+
+
+@pytest.mark.parametrize("invalid", _INVALID_TIMES)
 @pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
 @pytest.mark.parametrize("saved", ["live", "legacy", "cached-legacy"])
 def test_invalid_overall_endpoint_retains_declared_duration(
-    scheduled_directions: dict[str, Any], invalid: int, endpoint: str, saved: str,
+    scheduled_directions: dict[str, Any], invalid: object, endpoint: str, saved: str,
 ) -> None:
     candidate = scheduled_directions["routes"][2]
     leg = candidate["legs"][0]
@@ -289,6 +301,158 @@ def destination() -> ResolvedLocation:
 def arrival_time() -> datetime:
     """Return a fixed arrival time for testing."""
     return datetime(2025, 5, 12, 9, 30, 0, tzinfo=NYC_TZ)
+
+
+@pytest.mark.parametrize("invalid", _INVALID_TIMES + ["absent"])
+@pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
+def test_public_route_invalid_endpoint_uses_duration(
+    scheduled_directions: dict[str, Any], origin: Origin, destination: ResolvedLocation,
+    arrival_time: datetime, invalid: object, endpoint: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    if invalid == "absent":
+        leg.pop(endpoint)
+    else:
+        leg[endpoint] = {"value": invalid}
+    leg["duration"]["value"] = 2620
+    with patch("commutecompass.routing.httpx.Client") as client:
+        client.return_value.__enter__.return_value.get.return_value.json.return_value = {
+            "status": "OK", "routes": [candidate],
+        }
+        route = plan_route(origin, destination, arrival_time, api_key="fake-key")
+    assert route is not None
+    assert route.total_duration_seconds == 2620
+    assert route.arrive_at.timestamp() - route.depart_at.timestamp() == 2620
+    timing = route_timing(route)
+    assert (timing.depart_at if endpoint == "departure_time" else timing.arrive_at) is None
+
+
+@pytest.mark.parametrize("saved", ["live", "legacy", "cached"])
+@pytest.mark.parametrize("with_request", [False, True])
+def test_duration_only_display_does_not_borrow_nested_transit_times(
+    scheduled_directions: dict[str, Any], arrival_time: datetime,
+    saved: str, with_request: bool,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg.pop("departure_time", None)
+    leg.pop("arrival_time", None)
+    for step in leg["steps"]:
+        details = step.get("transit_details", {})
+        details.pop("departure_time", None)
+        details.pop("arrival_time", None)
+    route = _parse_route(
+        {"status": "OK", "routes": [candidate]},
+        request_time=arrival_time if with_request else None,
+    )
+    assert route is not None
+    anchor = arrival_time if with_request else datetime.fromtimestamp(0, tz=NYC_TZ)
+    assert route.arrive_at == anchor
+    assert route.depart_at.timestamp() == anchor.timestamp() - route.total_duration_seconds
+    assert all(not step.scheduled_departure_valid for step in route.legs)
+    if saved != "live":
+        route.from_cache = saved == "cached"
+        route = Route.model_validate_json(route.model_dump_json(exclude={"provider_route_index"}))
+    timing = route_timing(route)
+    assert timing.duration_seconds == route.total_duration_seconds
+    assert timing.depart_at is None and timing.arrive_at is None
+
+
+def test_public_duration_only_uses_request_arrival(
+    scheduled_directions: dict[str, Any], origin: Origin, destination: ResolvedLocation,
+    arrival_time: datetime,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg.pop("departure_time")
+    leg.pop("arrival_time")
+    with patch("commutecompass.routing.httpx.Client") as client:
+        client.return_value.__enter__.return_value.get.return_value.json.return_value = {
+            "status": "OK", "routes": [candidate],
+        }
+        route = plan_route(origin, destination, arrival_time, api_key="fake-key")
+    assert route is not None and route.arrive_at == arrival_time
+    assert route_timing(route).depart_at is None
+    assert route_timing(route).arrive_at is None
+
+
+@pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
+def test_derived_display_endpoint_crosses_dst_by_instant(
+    scheduled_directions: dict[str, Any], endpoint: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg.pop("arrival_time" if endpoint == "departure_time" else "departure_time")
+    # The two 01:30 instants on the autumn transition are an hour apart.
+    hour = 5 if endpoint == "departure_time" else 6
+    leg[endpoint] = {"value": datetime(2026, 11, 1, hour, 30, tzinfo=UTC).timestamp()}
+    leg["duration"] = {"value": 3600}
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    assert route.depart_at.hour == route.arrive_at.hour == 1
+    assert route.depart_at.fold == 0 and route.arrive_at.fold == 1
+    assert route.arrive_at.timestamp() - route.depart_at.timestamp() == 3600
+
+
+def test_reversed_provider_endpoints_are_duration_only(
+    scheduled_directions: dict[str, Any], arrival_time: datetime,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg["departure_time"], leg["arrival_time"] = leg["arrival_time"], leg["departure_time"]
+    route = _parse_route({"status": "OK", "routes": [candidate]}, request_time=arrival_time)
+    assert route is not None and route.arrive_at == arrival_time
+    assert route_timing(route).depart_at is None
+    assert route_timing(route).arrive_at is None
+
+
+@pytest.mark.parametrize("field", ["departure_time", "arrival_time"])
+def test_nested_transit_huge_timestamp_is_not_a_schedule(
+    scheduled_directions: dict[str, Any], field: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    candidate["legs"][0]["steps"][1]["transit_details"][field] = {"value": 10**1000}
+    route = _parse_route({"status": "OK", "routes": [candidate]})
+    assert route is not None
+    if field == "departure_time":
+        assert not route.legs[1].scheduled_departure_valid
+
+
+def test_route_timing_revalidates_huge_timestamps(scheduled_directions: dict[str, Any]) -> None:
+    route = _parse_route(scheduled_directions)
+    assert route is not None and route.raw_provider_payload is not None
+    leg = route.raw_provider_payload["routes"][2]["legs"][0]
+    leg["departure_time"] = {"value": 10**1000}
+    leg["arrival_time"] = {"value": 10**1000}
+    assert route_timing(route).duration_seconds == leg["duration"]["value"]
+    assert route_timing(route).depart_at is None
+    leg["duration"] = {"value": 10**1000}
+    assert route_timing(route).duration_seconds is None
+
+
+@pytest.mark.parametrize("duration", [10**1000, 1e100, float("inf"), -1, True, "bad", None])
+def test_unusable_duration_is_rejected(
+    scheduled_directions: dict[str, Any], duration: object,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg.pop("departure_time")
+    leg.pop("arrival_time")
+    leg["duration"] = {"value": duration}
+    assert _parse_route({"status": "OK", "routes": [candidate]}) is None
+
+
+@pytest.mark.parametrize("endpoint", ["departure_time", "arrival_time"])
+def test_endpoint_derivation_overflow_is_rejected(
+    scheduled_directions: dict[str, Any], endpoint: str,
+) -> None:
+    candidate = scheduled_directions["routes"][2]
+    leg = candidate["legs"][0]
+    leg.pop("arrival_time" if endpoint == "departure_time" else "departure_time")
+    leg[endpoint] = {"value": datetime(9999, 1, 1, tzinfo=UTC).timestamp()}
+    leg["duration"] = {"value": 10**12}
+    assert _parse_route({"status": "OK", "routes": [candidate]}) is None
 
 
 # ─── Test _unix ────────────────────────────────────────────────────────────────

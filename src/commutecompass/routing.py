@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NamedTuple
 
 import httpx
@@ -48,7 +48,11 @@ def _provider_timing(candidate: object) -> RouteTiming:
     if not isinstance(candidate, dict):
         return RouteTiming()
     legs = candidate.get("legs")
-    if not isinstance(legs, list) or not legs or not all(isinstance(leg, dict) for leg in legs):
+    if not isinstance(legs, list):
+        return RouteTiming()
+    # Match the parser's treatment of malformed leg containers.
+    legs = [leg for leg in legs if isinstance(leg, dict)]
+    if not legs:
         return RouteTiming()
     depart = _provider_time(legs[0].get("departure_time"))
     arrive = _provider_time(legs[-1].get("arrival_time"))
@@ -66,7 +70,13 @@ def _provider_timing(candidate: object) -> RouteTiming:
         if type(seconds) is not int or seconds < 0:
             return RouteTiming(None, depart, arrive)
         durations.append(seconds)
-    return RouteTiming(float(sum(durations)), depart, arrive)
+    try:
+        seconds_total = float(sum(durations))
+        if not math.isfinite(seconds_total):
+            return RouteTiming(None, depart, arrive)
+    except OverflowError:
+        return RouteTiming(None, depart, arrive)
+    return RouteTiming(seconds_total, depart, arrive)
 
 
 def route_timing(route: Route | None) -> RouteTiming:
@@ -211,10 +221,34 @@ def _scheduled_time(value: Any, nyc_tz: Any) -> datetime | None:
     ts = value.get("value")
     if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return None
-    if not math.isfinite(ts) or ts <= 0:
-        return None
     try:
+        if not math.isfinite(ts) or ts <= 0:
+            return None
         return datetime.fromtimestamp(ts, tz=nyc_tz)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _display_endpoints(
+    timing: RouteTiming, request_time: datetime | None,
+) -> tuple[datetime, datetime] | None:
+    """Derive display-only endpoints without inventing a provider schedule."""
+    duration = timing.duration_seconds
+    if duration is None:
+        return None
+    depart, arrive = timing.depart_at, timing.arrive_at
+    try:
+        if depart is not None and arrive is not None:
+            return depart, arrive
+        delta = timedelta(seconds=duration)
+        if depart is not None:
+            arrive = (depart.astimezone(UTC) + delta).astimezone(NYC_TZ)
+        else:
+            arrive = arrive or request_time or datetime.fromtimestamp(0, tz=NYC_TZ)
+            if arrive.utcoffset() is None:
+                return None
+            depart = (arrive.astimezone(UTC) - delta).astimezone(NYC_TZ)
+        return depart, arrive
     except (ValueError, OverflowError, OSError):
         return None
 
@@ -406,6 +440,14 @@ def _parse_route(
         if not legs:
             continue
 
+        timing = _provider_timing(route)
+        display = _display_endpoints(timing, request_time)
+        if display is None:
+            continue
+        depart_at, arrive_at = display
+        assert timing.duration_seconds is not None
+        total_duration = int(timing.duration_seconds)
+
         transit_legs: list[TransitLeg] = []
         total_walk_seconds = 0
         transfers = 0
@@ -414,14 +456,8 @@ def _parse_route(
         for leg in legs:
             fallback_at = (
                 _scheduled_time(leg.get("departure_time"), NYC_TZ)
-                or (transit_legs[-1].arrive_at if transit_legs else None)
+                or (transit_legs[-1].arrive_at if transit_legs else depart_at)
             )
-            if fallback_at is None:
-                end = _scheduled_time(leg.get("arrival_time"), NYC_TZ) or request_time
-                if end is not None:
-                    fallback_at = datetime.fromtimestamp(
-                        end.timestamp() - leg.get("duration", {}).get("value", 0), tz=NYC_TZ,
-                    )
             steps = leg.get("steps", [])
             if not isinstance(steps, list):
                 continue
@@ -447,32 +483,8 @@ def _parse_route(
         if not transit_legs:
             continue
 
-        # Get overall departure/arrival times from first/last leg
-        first_leg = legs[0]
-        last_leg = legs[-1]
-
-        dep_time = first_leg.get("departure_time", {})
-        arr_time = last_leg.get("arrival_time", {})
-
-        if isinstance(dep_time, dict):
-            dep_ts = dep_time.get("value")
-            depart_at = datetime.fromtimestamp(dep_ts, tz=NYC_TZ) if dep_ts else datetime.now(NYC_TZ)
-        else:
-            depart_at = datetime.now(NYC_TZ)
-
-        if isinstance(arr_time, dict):
-            arr_ts = arr_time.get("value")
-            arrive_at = datetime.fromtimestamp(arr_ts, tz=NYC_TZ) if arr_ts else datetime.now(NYC_TZ)
-        else:
-            arrive_at = datetime.now(NYC_TZ)
-
-        # Prefer elapsed door-to-door time; without endpoints, use complete leg
-        # durations. Retain the old zero placeholder internally when unknown;
-        # route_timing excludes it from exports and scheduling.
-        total_duration = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
-        timing = _provider_timing(route)
-        if timing.duration_seconds is not None:
-            total_duration = int(timing.duration_seconds)
+        # Overall display times were derived only from this candidate's validated
+        # endpoints/duration, never from nested transit processing-time placeholders.
         fare = route.get("fare", {})
         fare_cents = None
         if fare:
@@ -557,6 +569,6 @@ def plan_route(
         return _parse_route(data, gtfs_db_path=gtfs_db_path, request_time=arrival_time)
     except httpx.HTTPError:
         return None
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, OSError) as exc:
         logger.warning("Directions response invalid: %s", type(exc).__name__)
         return None
