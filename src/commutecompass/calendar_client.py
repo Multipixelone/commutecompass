@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
 
 class AuthError(Exception):
     """Raised when OAuth refresh fails and user needs to re-authenticate."""
+
+
+class CalendarFetchError(Exception):
+    """Raised when a calendar page cannot be safely treated as a complete result."""
 
 
 _URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
@@ -177,7 +182,15 @@ class CalendarClient:
                     .execute()
                 )
 
-                for index, item in enumerate(response.get("items", [])):
+                # A broken page is a failed fetch, not an authoritative empty
+                # calendar (nor permission to return earlier partial results).
+                if not isinstance(response, Mapping):
+                    raise CalendarFetchError("Invalid calendar response: expected a mapping")
+                items = response.get("items", [])
+                if not isinstance(items, list):
+                    raise CalendarFetchError("Invalid calendar response: expected an items list")
+
+                for index, item in enumerate(items):
                     try:
                         # Skip cancelled events and valid all-day events.
                         if item.get("status") == "cancelled":

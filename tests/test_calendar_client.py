@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from commutecompass.calendar_client import AuthError, CalendarClient
+from commutecompass.calendar_client import AuthError, CalendarClient, CalendarFetchError
 from commutecompass.models import CalendarSpec
 from commutecompass.timeutil import NYC_TZ
 
@@ -158,6 +158,74 @@ def _build_mock_service(items: list[dict[str, Any]]) -> MagicMock:
     }
 
     return service
+
+
+@pytest.mark.parametrize("response", [
+    None, 42, "private-response", [],
+    {"items": None}, {"items": 42}, {"items": "private-items"},
+    {"items": {"private-event": {}}},
+])
+def test_fetch_events_rejects_malformed_containers(
+    client_secret_json: str, token_path: Path, response: Any,
+) -> None:
+    client = CalendarClient(client_secret_json, token_path)
+    service = MagicMock()
+    service.events.return_value.list.return_value.execute.return_value = response
+    with (
+        patch.object(client, "_build_service", return_value=service),
+        pytest.raises(CalendarFetchError, match="Invalid calendar response") as exc,
+    ):
+        client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            make_aware(datetime(2026, 5, 8)), make_aware(datetime(2026, 5, 9)),
+        )
+    assert "private" not in str(exc.value)
+
+
+@pytest.mark.parametrize("response", [{}, {"items": []}])
+def test_fetch_events_accepts_empty_containers(
+    client_secret_json: str, token_path: Path, response: dict[str, Any],
+) -> None:
+    client = CalendarClient(client_secret_json, token_path)
+    service = MagicMock()
+    service.events.return_value.list.return_value.execute.return_value = response
+    with patch.object(client, "_build_service", return_value=service):
+        assert client.fetch_events(
+            [CalendarSpec(id="cal-1", name="Test")],
+            make_aware(datetime(2026, 5, 8)), make_aware(datetime(2026, 5, 9)),
+        ) == []
+
+
+@pytest.mark.parametrize("later_calendar", [False, True])
+@pytest.mark.parametrize("invalid_page", [None, {"items": None}, {"items": "bad"}])
+def test_fetch_events_rejects_partial_results(
+    client_secret_json: str, token_path: Path, later_calendar: bool, invalid_page: Any,
+) -> None:
+    client = CalendarClient(client_secret_json, token_path)
+    first_page = {
+        "items": [{
+            "id": "valid-event",
+            "start": {"dateTime": "2026-05-08T10:00:00+00:00"},
+            "end": {"dateTime": "2026-05-08T11:00:00+00:00"},
+        }],
+        "nextPageToken": None if later_calendar else "page-2",
+    }
+    service = MagicMock()
+    service.events.return_value.list.return_value.execute.side_effect = [first_page, invalid_page]
+    calendars = [CalendarSpec(id="cal-1", name="First")]
+    if later_calendar:
+        calendars.append(CalendarSpec(id="cal-2", name="Second"))
+    with (
+        patch.object(client, "_build_service", return_value=service),
+        pytest.raises(CalendarFetchError, match="Invalid calendar response"),
+    ):
+        client.fetch_events(
+            calendars, make_aware(datetime(2026, 5, 8)), make_aware(datetime(2026, 5, 9)),
+        )
+    calls = service.events.return_value.list.call_args_list
+    assert len(calls) == 2
+    assert calls[1].kwargs["calendarId"] == ("cal-2" if later_calendar else "cal-1")
+    assert calls[1].kwargs["pageToken"] == (None if later_calendar else "page-2")
 
 
 @pytest.mark.parametrize("invalid_fields", [
