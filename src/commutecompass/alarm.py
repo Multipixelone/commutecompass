@@ -7,7 +7,8 @@ logic and the final "next alarm" selection, and ``alarm daemon`` rings it.
 Wake rule (Q2/Q8)::
 
     wake = min(first_alarm(first_event), fallback_time on that day)
-    first_alarm = leave_at - window.first_alarm_lead   (healthy wake window)
+    first_alarm = leave_at - window.calendar_advance - window.first_alarm_lead
+                                                      (healthy wake window)
                 = prep_at - wake_lead                  (window disabled / no leave_at)
     no plan-able events -> fallback_time
 
@@ -66,30 +67,36 @@ class WakeResult:
     # Plan whose prep_at drove the wake (None for fallback).
     plan: Plan | None = None
     # Earliest future prep_at across today/tomorrow, minus wake lead — HA nap cap.
-    # For wake-window plans this is the first window alarm instead.
+    # For wake-window plans this is the unadvanced first window alarm instead.
     next_prep_at: datetime | None = None
     next_event: str = ""
-    # Buffered leave deadline anchoring a commute wake window
+    # Calendar-advanced buffered leave deadline anchoring a commute wake window
     # (``wake_at == deadline_at - first_alarm_lead``); None for fallback/prep wakes.
     deadline_at: datetime | None = None
     warning: str | None = None
     manual_deadline_at: datetime | None = None
 
 
-def _window_deadline(plan: Plan, config: Config) -> datetime | None:
-    """Healthy plan's buffered leave deadline; None = plain prep wake.
+def _window_deadline(
+    plan: Plan, config: Config, *, advance_calendar: bool = True,
+) -> datetime | None:
+    """Healthy plan's effective alarm deadline; None = plain prep wake.
 
     ``depart_at`` is informational only: safety, weather and realtime buffers
     are already included in ``leave_at`` and must move the entire wake window.
+    Nap caps opt out of the calendar advance to retain their existing timing.
     """
-    if not config.alarm.window.enabled or plan.error is not None:
+    if not config.alarm.window.enabled or plan.error is not None or plan.leave_at is None:
         return None
-    return plan.leave_at
+    advance = config.alarm.window.calendar_advance_minutes if advance_calendar else 0
+    return (plan.leave_at.astimezone(UTC) - timedelta(minutes=advance)).astimezone(NYC_TZ)
 
 
-def _first_alarm(plan: Plan, config: Config) -> datetime | None:
+def _first_alarm(
+    plan: Plan, config: Config, *, advance_calendar: bool = True,
+) -> datetime | None:
     """First alarm a healthy plan needs: window start, else prep minus lead."""
-    deadline = _window_deadline(plan, config)
+    deadline = _window_deadline(plan, config, advance_calendar=advance_calendar)
     if deadline is not None:
         lead = timedelta(minutes=config.alarm.window.first_alarm_lead_minutes)
         return (deadline.astimezone(UTC) - lead).astimezone(NYC_TZ)
@@ -102,14 +109,15 @@ def _first_alarm(plan: Plan, config: Config) -> datetime | None:
 def _earliest_alarm_plan(
     plans: list[Plan], config: Config, *, after: datetime | None = None,
 ) -> tuple[Plan, datetime] | None:
-    """Non-errored plan with the earliest first alarm, prep strictly after ``after``."""
+    """Earliest unadvanced nap cap, with prep strictly after ``after``."""
     best: tuple[Plan, datetime] | None = None
     for p in plans:
         if p.prep_at is None or p.error is not None:
             continue
         if after is not None and p.prep_at.astimezone(UTC) <= after.astimezone(UTC):
             continue
-        alarm = _first_alarm(p, config)
+        # Calendar advance moves waking only; preserve the existing nap cap.
+        alarm = _first_alarm(p, config, advance_calendar=False)
         if alarm is None:
             continue
         if best is None or alarm.astimezone(UTC) < best[1].astimezone(UTC):
@@ -183,7 +191,7 @@ def _compute_wake(
     """Compute the next morning wake.
 
     Both days are planned: today's wake wins while future, and the nap cap
-    considers the earliest future prep across today and tomorrow, extending to
+    considers unadvanced timings across today and tomorrow, extending to
     the third logical day only when both wakes have elapsed (possible with an
     early event and a large lead). Incomplete planning in any fetched day raises
     rather than publishing a potentially unsafe later fallback.
@@ -265,7 +273,7 @@ def _compute_wake(
     if not usable(wake, day_start):
         raise AlarmError("no future wake in three logical days")
 
-    # Nap cap: the next first alarm (window start or prep minus lead).
+    # Nap cap: unadvanced window start or prep minus lead, independent of waking.
     nxt = _earliest_alarm_plan(all_plans, config, after=now)
     from commutecompass.format import _sanitize_text
 

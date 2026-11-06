@@ -26,6 +26,7 @@ Nix module (or the cron entry) as well to change when the job actually runs.
 | `realtime.max_buffer_minutes`             | int (min)   | Cap on minutes a live delay can add to leave time |
 | `alarm.fallback_time`                     | "HH:MM"     | Latest wake time (NYC); used when no events      |
 | `alarm.wake_lead_minutes`                 | int (min)   | Wake this many minutes before the first prep     |
+| `alarm.window.calendar_advance_minutes`   | int (min)   | Advance calendar first/final together; 0–1440, default 0; manual wakes, nap caps and routes unchanged |
 
 ## How to revert
 

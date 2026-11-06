@@ -282,11 +282,12 @@ class AlarmWindowConfig(BaseModel):
     """Commute wake window — see docs/alarm-design.md "Wake window".
 
     Applies only to wake alarms anchored on a healthy plan's buffered
-    ``leave_at`` deadline: the first alarm rings at
-    ``leave_at - first_alarm_lead_minutes``, snoozes are unlimited until
-    ``leave_at - deadline_lead_minutes``, and the final alarm then rings
+    ``leave_at`` deadline, advanced by ``calendar_advance_minutes``. The first
+    alarm rings at that published deadline minus ``first_alarm_lead_minutes``;
+    snoozes are unlimited until the deadline minus ``deadline_lead_minutes``,
+    and the final alarm then rings
     without snooze or timeout until desktop activity dismisses it.
-    Both leads are relative to ``leave_at``, never unbuffered ``depart_at``.
+    Both leads use the published alarm deadline, never unbuffered ``depart_at``.
     Naps and fallback wakes keep the plain alarm settings.
     """
 
@@ -297,6 +298,8 @@ class AlarmWindowConfig(BaseModel):
     # empty disables the publish.
     window_done_entity: str = "input_text.commute_alarm_window_done_utc"
     first_alarm_lead_minutes: int = Field(default=37, ge=1, le=24 * 60)
+    # Calendar windows only: never change manual deadlines, nap caps or routes.
+    calendar_advance_minutes: int = Field(default=0, ge=0, le=24 * 60)
     deadline_lead_minutes: int = Field(default=0, ge=0, le=24 * 60)
     snooze_minutes: int = Field(default=5, ge=1, le=240)
     # Re-rings after a snooze: hold at an absolute sink level, then ramp.
@@ -686,6 +689,7 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     # Wake alarm tuning — safe to tweak from chat ("wake me 15 min earlier").
     "alarm.fallback_time": _coerce_hhmm,
     "alarm.wake_lead_minutes": _coerce_int,
+    "alarm.window.calendar_advance_minutes": _coerce_int,
 }
 
 

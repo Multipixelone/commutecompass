@@ -255,16 +255,18 @@ poll_seconds = 30
 cache_path = ""                  # empty = <db dir>/alarm-cache.json
 
 # Commute wake window anchored on a healthy plan's buffered leave_at deadline.
-# Both leads below are relative to leave_at, not informational depart_at:
+# Published deadline = leave_at - calendar_advance_minutes; both leads use it,
+# not informational depart_at:
 # safety/weather/realtime buffers therefore move the entire window earlier.
-# Upstream HA contract only: lights at leave_at-47m (100% over 10m).
+# Upstream HA contract only: lights at published deadline-47m (100% over 10m).
 # Naps and fallback wakes keep the snooze/ring settings above.
 [alarm.window]
 enabled = true
 deadline_utc_entity = "input_text.commute_alarm_deadline_utc"
 window_done_entity = "input_text.commute_alarm_window_done_utc" # empty = don't publish
-first_alarm_lead_minutes = 37    # first alarm at leave_at-37m
-deadline_lead_minutes = 0        # final, unsnoozable alarm at leave_at
+calendar_advance_minutes = 0    # calendar windows only; 15 moves first AND final earlier
+first_alarm_lead_minutes = 37    # first alarm at published deadline-37m
+deadline_lead_minutes = 0        # final at published deadline; keep 0 for exact manual --leave
 snooze_minutes = 5               # unlimited; the last snooze is cut to end at the deadline
 rering_start_percent = 20        # re-rings hold here (absolute sink level) ...
 rering_hold_seconds = 30

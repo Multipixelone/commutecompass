@@ -67,8 +67,10 @@ Kinds:
 | `none` | null | null | null |
 
 `next_prep_at` retains its existing publisher meaning despite the historical
-name: it is the effective next first-alarm / nap-cap instant, not necessarily a
-plan's raw `prep_at`. Do not subtract the wake lead again.
+name: it is the next nap-cap instant, not necessarily a plan's raw `prep_at`.
+For calendar windows it is the first-alarm instant **before** applying
+`alarm.window.calendar_advance_minutes`; that advance moves wake/deadline only.
+Do not subtract either lead again or use the nap cap to derive wake lights.
 
 Only a validated `none` clears a v1 wake. A missing/invalid/unavailable snapshot
 or contract selector mismatch means **no new information**, not cancellation,
@@ -337,7 +339,8 @@ alarm boundary. Activation
 and rollback require separate authorization. Missing entities are not rollback.
 No upstream publication or infra pin change is authorized by this implementation.
 
-L is buffered `Plan.leave_at`: lights L−47, first L−37, final L. Unlimited
+L is buffered `Plan.leave_at` minus `alarm.window.calendar_advance_minutes`
+(default 0): lights L−47, first L−37, final L with the default first lead. Unlimited
 five-minute window snoozes cap at L; re-rings use 20%/30-second hold/60-second
 ramp. Final has no timeout and ignores HA stop/snooze; desktop dismissal,
 master-off and skip retain their existing meaning. Naps remain legacy. A

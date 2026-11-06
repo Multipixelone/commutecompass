@@ -153,7 +153,9 @@ a previous day's deadline.
 
 ### Timeline and anchor
 
-Let **L = `Plan.leave_at`**, the buffered deadline to leave through the door.
+Let **L = `Plan.leave_at` − `calendar_advance_minutes`**, the published alarm
+deadline. The advance defaults to zero; `Plan.leave_at` remains the buffered
+deadline to leave through the door and is never changed by alarm tuning.
 The old route-departure D−50 / D−13 design is superseded:
 
 - HA fairy-light fade starts **L−47 min** and reaches full warm at **L−37 min**.
@@ -174,6 +176,62 @@ The directions fixture's initial WALKING step and route departure are epoch
 `1746864000`; the later transit boarding is `1746864300`. Thus the route
 anchor includes walking out the door, not boarding the train. See the concrete
 verification expectations in [alarm-verification.md](alarm-verification.md).
+
+### Calendar-only advance and infra integration
+
+`alarm.window.calendar_advance_minutes` (integer minutes, 0–1440, default 0)
+advances the whole calendar wake window to allow time for morning tasks such as
+feeding cats separately and letting them out. It applies only to healthy calendar
+plans with `leave_at` and an enabled window. Arithmetic uses UTC elapsed minutes,
+including across DST. Prep-only and fallback wakes retain their existing timing.
+Manual `alarm wake --leave X` never receives this advance. Manual/calendar conflict
+selection compares X against the advanced calendar deadline; force still selects
+manual. Retained schedules already contain effective timestamps and are not
+advanced a second time.
+
+The nap cap (`next_prep_at`) retains its unadvanced calculation: window-enabled
+calendar plans contribute `leave_at - first_alarm_lead_minutes`. It can therefore
+differ from the published first ring. Nap duration, snoozes, ring profiles and
+fallbacks are unchanged. Route departure, prep times, travel safety/weather/
+realtime buffers, and commute pings are also unchanged.
+
+For a 15-minute calendar advance and a 60-minute first-to-final window, the infra
+owner should consume the upstream package revision (no downstream package patch)
+and set the existing `services.commutecompass.configFile` source to include:
+
+```toml
+[alarm.window]
+calendar_advance_minutes = 15
+first_alarm_lead_minutes = 60
+deadline_lead_minutes = 0
+```
+
+The new value is also supported by `commutecompass config set
+alarm.window.calendar_advance_minutes 15` on a writable config; use the declarative
+source for Nix-managed configuration. Unset/reset restores the zero default.
+No new Nix module option is required. Keep the first lead consistent in HA
+consumers and v1 validation. Both legacy and v1 publish the effective alarm
+deadline and first ring; there is no wire-format change.
+
+HA must derive lights from the published deadline minus the first lead and the
+ten-minute light fade lead. Do not subtract the calendar advance again or derive
+lights from the nap cap. `deadline_lead_minutes = 15` is unsuitable: it shifts
+only final ringing, shortens the window, and shifts manual final too. Keep it at
+zero for exact manual `--leave` semantics.
+
+For identical inputs with buffered leave 09:00 and route departure 09:13:
+
+| Output | Advance 0 | Advance 15 |
+|---|---|---|
+| Lights begin | 07:50 | 07:35 |
+| First ring | 08:00 | 07:45 |
+| Final / published deadline | 09:00 | 08:45 |
+| Nap cap | 08:00 | 08:00 |
+| Buffered leave / route departure | 09:00 / 09:13 | 09:00 / 09:13 |
+
+Manual `--leave 09:00` remains first 08:00 / final 09:00. This is upstream source
+support and integration guidance only; it does not update an infra pin, activate
+configuration, republish schedules, or change a live alarm.
 
 A commute window is opt-in and requires a published wake that matches
 `deadline_at - first_alarm_lead_minutes` exactly. No matching deadline (including

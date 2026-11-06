@@ -96,6 +96,30 @@ def _clear_env(keys: list[str]) -> None:
         os.environ.pop(key, None)
 
 
+def test_calendar_advance_config_round_trip(
+    minimal_toml: Path, required_env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commutecompass.config import delete_config_field, list_overridden_allowlist_keys
+
+    for key, value in required_env.items():
+        monkeypatch.setenv(key, value)
+    key = "alarm.window.calendar_advance_minutes"
+    assert load_config(minimal_toml).alarm.window.calendar_advance_minutes == 0
+    assert update_config_field(minimal_toml, key, "15") == 15
+    cfg = load_config(minimal_toml)
+    assert cfg.alarm.window.calendar_advance_minutes == 15
+    assert "calendar_advance_minutes = 15" in render_config_toml(cfg)
+    assert key in list_overridden_allowlist_keys(minimal_toml)
+    for invalid in ("-1", "1441", "fifteen"):
+        before = minimal_toml.read_bytes()
+        with pytest.raises(ConfigSetError):
+            update_config_field(minimal_toml, key, invalid)
+        assert minimal_toml.read_bytes() == before
+    assert delete_config_field(minimal_toml, key)
+    assert load_config(minimal_toml).alarm.window.calendar_advance_minutes == 0
+    assert key not in list_overridden_allowlist_keys(minimal_toml)
+
+
 def test_validation_formatter_only_renders_schema_fields() -> None:
     from pydantic import ValidationError
     from pydantic_core import PydanticCustomError
