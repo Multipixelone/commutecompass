@@ -1,5 +1,9 @@
 # Repository audit and isolated fixer handoffs
 
+> **Latest audit:** [`2026-11-05/`](2026-11-05/README.md) records 26 findings against
+> `bdec0bf` and 11 independent fixer lanes. The material below is the historical
+> 2026-11-04 audit and is preserved unchanged.
+
 **Audited source:** `4df247f` (2026-11-04). This replaces the stale audit against
 `469bf08`. The initial audit was documentation-only. The subsequent implementation
 is tracked in [implementation results](implementation-status.md); the briefs below
