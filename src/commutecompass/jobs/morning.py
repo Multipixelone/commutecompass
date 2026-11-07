@@ -1,7 +1,7 @@
 """Morning digest job.
 
 Sequence (§6.14):
-1. Compute [start, end] window: logical day 02:00 to 01:59 NYC
+1. Compute [start, end) window: logical day 02:00 to next-day 02:00 NYC
 2. Fetch calendar events via calendar_client
 3. For each event: plan = plan_event(...); store.upsert_plan(plan)
 4. Cancel stale pings for events that no longer exist
@@ -15,14 +15,13 @@ Sequence (§6.14):
 from __future__ import annotations
 
 import logging
-import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from commutecompass.calendar_client import AuthError, CalendarClient
 from commutecompass.config import Config
-from commutecompass.format import format_digest, format_leave_ping, format_prep_ping
+from commutecompass.format import format_digest
 from commutecompass.mta import fetch_alerts
 from commutecompass.notify import build_notifier
 from commutecompass.planner import plan_event
@@ -37,7 +36,6 @@ from commutecompass.models import (
     Alert,
     CalendarSpec,
     Event,
-    PingEntry,
     Plan,
     ZoneInfo,
 )
@@ -52,7 +50,18 @@ def run(config: Config) -> None:
         config: Validated application configuration.
     """
     _now = now_nyc()
-    today_start, today_end = logical_day_bounds_nyc(_now)
+    today_start, _ = logical_day_bounds_nyc(_now)
+    # Calendar timeMax is exclusive. Do not subtract a wall-time microsecond:
+    # on fall-back day that loses the entire second 01:00 hour.
+    today_end = today_start + timedelta(days=1)
+
+    # Snapshot before any calendar I/O: a delayed response cannot bless a
+    # concurrently inserted/replaced plan as the expected version for deletion
+    # or update. No database lock is held across network calls.
+    store = Store(config.paths.db_path)
+    store.init_schema()
+    existing_today = store.today_plans()
+    expected_plans = {plan.event.id: plan for plan in existing_today}
 
     # ── 1. Fetch today's calendar events ─────────────────────────────────────
     calendar_client = CalendarClient(
@@ -85,8 +94,6 @@ def run(config: Config) -> None:
     logger.info("morning job: fetched %d events", len(events))
 
     # ── 2. Plan each event ────────────────────────────────────────────────────
-    store = Store(config.paths.db_path)
-    store.init_schema()
 
     # Refresh current location once so plan_event can pick it up via effective_origin.
     ha_zones: dict[str, ZoneInfo] = {}
@@ -130,10 +137,13 @@ def run(config: Config) -> None:
         model=config.opencode_go.model,
     )
 
+    # Use only pre-fetch expectations, never a later observation that could
+    # authorize stale calendar data to overwrite a concurrent replacement.
     plans: list[Plan] = []
     for event in events:
         plan = _plan_event_safe(event, config, venue_registry, store, llm_client, ha_zones)
-        store.upsert_plan(plan)
+        if not store.reconcile_morning_plan(plan, _now, expected=expected_plans.get(event.id)):
+            logger.debug("Discarding stale morning plan for %s", event.id)
         plans.append(plan)
 
     logger.info("morning job: planned %d events", len(plans))
@@ -143,58 +153,11 @@ def run(config: Config) -> None:
     # stored plans and pings (including fired history and retries) untouched.
     if calendar_available:
         event_ids_today = {e.id for e in events}
-        for existing_plan in store.today_plans():
+        for existing_plan in existing_today:
             if existing_plan.event.id not in event_ids_today:
-                cancelled = store.cancel_pings(existing_plan.event.id)
-                logger.debug(
-                    "cancelled %d stale pings for removed event %s",
-                    cancelled,
-                    existing_plan.event.id,
-                )
+                store.remove_plan_if_current(existing_plan, _now)
 
-    # ── 4. Schedule future prep + leave pings ─────────────────────────────────
-    for plan in plans:
-        # Virtual (video-call) plans have prep_at but no leave_at.
-        if plan.leave_at is None and not plan.event.virtual:
-            continue
-
-        # prep ping
-        # Compare UTC instants: same-zone comparison ignores ``fold`` and would
-        # misorder times inside the DST fall-back hour (PEP 495).
-        if plan.prep_at and plan.prep_at.astimezone(UTC) > _now.astimezone(UTC):
-            message = format_prep_ping(plan)
-            ping = PingEntry(
-                id=str(uuid.uuid4()),
-                event_id=plan.event.id,
-                kind="prep",
-                fire_at=plan.prep_at,
-                fired=False,
-                message=message,
-            )
-            store.schedule_ping(ping)
-            logger.debug(
-                "scheduled prep ping for event %s at %s",
-                plan.event.id,
-                plan.prep_at,
-            )
-
-        # leave ping
-        if plan.leave_at is not None and plan.leave_at.astimezone(UTC) > _now.astimezone(UTC):
-            message = format_leave_ping(plan)
-            ping = PingEntry(
-                id=str(uuid.uuid4()),
-                event_id=plan.event.id,
-                kind="leave",
-                fire_at=plan.leave_at,
-                fired=False,
-                message=message,
-            )
-            store.schedule_ping(ping)
-            logger.debug(
-                "scheduled leave ping for event %s at %s",
-                plan.event.id,
-                plan.leave_at,
-            )
+    # Per-kind scheduling was committed atomically with each accepted plan above.
 
     # ── 5. Pull MTA alerts affecting today's routes ──────────────────────────
     all_alerts: list[Alert] = []
@@ -279,8 +242,6 @@ def _poll_heartbeat_stale(store: Store, config: Config, now: datetime) -> bool:
     old.  A stale (or missing) heartbeat means the per-minute timer is dead and
     no leave/prep alarms will fire today — worth shouting about in the digest.
     """
-    from datetime import timedelta
-
     last = store.get_job_heartbeat("poll")
     if last is None:
         return True

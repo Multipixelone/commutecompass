@@ -344,6 +344,31 @@ def run(
 
     dispatch_due()
 
+    attempted_alerts: set[tuple[str, str, str]] = set()
+    attempted_processing: set[tuple[str, str]] = set()
+
+    def dispatch_alert_notifications() -> None:
+        """Retry committed announcements without requiring a fresh route delta."""
+        if quiet_at(_now_fn()):
+            return
+        for key in _store.pending_alert_notifications(_now_fn()):
+            if key in attempted_alerts:
+                continue
+            claimed = _store.claim_alert_notification(*key, _now_fn())
+            if claimed is None:
+                continue
+            attempted_alerts.add(key)
+            token, message = claimed
+            delivered = False
+            try:
+                delivered = _notifier.send(message)
+            except Exception as exc:
+                logger.warning("Service update send raised for %s: %s", key[1], exc)
+            finally:
+                _store.finish_alert_notification(*key, token, _now_fn(), delivered=delivered)
+
+    dispatch_alert_notifications()
+
     # ── Phase 3: fetch alerts ─────────────────────────────────────────────────
     global _alerts_cache
     url_key = (
@@ -403,6 +428,13 @@ def run(
             now = _now_fn()
             if plan.event.start.astimezone(UTC) <= now.astimezone(UTC):
                 break
+            processing_key = (alert.id, plan.event.id)
+            if processing_key in attempted_processing:
+                continue
+            attempted_processing.add(processing_key)
+            processing_token = _store.claim_alert_processing(alert.id, plan.event.id, now)
+            if processing_token is None:
+                continue
             try:
                 new_plan = _plan_event_fn(
                     plan.event,
@@ -414,42 +446,36 @@ def run(
                 )
             except Exception as exc:
                 logger.error("Replan failed for event %s: %s", plan.event.id, exc)
-                _store.mark_alert_seen(alert.id, plan.event.id)
+                _store.finish_alert_processing(
+                    alert.id, plan.event.id, processing_token, _now_fn(), processed=False,
+                )
                 continue
 
+            if new_plan.error is not None and new_plan.error != "too_imminent":
+                _store.finish_alert_processing(
+                    alert.id, plan.event.id, processing_token, _now_fn(), processed=False,
+                )
+                continue
             new_plan = _retain_replan_safety(plan, new_plan)
             now = _now_fn()
             # Determine if the change warrants a service update
             route_changed = _route_significantly_different(plan, new_plan)
 
             if route_changed:
-                outcome = _store.reconcile_poll_replan(plan, new_plan, now)
+                from commutecompass.format import format_service_update
+
+                intent = ((alert.id, format_service_update(new_plan, alert, new_plan.route))
+                          if new_plan.route is not None else None)
+                outcome = _store.reconcile_poll_replan(
+                    plan, new_plan, now, alert_notification=intent,
+                )
                 if outcome is None:
-                    logger.debug("Discarding stale alert replan for %s", plan.event.id)
-                    break  # Leave alert unseen for a fresh snapshot next cycle.
-                # Daily dedup: if the same alert already triggered a
-                # service_update for any of today's events, the user has been
-                # told.  We still replan + reschedule pings (silent fix-up)
-                # but suppress the duplicate notification.
-                already_announced_today = _store.is_alert_seen_today(alert.id)
-
-                if not already_announced_today:
-                    from commutecompass.format import format_service_update
-
-                    if new_plan.route is not None:
-                        msg = format_service_update(plan, alert, new_plan.route)
-                        if _notifier.send(msg):
-                            logger.info("Sent service_update for event %s", plan.event.id)
-                        else:
-                            logger.warning(
-                                "Failed to send service_update for event %s", plan.event.id
-                            )
-                else:
-                    logger.debug(
-                        "Alert %s already announced today — silently re-planning event %s",
-                        alert.id,
-                        plan.event.id,
+                    _store.finish_alert_processing(
+                        alert.id, plan.event.id, processing_token, now, processed=False,
                     )
+                    logger.debug("Discarding stale alert replan for %s", plan.event.id)
+                    break  # Rejected work is not successful processing.
+                dispatch_alert_notifications()
 
                 if outcome.actionable_due:
                     dispatch_due()
@@ -462,7 +488,9 @@ def run(
                     plan.event.id,
                 )
 
-            _store.mark_alert_seen(alert.id, plan.event.id)
+            _store.finish_alert_processing(
+                alert.id, plan.event.id, processing_token, _now_fn(), processed=True, expected=plan,
+            )
 
     # ── Phase 5: location-driven replan close to leave time ──────────────────
     now = _now_fn()

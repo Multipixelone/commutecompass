@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from commutecompass.models import (
     AdjustRow,
@@ -26,6 +27,14 @@ def _alarm_instant(value: datetime) -> datetime:
     if value.utcoffset() is None:
         raise ValueError("alarm timestamps must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _logical_day_window(reference: datetime | None = None) -> tuple[datetime, datetime]:
+    """Exclusive NYC wall-day bounds, without subtracting across a DST fold."""
+    from commutecompass.timeutil import logical_day_bounds_nyc
+
+    start, _ = logical_day_bounds_nyc(reference)
+    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
 
 
 def _now_iso() -> str:
@@ -89,7 +98,12 @@ def _json_serializer(obj: object) -> str:
 # ``PRAGMA user_version`` so future migrations can branch on the version the DB
 # was last initialised at, instead of probing every table with PRAGMA
 # table_info.  The existing column adds remain idempotent and run unconditionally.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Alert-specific announcement retries, independent of the route's saved delta.
+ALERT_NOTIFICATION_MAX_ATTEMPTS = 5
+ALERT_NOTIFICATION_GRACE_SECONDS = 15 * 60
+ALERT_NOTIFICATION_LEASE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -134,6 +148,7 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript("""
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS plans (
                     event_id TEXT PRIMARY KEY,
                     plan_json TEXT NOT NULL,
@@ -214,16 +229,18 @@ class Store:
                 conn.execute(
                     "ALTER TABLE adjust_log ADD COLUMN undone INTEGER NOT NULL DEFAULT 0"
                 )
-            # Serialize the one-time dedupe and index creation. Preserve fired
-            # history and keep the latest pending instant (then highest rowid).
-            conn.execute("BEGIN IMMEDIATE")
+            # The schema transaction also serializes additive migration/dedupe.
+            ping_cols = {row[1] for row in conn.execute("PRAGMA table_info(pings)").fetchall()}
+            if "retired" not in ping_cols:
+                conn.execute("ALTER TABLE pings ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+            # Preserve history; only proven duplicate pending generations retire.
             index_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
                 ("idx_ping_event_kind_unfired",),
             ).fetchone()
             if not index_exists:
                 conn.execute("""
-                    DELETE FROM pings WHERE fired = 0 AND rowid IN (
+                    UPDATE pings SET fired = 1, retired = 1 WHERE fired = 0 AND rowid IN (
                         SELECT rowid FROM (
                             SELECT rowid, ROW_NUMBER() OVER (
                                 PARTITION BY event_id, kind
@@ -248,6 +265,34 @@ class Store:
                 conn.execute(
                     "ALTER TABLE pings ADD COLUMN send_attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            # Existing rows remain current until explicitly superseded.
+            if "retired" not in ping_cols:
+                conn.execute("ALTER TABLE pings ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alert_notifications (
+                    alert_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    day_start TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    claim_token TEXT,
+                    claimed_until TEXT,
+                    delivered_at TEXT,
+                    PRIMARY KEY (alert_id, event_id, day_start)
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alert_processing (
+                    alert_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    claim_token TEXT,
+                    claimed_until TEXT,
+                    PRIMARY KEY (alert_id, event_id)
+                )
+            """)
             # Stamp the schema version last, once all tables/columns exist.
             # PRAGMA can't be parameterised, but SCHEMA_VERSION is a trusted int.
             conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
@@ -434,25 +479,14 @@ class Store:
 
         Logical day boundary is 02:00-01:59 local time.
         """
-        from commutecompass.timeutil import logical_day_bounds_nyc
-
-        today_start, today_end = logical_day_bounds_nyc()
-
+        today_start, today_end = _logical_day_window()
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT plan_json FROM plans
-                WHERE event_start >= ? AND event_start <= ?
-                ORDER BY event_start
-                """,
-                (today_start.isoformat(), today_end.isoformat()),
-            ).fetchall()
-
-        plans = []
-        for row in rows:
-            data = _json_loads(row[0])
-            plans.append(Plan.model_validate(data))
-        return plans
+            rows = conn.execute("SELECT plan_json FROM plans").fetchall()
+        plans = [Plan.model_validate_json(row[0]) for row in rows]
+        return sorted(
+            (plan for plan in plans if today_start <= plan.event.start.astimezone(UTC) < today_end),
+            key=lambda plan: (plan.event.start.astimezone(UTC), plan.event.id),
+        )
 
     def delete_old_plans(self, before: datetime) -> int:
         """Delete plans with event_start before given datetime. Returns count deleted."""
@@ -550,13 +584,14 @@ class Store:
             (plan is not None and plan.error == "too_imminent")
             or conn.execute(
                 "SELECT 1 FROM pings WHERE event_id = ? AND kind = 'leave' "
-                "AND (fired = 1 OR julianday(fire_at) <= julianday(?)) LIMIT 1",
+                "AND retired = 0 AND (fired = 1 OR julianday(fire_at) <= julianday(?)) LIMIT 1",
                 (event_id, now.isoformat()),
             ).fetchone()
         )
 
     def reconcile_poll_replan(
         self, expected: Plan, updated: Plan, now: datetime,
+        *, alert_notification: tuple[str, str] | None = None,
     ) -> PollReplanOutcome | None:
         """Commit a poll replan plus actionable alarms under full-plan CAS.
 
@@ -566,8 +601,6 @@ class Store:
         Return the final actionable disposition, or None on stale rejection.
         No network work occurs while holding the write lock.
         """
-        from uuid import uuid4
-
         from commutecompass.format import format_leave_ping, format_prep_ping
 
         if updated.event.id != expected.event.id:
@@ -594,7 +627,8 @@ class Store:
                 ("leave", expected.leave_at, updated.leave_at, format_leave_ping),
             ):
                 rows = conn.execute(
-                    "SELECT id, fire_at, fired FROM pings WHERE event_id = ? AND kind = ?",
+                    "SELECT id, fire_at, fired FROM pings WHERE event_id = ? AND kind = ? "
+                    "AND retired = 0",
                     (expected.event.id, kind),
                 ).fetchall()
                 if new_time is None:
@@ -631,9 +665,23 @@ class Store:
             ).fetchall()
             consumed = conn.execute(
                 "SELECT 1 FROM pings WHERE event_id = ? AND kind = 'leave' AND fired = 1 "
+                "AND retired = 0 "
                 "AND julianday(fire_at) <= julianday(?) LIMIT 1",
                 (expected.event.id, now.isoformat()),
             ).fetchone()
+            if alert_notification is not None:
+                alert_id, message = alert_notification
+                day_start, _ = _logical_day_window(now)
+                expires = min(
+                    updated.event.start.astimezone(UTC),
+                    now.astimezone(UTC) + timedelta(seconds=ALERT_NOTIFICATION_GRACE_SECONDS),
+                )
+                conn.execute(
+                    """INSERT INTO alert_notifications
+                       (alert_id, event_id, day_start, message, expires_at)
+                       VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+                    (alert_id, updated.event.id, day_start.isoformat(), message, expires.isoformat()),
+                )
             return PollReplanOutcome(
                 actionable_due=any(row[0] == "leave" or not obsolete_prep for row in due),
                 imminent_leave_consumed=consumed is not None,
@@ -642,18 +690,14 @@ class Store:
     # ── Ping CRUD ──────────────────────────────────────────────────────────────
 
     def schedule_ping(self, ping: PingEntry) -> None:
-        """Insert or replace a ping entry, ensuring at most one unfired ping per (event_id, kind).
+        """Supersede a ping generation, retaining consumed and retry history.
 
-        Re-scheduling a ping for the same (event_id, kind) replaces any existing unfired row.
+        Retirement survives replacement dispatch/cancellation before an old claim
+        fails, so releasing that old claim can never resurrect it.
         """
         with self._connect() as conn:
-            # Remove any existing unfired ping for the same (event_id, kind) first,
-            # then insert the new ping.  Using INSERT OR REPLACE would clobber the id
-            # which we want to keep from the caller's uuid, so we do it explicitly.
-            conn.execute(
-                "DELETE FROM pings WHERE event_id = ? AND kind = ? AND fired = 0",
-                (ping.event_id, ping.kind),
-            )
+            conn.execute("BEGIN IMMEDIATE")
+            self._retire_pings(conn, ping.event_id, ping.kind)
             conn.execute(
                 """
                 INSERT INTO pings (
@@ -674,12 +718,100 @@ class Store:
             )
 
     def cancel_pings(self, event_id: str) -> int:
-        """Delete all pings for an event. Returns count cancelled."""
+        """Retire current pings, including claims; keep fired and retry history."""
         with self._connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM pings WHERE event_id = ?", (event_id,)
+            conn.execute("BEGIN IMMEDIATE")
+            count = self._retire_pings(conn, event_id)
+            conn.execute("DELETE FROM alert_notifications WHERE event_id = ? AND delivered_at IS NULL",
+                         (event_id,))
+            return count
+
+    @staticmethod
+    def _retire_pings(conn: sqlite3.Connection, event_id: str, kind: str | None = None) -> int:
+        cursor = conn.execute(
+            "UPDATE pings SET retired = 1, fired = 1 WHERE event_id = ? AND retired = 0"
+            + (" AND kind = ?" if kind is not None else ""),
+            (event_id, kind) if kind is not None else (event_id,),
+        )
+        return cursor.rowcount
+
+    @staticmethod
+    def _matches_expected(conn: sqlite3.Connection, event_id: str, expected: Plan | None) -> bool:
+        row = conn.execute("SELECT plan_json FROM plans WHERE event_id = ?", (event_id,)).fetchone()
+        return (row is None if expected is None else
+                row is not None and _same_plan(Plan.model_validate_json(row[0]), expected))
+
+    def remove_plan_if_current(self, expected: Plan, now: datetime) -> bool:
+        """Invalidate a confirmed-absent snapshot, never a newer replacement."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not self._matches_expected(conn, expected.event.id, expected):
+                return False
+            self._retire_pings(conn, expected.event.id)
+            conn.execute("DELETE FROM plans WHERE event_id = ?", (expected.event.id,))
+            conn.execute("DELETE FROM alert_notifications WHERE event_id = ? AND delivered_at IS NULL",
+                         (expected.event.id,))
+            return True
+
+    def reconcile_morning_plan(
+        self, plan: Plan, now: datetime, *, expected: Plan | None,
+    ) -> bool:
+        """CAS the plan and per-kind reminders, preserving last-good on outage."""
+        from commutecompass.format import format_leave_ping, format_prep_ping
+
+        instant = now.astimezone(UTC)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not self._matches_expected(conn, plan.event.id, expected):
+                return False
+            # A virtual calendar event may have a physical location override.
+            # The planned shape, not the calendar flag, determines its commute.
+            transient = plan.error is not None and plan.error != "too_imminent"
+            if transient and plan.event.start.astimezone(UTC) > instant and expected is not None:
+                return True  # Keep last-good route and reminders on transient failure.
+            conn.execute(
+                """INSERT INTO plans (event_id, plan_json, planned_at, event_start)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET
+                   plan_json = excluded.plan_json, planned_at = excluded.planned_at,
+                   event_start = excluded.event_start""",
+                (plan.event.id, _json_dumps(plan.model_dump()), now.isoformat(),
+                 plan.event.start.isoformat()),
             )
-            return cursor.rowcount
+            if transient and plan.event.start.astimezone(UTC) > instant:
+                return True
+            for kind, deadline, old_deadline, formatter in (
+                ("prep", plan.prep_at, expected.prep_at if expected else None, format_prep_ping),
+                ("leave", plan.leave_at, expected.leave_at if expected else None, format_leave_ping),
+            ):
+                unchanged = (deadline is not None and old_deadline is not None
+                             and deadline.astimezone(UTC) == old_deadline.astimezone(UTC))
+                obsolete = (plan.event.start.astimezone(UTC) <= instant
+                            or deadline is None or (kind == "prep" and plan.error == "too_imminent"))
+                if obsolete or (not unchanged and deadline is not None
+                                and deadline.astimezone(UTC) < instant):
+                    self._retire_pings(conn, plan.event.id, kind)
+                    continue
+                current = conn.execute(
+                    "SELECT id, fired FROM pings WHERE event_id = ? AND kind = ? AND retired = 0",
+                    (plan.event.id, kind),
+                ).fetchall()
+                assert deadline is not None
+                if unchanged and current:
+                    # Do not consume/retire an unchanged due retry, nor recreate a
+                    # consumed generation. A pending retry keeps its attempts.
+                    conn.execute(
+                        "UPDATE pings SET message = ? WHERE event_id = ? AND kind = ? "
+                        "AND retired = 0 AND fired = 0", (formatter(plan), plan.event.id, kind),
+                    )
+                    continue
+                if deadline.astimezone(UTC) < instant:
+                    continue  # Never manufacture a missed morning alarm.
+                self._retire_pings(conn, plan.event.id, kind)
+                conn.execute(
+                    "INSERT INTO pings (id, event_id, kind, fire_at, message) VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid4()), plan.event.id, kind, deadline.isoformat(), formatter(plan)),
+                )
+            return True
 
     def pending_pings(self, before: datetime) -> list[PingEntry]:
         """Return all unfired pings with fire_at <= before."""
@@ -827,7 +959,12 @@ class Store:
                 """
                 UPDATE pings
                 SET fired = 0, fired_at = NULL, send_attempts = send_attempts + 1
-                WHERE id = ? AND fired = 1
+                WHERE id = ? AND fired = 1 AND retired = 0
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pings newer WHERE newer.event_id = pings.event_id
+                    AND newer.kind = pings.kind AND newer.id != pings.id
+                    AND newer.fired = 0
+                  )
                 """,
                 (ping_id,),
             )
@@ -961,53 +1098,135 @@ class Store:
         return row is not None
 
     def is_alert_seen_today(self, alert_id: str) -> bool:
-        """Return True if this alert was already announced today for any event.
-
-        Used to deduplicate service_update messages so a single delayed train
-        line that affects three of today's events doesn't generate three
-        notifications.  The first event still triggers a message and the
-        underlying replan; subsequent events replan silently.
-        """
-        from commutecompass.timeutil import logical_day_bounds_nyc
-
-        day_start, _day_end = logical_day_bounds_nyc()
+        """Only acknowledged delivery, never legacy processing, is announced."""
+        day_start, _ = _logical_day_window()
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM alerts_seen WHERE alert_id = ? AND seen_at >= ? LIMIT 1",
-                (alert_id, day_start.isoformat()),
+            return conn.execute(
+                "SELECT 1 FROM alert_notifications WHERE alert_id = ? AND day_start = ? "
+                "AND delivered_at IS NOT NULL LIMIT 1", (alert_id, day_start.isoformat()),
+            ).fetchone() is not None
+
+    def claim_alert_processing(self, alert_id: str, event_id: str, now: datetime) -> str | None:
+        """Bound failed replan attempts without calling an exception processed."""
+        instant = now.astimezone(UTC)
+        token = str(uuid4())
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM alerts_seen WHERE alert_id = ? AND event_id = ?",
+                            (alert_id, event_id)).fetchone():
+                return None
+            conn.execute(
+                "INSERT INTO alert_processing (alert_id, event_id, expires_at) VALUES (?, ?, ?) "
+                "ON CONFLICT DO NOTHING",
+                (alert_id, event_id,
+                 (instant + timedelta(seconds=ALERT_NOTIFICATION_GRACE_SECONDS)).isoformat()),
+            )
+            changed = conn.execute(
+                """UPDATE alert_processing SET attempts = attempts + 1, claim_token = ?,
+                   claimed_until = ? WHERE alert_id = ? AND event_id = ? AND attempts < ?
+                   AND julianday(expires_at) > julianday(?) AND
+                   (claimed_until IS NULL OR julianday(claimed_until) <= julianday(?))""",
+                (token, (instant + timedelta(seconds=ALERT_NOTIFICATION_LEASE_SECONDS)).isoformat(),
+                 alert_id, event_id, ALERT_NOTIFICATION_MAX_ATTEMPTS,
+                 instant.isoformat(), instant.isoformat()),
+            ).rowcount
+            return token if changed else None
+
+    def finish_alert_processing(
+        self, alert_id: str, event_id: str, token: str, now: datetime, *, processed: bool,
+        expected: Plan | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if expected is not None and not self._matches_expected(conn, event_id, expected):
+                processed = False
+            changed = conn.execute(
+                "UPDATE alert_processing SET claim_token = NULL, claimed_until = NULL "
+                "WHERE alert_id = ? AND event_id = ? AND claim_token = ?",
+                (alert_id, event_id, token),
+            ).rowcount
+            if changed and processed:
+                conn.execute(
+                    "INSERT INTO alerts_seen (alert_id, event_id, seen_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT DO NOTHING", (alert_id, event_id, now.isoformat()),
+                )
+
+    def pending_alert_notifications(self, now: datetime) -> list[tuple[str, str, str]]:
+        """List retryable intents; claims recheck expiry and cancellation."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT alert_id, event_id, day_start FROM alert_notifications "
+                "WHERE delivered_at IS NULL AND attempts < ? "
+                "AND julianday(expires_at) > julianday(?) ORDER BY day_start, alert_id, event_id",
+                (ALERT_NOTIFICATION_MAX_ATTEMPTS, now.isoformat()),
+            ).fetchall()
+        return [(row[0], row[1], row[2]) for row in rows]
+
+    def claim_alert_notification(
+        self, alert_id: str, event_id: str, day_start: str, now: datetime,
+    ) -> tuple[str, str] | None:
+        """Lease an alert/day announcement, not an exactly-once send guarantee.
+
+        Acceptance before local acknowledgement can duplicate after lease expiry.
+        """
+        instant = now.astimezone(UTC)
+        token = str(uuid4())
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            plan_row = conn.execute("SELECT plan_json FROM plans WHERE event_id = ?",
+                                    (event_id,)).fetchone()
+            if plan_row is None:
+                return None
+            plan = Plan.model_validate_json(plan_row[0])
+            if plan.event.start.astimezone(UTC) <= instant:
+                return None
+            other = conn.execute(
+                """SELECT 1 FROM alert_notifications WHERE alert_id = ? AND day_start = ?
+                   AND (delivered_at IS NOT NULL OR julianday(claimed_until) > julianday(?))
+                   LIMIT 1""", (alert_id, day_start, instant.isoformat()),
             ).fetchone()
-        return row is not None
+            if other is not None:
+                return None
+            row = conn.execute(
+                """UPDATE alert_notifications SET attempts = attempts + 1, claim_token = ?,
+                   claimed_until = ? WHERE alert_id = ? AND event_id = ? AND day_start = ?
+                   AND delivered_at IS NULL AND attempts < ?
+                   AND julianday(expires_at) > julianday(?) RETURNING message""",
+                (token, (instant + timedelta(seconds=ALERT_NOTIFICATION_LEASE_SECONDS)).isoformat(),
+                 alert_id, event_id, day_start, ALERT_NOTIFICATION_MAX_ATTEMPTS, instant.isoformat()),
+            ).fetchone()
+            return (token, row[0]) if row else None
+
+    def finish_alert_notification(
+        self, alert_id: str, event_id: str, day_start: str, token: str, now: datetime,
+        *, delivered: bool,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE alert_notifications SET claim_token = NULL, claimed_until = NULL,
+                   delivered_at = CASE WHEN ? THEN ? ELSE delivered_at END
+                   WHERE alert_id = ? AND event_id = ? AND day_start = ? AND claim_token = ?""",
+                (delivered, now.isoformat(), alert_id, event_id, day_start, token),
+            )
 
     # ── Diagnostics ────────────────────────────────────────────────────────────
 
     def all_pings_today(self) -> list[PingEntry]:
-        """Return every ping (fired or not) whose fire_at falls in today's logical day."""
-        from commutecompass.timeutil import logical_day_bounds_nyc
-
-        day_start, day_end = logical_day_bounds_nyc()
+        """Return current-day ping history, ordered by instant then stable ID."""
+        day_start, day_end = _logical_day_window()
         with self._connect() as conn:
             rows = conn.execute(
-                """
-                SELECT id, event_id, kind, fire_at, fired, fired_at, message
-                FROM pings
-                WHERE fire_at >= ? AND fire_at <= ?
-                ORDER BY fire_at
-                """,
-                (day_start.isoformat(), day_end.isoformat()),
+                "SELECT id, event_id, kind, fire_at, fired, fired_at, message, send_attempts FROM pings",
             ).fetchall()
-
-        return [
-            PingEntry(
-                id=row[0],
-                event_id=row[1],
-                kind=row[2],
-                fire_at=datetime.fromisoformat(row[3]),
-                fired=bool(row[4]),
-                fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
-                message=row[6],
-            )
-            for row in rows
-        ]
+        pings = [PingEntry(
+            id=row[0], event_id=row[1], kind=row[2], fire_at=datetime.fromisoformat(row[3]),
+            fired=bool(row[4]), fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
+            message=row[6], send_attempts=row[7],
+        ) for row in rows]
+        return sorted(
+            (ping for ping in pings if day_start <= ping.fire_at.astimezone(UTC) < day_end),
+            key=lambda ping: (ping.fire_at.astimezone(UTC), ping.id),
+        )
 
     def geocode_cache_stats(self) -> dict[str, Any]:
         """Return summary stats for the geocode cache: count + oldest/newest age."""
@@ -1194,7 +1413,7 @@ class Store:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, event_id, kind, fire_at, fired, fired_at, message
+                SELECT id, event_id, kind, fire_at, fired, fired_at, message, send_attempts
                 FROM pings
                 WHERE event_id = ? AND kind = ? AND fired = 0
                 """,
@@ -1210,6 +1429,7 @@ class Store:
             fired=bool(row[4]),
             fired_at=datetime.fromisoformat(row[5]) if row[5] else None,
             message=row[6],
+            send_attempts=row[7],
         )
 
     # ── Current location (singleton) ────────────────────────────────────────────

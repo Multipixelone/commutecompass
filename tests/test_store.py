@@ -232,15 +232,26 @@ def test_init_schema_migrates_only_unfired_duplicates(tmp_db_path: Path) -> None
         "VALUES (?, ?, 'leave', ?, 'message', ?)",
         rows,
     )
+    history_at = "2026-11-01T07:00:00+00:00"
+    conn.execute("UPDATE pings SET send_attempts = 2")
+    conn.execute("UPDATE pings SET fired_at = ? WHERE fired = 1", (history_at,))
     conn.commit()
 
-    store.init_schema()
-    assert {row[0] for row in conn.execute("SELECT id FROM pings")} == {
-        "fired", "fired-same-group", "tie",
-    }
-    store.init_schema()
-    store.init_schema()
-    assert conn.execute("SELECT COUNT(*) FROM pings").fetchone()[0] == 3
+    for _ in range(3):
+        store.init_schema()
+        persisted = conn.execute(
+            "SELECT id, fire_at, fired, fired_at, send_attempts FROM pings ORDER BY id",
+        ).fetchall()
+        assert persisted == sorted(
+            (identity, fire_at, 0 if identity == "tie" else 1,
+             history_at if fired else None, 2)
+            for identity, _event, fire_at, fired in rows
+        )
+        pending = store.pending_pings(datetime.fromisoformat(history_at))
+        assert [(ping.id, ping.send_attempts) for ping in pending] == [("tie", 2)]
+        # Migration consumes obsolete generations, never recreating them on release.
+        for retired_id in ("latest", "older", "older-last"):
+            assert not store.release_ping(retired_id)
     conn.close()
 
 
@@ -1247,16 +1258,360 @@ def test_claim_ping_marks_fired_in_db(tmp_db_path: Path) -> None:
     assert not any(p.id == ping.id for p in pending)
 
 
-def test_is_alert_seen_today_per_day(tmp_db_path: Path) -> None:
-    """is_alert_seen_today is true after a same-day mark and false on a fresh DB."""
+def test_processed_alert_is_not_evidence_of_delivery(tmp_db_path: Path) -> None:
+    """An exception/unchanged replan may be processed without any announcement."""
     store = Store(tmp_db_path)
     store.init_schema()
 
     assert store.is_alert_seen_today("alert-x") is False
     store.mark_alert_seen("alert-x", "evt-A")
-    assert store.is_alert_seen_today("alert-x") is True
-    # A different alert is not affected.
-    assert store.is_alert_seen_today("alert-y") is False
+    assert store.is_alert_seen("alert-x", "evt-A")
+    assert not store.is_alert_seen("alert-x", "evt-B")
+    assert not store.is_alert_seen_today("alert-x")
+    assert not store.is_alert_seen_today("alert-y")
+
+
+def test_migration_and_repeat_init_preserve_send_history_not_infer_delivery(
+    tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrading pre-retirement state keeps retries and legacy processed records."""
+    from commutecompass import timeutil
+
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    with sqlite3.connect(tmp_db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE pings (
+                id TEXT PRIMARY KEY, event_id TEXT NOT NULL, kind TEXT NOT NULL,
+                fire_at TEXT NOT NULL, fired INTEGER NOT NULL DEFAULT 0,
+                fired_at TEXT, message TEXT NOT NULL,
+                send_attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE alerts_seen (
+                alert_id TEXT NOT NULL, event_id TEXT NOT NULL, seen_at TEXT NOT NULL,
+                PRIMARY KEY (alert_id, event_id)
+            );
+        """)
+        conn.executemany(
+            "INSERT INTO pings VALUES (?, 'event', ?, ?, ?, ?, ?, ?)",
+            [("sent", "prep", now.isoformat(), 1, now.isoformat(), "history", 3),
+             ("retry", "leave", now.isoformat(), 0, None, "retry", 2)],
+        )
+        conn.execute("INSERT INTO alerts_seen VALUES ('legacy-alert', 'event', ?)", (now.isoformat(),))
+    store = Store(tmp_db_path)
+    for _ in range(2):
+        store.init_schema()
+        pending = store.pending_pings(now)
+        assert [(ping.id, ping.send_attempts) for ping in pending] == [("retry", 2)]
+        with store._connect() as conn:
+            assert conn.execute(
+                "SELECT fired, fired_at, send_attempts, message FROM pings WHERE id = 'sent'",
+            ).fetchone() == (1, now.isoformat(), 3, "history")
+        assert store.is_alert_seen("legacy-alert", "event")
+        assert not store.is_alert_seen_today("legacy-alert")
+
+
+def test_morning_compare_and_swap_cannot_overwrite_or_remove_concurrent_poll_change(
+    tmp_db_path: Path,
+) -> None:
+    """A calendar/planner snapshot must not stomp a newer persisted commute."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    event = Event(id="cas", calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(hours=4), end=now + timedelta(hours=5))
+    original = make_plan(event)
+    assert original.leave_at is not None and original.prep_at is not None
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.reconcile_morning_plan(original, now, expected=None)
+    other = Store(tmp_db_path)
+    changed = original.model_copy(update={
+        "leave_at": original.leave_at - timedelta(minutes=10),
+        "prep_at": original.prep_at - timedelta(minutes=10),
+    })
+    assert other.reconcile_poll_replan(original, changed, now)
+    pending = [(ping.id, utc(ping.fire_at)) for ping in other.pending_pings(event.start)]
+    assert not store.reconcile_morning_plan(original, now, expected=original)
+    assert not store.remove_plan_if_current(original, now)
+    assert same_plan(store.get_plan(event.id), changed)
+    assert [(ping.id, utc(ping.fire_at)) for ping in other.pending_pings(event.start)] == pending
+    assert store.remove_plan_if_current(changed, now)
+    assert not store.remove_plan_if_current(changed, now)
+    assert store.get_plan(event.id) is None
+    assert store.pending_pings(event.start) == []
+
+
+def test_morning_reconciliation_failure_rolls_back_plan_and_reminders(tmp_db_path: Path) -> None:
+    """A formatting failure cannot commit a new plan with old/half-updated alarms."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    event = Event(id="atomic", calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(hours=4), end=now + timedelta(hours=5))
+    original = make_plan(event)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.reconcile_morning_plan(original, now, expected=None)
+    assert original.leave_at is not None and original.prep_at is not None
+    updated = original.model_copy(update={
+        "leave_at": original.leave_at + timedelta(minutes=15),
+        "prep_at": original.prep_at + timedelta(minutes=15),
+    })
+    before = [(ping.id, ping.kind, utc(ping.fire_at), ping.send_attempts)
+              for ping in store.pending_pings(event.start)]
+    with patch(
+        "commutecompass.format.format_leave_ping", side_effect=ValueError("cannot format"),
+    ), pytest.raises(ValueError, match="cannot format"):
+        store.reconcile_morning_plan(updated, now, expected=original)
+    assert same_plan(store.get_plan(event.id), original)
+    assert [(ping.id, ping.kind, utc(ping.fire_at), ping.send_attempts)
+            for ping in store.pending_pings(event.start)] == before
+
+
+@pytest.mark.parametrize("transient_failure", [False, True])
+def test_virtual_calendar_event_with_physical_override_keeps_commute(
+    tmp_db_path: Path, transient_failure: bool,
+) -> None:
+    """A valid physical plan outranks the calendar's original virtual marker."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    event = Event(id="override", calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(hours=4), end=now + timedelta(hours=5), virtual=True,
+                  location_effective="Synthetic physical venue")
+    physical = make_plan(event)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.reconcile_morning_plan(physical, now, expected=None)
+    leave = store.get_pending_ping(event.id, "leave")
+    assert leave is not None and utc(leave.fire_at) == utc(physical.leave_at)
+    if transient_failure:
+        assert store.claim_ping_entry(leave.id, now) is not None
+        assert store.release_ping(leave.id)
+        assert store.reconcile_morning_plan(
+            Plan(event=event, error="no_route"), now, expected=physical,
+        )
+        assert same_plan(store.get_plan(event.id), physical)
+        retained = store.get_pending_ping(event.id, "leave")
+        assert retained is not None and retained.id == leave.id
+        assert retained.send_attempts == 1 and utc(retained.fire_at) == utc(leave.fire_at)
+
+
+def test_unchanged_morning_preserves_due_retry_and_consumed_leave(tmp_db_path: Path) -> None:
+    """A passed deadline alone is not permission to discard an unchanged retry."""
+    now = datetime(2026, 11, 4, 12, tzinfo=NYC_TZ)
+    event = Event(id="retry", calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(hours=1), end=now + timedelta(hours=2))
+    plan = make_plan(event)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    assert store.reconcile_morning_plan(plan, now - timedelta(hours=1), expected=None)
+    leave = store.get_pending_ping(event.id, "leave")
+    assert leave is not None
+    assert store.claim_ping_entry(leave.id, now, due_only=True) is not None
+    assert store.release_ping(leave.id)
+    assert store.reconcile_morning_plan(plan, now, expected=plan)
+    retry = store.get_pending_ping(event.id, "leave")
+    assert retry is not None and retry.id == leave.id and retry.send_attempts == 1
+    assert utc(retry.fire_at) == utc(leave.fire_at)
+    assert store.claim_ping_entry(leave.id, now, due_only=True) is not None
+    assert store.reconcile_morning_plan(plan, now, expected=plan)
+    assert store.get_pending_ping(event.id, "leave") is None
+
+
+def _seed_alert_intent(store: Store, now: datetime, event_id: str = "intent") -> Plan:
+    event = Event(id=event_id, calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(hours=1), end=now + timedelta(hours=2))
+    plan = make_plan(event)
+    store.upsert_plan(plan)
+    assert plan.leave_at is not None
+    updated = plan.model_copy(update={"leave_at": plan.leave_at + timedelta(minutes=10)})
+    assert store.reconcile_poll_replan(
+        plan, updated, now, alert_notification=("alert", f"Changed {event_id}"),
+    )
+    return updated
+
+
+def test_alert_intent_attempt_cap_and_exact_expiry(tmp_db_path: Path) -> None:
+    """Failed announcements cannot storm indefinitely or fire at the expiry instant."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    _seed_alert_intent(store, now)
+    key, = store.pending_alert_notifications(now)
+    other = Store(tmp_db_path)
+    for attempt in range(5):  # Frozen public contract: five attempted deliveries.
+        at = now + timedelta(seconds=attempt)
+        claimed = other.claim_alert_notification(*key, at)
+        assert claimed is not None
+        token, message = claimed
+        assert message == "Changed intent"
+        store.finish_alert_notification(*key, token, at, delivered=False)
+    assert other.claim_alert_notification(*key, now + timedelta(seconds=10)) is None
+    assert not store.is_alert_seen_today("alert")
+    _seed_alert_intent(store, now, event_id="expires")
+    expiry_key, = store.pending_alert_notifications(now)
+    # UTC instant in a different offset, exactly 900 seconds after creation.
+    expiry = datetime.fromisoformat("2026-11-04T14:15:00+00:00")
+    assert store.claim_alert_notification(*expiry_key, expiry) is None
+
+
+def test_alert_intent_lease_fences_old_ack_and_suppresses_siblings(
+    tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One alert/day has one active sender; an expired owner cannot ack a new lease."""
+    from commutecompass import timeutil
+
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    _seed_alert_intent(store, now, "a")
+    _seed_alert_intent(store, now, "b")
+    keys = {key[1]: key for key in store.pending_alert_notifications(now)}
+    other = Store(tmp_db_path)
+    first = store.claim_alert_notification(*keys["a"], now)
+    assert first is not None
+    assert other.claim_alert_notification(*keys["a"], now) is None
+    assert other.claim_alert_notification(*keys["b"], now) is None
+    later = now + timedelta(seconds=60)  # Frozen lease duration.
+    second = other.claim_alert_notification(*keys["a"], later)
+    assert second is not None and second[0] != first[0]
+    store.finish_alert_notification(*keys["a"], first[0], later, delivered=True)
+    assert not store.is_alert_seen_today("alert")
+    assert store.claim_alert_notification(*keys["b"], later) is None
+    other.finish_alert_notification(*keys["a"], second[0], later, delivered=True)
+    assert store.is_alert_seen_today("alert")
+    assert store.claim_alert_notification(*keys["b"], later) is None
+
+
+@pytest.mark.parametrize("stop", ["removed", "event-started"])
+def test_alert_retry_stops_after_event_removal_or_start(tmp_db_path: Path, stop: str) -> None:
+    """Persisted failed updates must not outlive the commute they describe."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    # Start within notification grace so event expiry, not the 900s cap, is tested.
+    event = Event(id="short", calendar_id="cal", calendar_name="Test", title="Synthetic",
+                  start=now + timedelta(minutes=5), end=now + timedelta(hours=1))
+    plan = make_plan(event).model_copy(update={"leave_at": now + timedelta(minutes=1)})
+    store.upsert_plan(plan)
+    updated = plan.model_copy(update={"leave_at": now + timedelta(minutes=2)})
+    assert store.reconcile_poll_replan(plan, updated, now, alert_notification=("alert", "changed"))
+    key, = store.pending_alert_notifications(now)
+    if stop == "removed":
+        assert store.remove_plan_if_current(updated, now)
+        at = now
+    else:
+        at = event.start
+    assert Store(tmp_db_path).claim_alert_notification(*key, at) is None
+
+
+@pytest.mark.parametrize("replacement_state", ["pending", "claimed", "cancelled"])
+def test_release_cannot_revive_superseded_generation(
+    tmp_db_path: Path, replacement_state: str,
+) -> None:
+    """A failed sender cannot resurrect A after another connection installs B."""
+    now = datetime(2026, 11, 4, 12, tzinfo=NYC_TZ)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    original = PingEntry(id="old", event_id="event", kind="leave", fire_at=now,
+                         message="old journey", send_attempts=2)
+    replacement = original.model_copy(update={"id": "new", "message": "new journey",
+                                               "send_attempts": 0})
+    store.schedule_ping(original)
+    assert store.claim_ping_entry(original.id, now, due_only=True) is not None
+    other.schedule_ping(replacement)
+    if replacement_state == "claimed":
+        assert other.claim_ping_entry(replacement.id, now, due_only=True) is not None
+    elif replacement_state == "cancelled":
+        other.cancel_pings("event")
+        other.cancel_pings("event")  # Retirement is idempotent.
+
+    assert not store.release_ping(original.id)
+    assert not store.release_ping(original.id)
+    pending = store.pending_pings(now)
+    assert [ping.id for ping in pending] == (["new"] if replacement_state == "pending" else [])
+    assert store.claim_ping_entry(original.id, now, due_only=True) is None
+    # Retiring A must preserve its actual send history, not reset its retry budget.
+    with store._connect() as conn:
+        history = conn.execute(
+            "SELECT fired, fired_at, send_attempts FROM pings WHERE id = ?", (original.id,),
+        ).fetchone()
+    assert history is not None
+    assert history[0] == 1 and utc(datetime.fromisoformat(history[1])) == utc(now)
+    assert history[2] == 2
+
+
+def test_cancel_after_claim_prevents_failed_send_release(tmp_db_path: Path) -> None:
+    """Cancellation during send is durable even without a replacement row."""
+    store = Store(tmp_db_path)
+    store.init_schema()
+    other = Store(tmp_db_path)
+    ping = make_ping()
+    now = ping.fire_at + timedelta(seconds=1)
+    store.schedule_ping(ping)
+    assert store.claim_ping_entry(ping.id, now, due_only=True) is not None
+    other.cancel_pings(ping.event_id)
+    other.cancel_pings(ping.event_id)
+    assert not store.release_ping(ping.id)
+    assert store.pending_pings(now) == []
+    with store._connect() as conn:
+        assert conn.execute("SELECT fired, send_attempts FROM pings WHERE id = ?",
+                            (ping.id,)).fetchone() == (1, 0)
+
+
+def test_retired_leave_does_not_suppress_new_journey_prep(tmp_db_path: Path) -> None:
+    """A consumed old leave is not evidence that a later journey is imminent."""
+    now = datetime(2026, 11, 4, 12, tzinfo=NYC_TZ)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    old_leave = PingEntry(id="old-leave", event_id="event", kind="leave",
+                          fire_at=now - timedelta(minutes=2), message="old")
+    store.schedule_ping(old_leave)
+    assert store.claim_ping_entry(old_leave.id, now, due_only=True) is not None
+    Store(tmp_db_path).schedule_ping(old_leave.model_copy(update={
+        "id": "new-leave", "fire_at": now + timedelta(minutes=30), "message": "new",
+    }))
+    store.schedule_ping(PingEntry(id="new-prep", event_id="event", kind="prep",
+                                  fire_at=now, message="prepare for new journey"))
+    prep = store.claim_ping_entry("new-prep", now, due_only=True, suppress_obsolete_prep=True)
+    assert prep is not None and prep.message == "prepare for new journey"
+    assert store.get_pending_ping("event", "leave") is not None
+
+
+def test_day_views_compare_instants_include_both_folds_and_break_ties(
+    tmp_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lexical ISO filtering/order loses mixed offsets and the second fall hour."""
+    from commutecompass import timeutil
+
+    now = datetime(2026, 10, 31, 12, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(tmp_db_path)
+    store.init_schema()
+    # Insert ties backwards; expected order is instant then stable public ID.
+    cases = [
+        ("outside-before", datetime.fromisoformat("2026-10-31T05:59:59.999999+00:00")),
+        ("start", datetime.fromisoformat("2026-10-31T06:00:00+00:00")),
+        ("tie-b", datetime.fromisoformat("2026-10-31T09:00:00-04:00")),
+        ("tie-a", datetime.fromisoformat("2026-10-31T13:00:00+00:00")),
+        ("fold-first", datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=0)),
+        ("fold-second", datetime(2026, 11, 1, 1, 15, tzinfo=NYC_TZ, fold=1)),
+        ("last", datetime.fromisoformat("2026-11-01T06:59:59.999999+00:00")),
+        ("outside-end", datetime.fromisoformat("2026-11-01T07:00:00+00:00")),
+    ]
+    for identity, instant in cases:
+        event = Event(id=identity, calendar_id="cal", calendar_name="Test", title=identity,
+                      start=instant, end=instant + timedelta(hours=1))
+        store.upsert_plan(Plan(event=event))
+        store.schedule_ping(PingEntry(id=identity, event_id=identity, kind="prep",
+                                      fire_at=instant, message=identity))
+    expected = ["start", "tie-a", "tie-b", "fold-first", "fold-second", "last"]
+    assert [plan.event.id for plan in store.today_plans()] == expected
+    assert [ping.id for ping in store.all_pings_today()] == expected
+    # Selecting from the second repeated hour still means the preceding logical day.
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: datetime(
+        2026, 11, 1, 1, 45, tzinfo=NYC_TZ, fold=1,
+    ))
+    assert [plan.event.id for plan in store.today_plans()] == expected
+    assert [ping.id for ping in store.all_pings_today()] == expected
 
 
 def test_concurrent_claim_payload_and_release_reclaim(tmp_db_path: Path) -> None:

@@ -1200,11 +1200,22 @@ def snooze(
         click.echo(f"Skipped prep ping for {event_id} ({ping.id[:8]}).")
         return
 
+    import uuid
     from datetime import timedelta
 
+    from commutecompass.models import PingEntry
+
     new_fire = ping.fire_at + timedelta(minutes=minutes or 0)
-    ping.fire_at = new_fire
-    store.schedule_ping(ping)
+    # Snoozing supersedes the old generation without reusing its identity or retries.
+    store.schedule_ping(
+        PingEntry(
+            id=str(uuid.uuid4()),
+            event_id=ping.event_id,
+            kind=ping.kind,
+            fire_at=new_fire,
+            message=ping.message,
+        )
+    )
     direction = "later" if (minutes or 0) >= 0 else "earlier"
     click.echo(
         f"Snoozed prep for {event_id} by {abs(minutes or 0)} min {direction} → "

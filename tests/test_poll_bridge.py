@@ -129,11 +129,20 @@ def test_directions_morning_through_nyct_poll(
     prep = store.get_pending_ping(event.id, "prep")
     leave = store.get_pending_ping(event.id, "leave")
     assert prep is not None and leave is not None
-    # A user's snooze/offset survives realtime refresh, without recreating IDs.
-    prep.fire_at += timedelta(minutes=1)
-    leave.fire_at += timedelta(minutes=2)
+    # Snoozing creates new generations; realtime must preserve those new IDs.
+    morning_prep, morning_leave = prep, leave
+    prep = prep.model_copy(update={"id": "snoozed-prep", "fire_at": prep.fire_at + timedelta(minutes=1)})
+    leave = leave.model_copy(update={"id": "snoozed-leave", "fire_at": leave.fire_at + timedelta(minutes=2)})
     store.schedule_ping(prep)
     store.schedule_ping(leave)
+    for retired in (morning_prep, morning_leave):
+        assert not store.release_ping(retired.id)
+        with store._connect() as conn:
+            history = conn.execute(
+                "SELECT fired, fire_at, fired_at, send_attempts FROM pings WHERE id = ?",
+                (retired.id,),
+            ).fetchone()
+        assert history == (1, retired.fire_at.isoformat(), None, retired.send_attempts)
     config.realtime.enabled = True
     notifier.reset_mock()
     _feed_cache.clear()

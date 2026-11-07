@@ -1409,6 +1409,7 @@ class TestSnoozeCommand:
                 fire_at=plan.prep_at,
                 fired=False,
                 message="prep!",
+                send_attempts=2,
             )
         )
 
@@ -1424,6 +1425,15 @@ class TestSnoozeCommand:
         # The new fire_at is ~20 minutes after the original (allowing ms drift).
         delta = (prep[0].fire_at - original_fire).total_seconds() / 60
         assert 19.5 < delta < 20.5
+        assert prep[0].id != "ping-1"
+        assert prep[0].send_attempts == 0  # Snooze starts a new scheduled generation.
+        assert not store.release_ping("ping-1")
+        with store._connect() as conn:
+            history = conn.execute(
+                "SELECT fired, fire_at, fired_at, send_attempts, message FROM pings WHERE id = ?",
+                ("ping-1",),
+            ).fetchone()
+        assert history == (1, original_fire.isoformat(), None, 2, "prep!")
 
     def test_snooze_skip_marks_ping_fired(
         self, runner: CliRunner, tmp_path: Path

@@ -158,7 +158,7 @@ def test_poll_ping_becoming_due_during_fetch_is_claimed_once(
     minimal_config.realtime.enabled = True
     plan = refresh_fixture(store, start)
     due = start + timedelta(seconds=1)
-    store.schedule_ping(PingEntry(id="prep", event_id=plan.event.id, kind="prep",
+    store.schedule_ping(PingEntry(id="newly-due-prep", event_id=plan.event.id, kind="prep",
                                   fire_at=due, message="newly due"))
     notifier = MagicMock()
     notifier.send.return_value = True
@@ -176,7 +176,7 @@ def test_poll_ping_becoming_due_during_fetch_is_claimed_once(
                      fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     notifier.send.assert_called_once_with("newly due")
     claim.assert_called_once_with(
-        "prep", start + timedelta(seconds=2), leave_only=False, due_only=True, defer_if=ANY, suppress_obsolete_prep=True,
+        "newly-due-prep", start + timedelta(seconds=2), leave_only=False, due_only=True, defer_if=ANY, suppress_obsolete_prep=True,
     )
 
 
@@ -188,7 +188,7 @@ def test_poll_retry_grace_uses_elapsed_network_time(
     current = start
     minimal_config.realtime.enabled = True
     plan = refresh_fixture(store, start)
-    store.schedule_ping(PingEntry(id="prep", event_id=plan.event.id, kind="prep",
+    store.schedule_ping(PingEntry(id="retry-prep", event_id=plan.event.id, kind="prep",
                                   fire_at=start - timedelta(seconds=899), message="retry"))
 
     def fetch(*args: Any) -> FetchResult:
@@ -211,7 +211,7 @@ def test_poll_retry_grace_uses_elapsed_network_time(
                      fetch_alerts_fn=lambda **kw: [], select_alerts_fn=lambda *args, **kw: [])
     notifier.send.assert_called_once_with("retry")
     with store._connect() as conn:
-        assert conn.execute("SELECT fired, send_attempts FROM pings WHERE id='prep'").fetchone() == (1, 0)
+        assert conn.execute("SELECT fired, send_attempts FROM pings WHERE id='retry-prep'").fetchone() == (1, 0)
 
 
 @pytest.mark.parametrize("minutes,leave_minutes,fired_kind", [
@@ -301,7 +301,7 @@ def test_poll_replan_cannot_rollback_refresh_or_recreate_prep(
     plan = refresh_fixture(store, now, leave_minutes=25)
     plan.prep_at = now + timedelta(minutes=5)
     store.upsert_plan(plan)
-    store.schedule_ping(PingEntry(id="prep", event_id=plan.event.id, kind="prep",
+    store.schedule_ping(PingEntry(id="updated-prep", event_id=plan.event.id, kind="prep",
                                   fire_at=plan.prep_at, message="prep"))
     store.claim_ping("leave", now)
     store.release_ping("leave")
@@ -331,7 +331,8 @@ def test_poll_replan_cannot_rollback_refresh_or_recreate_prep(
     assert saved.weather_buffer_minutes == 7
     with store._connect() as conn:
         rows = conn.execute("SELECT id, fired, send_attempts FROM pings ORDER BY id").fetchall()
-    assert rows == [("leave", 0, 1), ("prep", int(send_ok), int(not send_ok))]
+    assert rows == [("leave", 0, 1), ("prep", 1, 0),
+                    ("updated-prep", int(send_ok), int(not send_ok))]
     assert notifier.send.call_count == 1  # No service update or recreated prep.
 
 
@@ -375,13 +376,13 @@ def test_poll_reparsed_walking_placeholders_retain_refresh_padding(
         assert route is not None
         return route
 
+    identity = plan.model_copy(deep=True)
     plan.route = parse_at(now)
     directions = plan.model_copy(deep=True)
     directions.route = parse_at(now + timedelta(minutes=1))
     assert plan.route.legs[0].depart_at != directions.route.legs[0].depart_at
     assert all(leg.gtfs_trip_id is None for leg in directions.route.legs)
-    # Only the persisted fixture has independently validated boarding identity.
-    identity = refresh_fixture(store, now, leave_minutes=25)
+    # Reuse the original fixture's validated identity, without scheduling it twice.
     assert identity.route is not None
     for field in type(identity.route.legs[0]).model_fields:
         if field.startswith("gtfs_"):
@@ -450,6 +451,8 @@ def test_poll_replan_does_not_create_alarms_for_non_upcoming_event(
     minimal_config.home_assistant.enabled = source == "ha"
     plan = refresh_fixture(store, now, leave_minutes=10)
     store.cancel_pings(plan.event.id)
+    with store._connect() as conn:
+        retired_before = conn.execute("SELECT * FROM pings ORDER BY id").fetchall()
     if case == "finished":
         plan.event.start = now - timedelta(hours=3)
         plan.event.end = now - timedelta(hours=2)
@@ -490,7 +493,8 @@ def test_poll_replan_does_not_create_alarms_for_non_upcoming_event(
         planner.assert_not_called()
     assert same_plan(store.get_plan(plan.event.id), plan)
     with store._connect() as conn:
-        assert conn.execute("SELECT * FROM pings").fetchall() == []
+        assert conn.execute("SELECT * FROM pings ORDER BY id").fetchall() == retired_before
+    assert store.pending_pings(plan.event.end + timedelta(days=1)) == []
     assert not store.is_alert_seen(alert.id, plan.event.id)
     notifier.send.assert_not_called()
     ha_alarm.send.assert_not_called()
@@ -503,17 +507,19 @@ def test_poll_reconciliation_preserves_fired_retry_offsets_and_new_due(store: St
     store.claim_ping("prep", now)
     store.claim_ping("leave", now)
     store.release_ping("leave")
-    store.schedule_ping(PingEntry(id="leave", event_id=plan.event.id, kind="leave",
+    store.schedule_ping(PingEntry(id="snoozed-leave", event_id=plan.event.id, kind="leave",
                                   fire_at=plan.leave_at + timedelta(minutes=4), message="snoozed"))
-    store.claim_ping("leave", now)
-    store.release_ping("leave")
+    store.claim_ping("snoozed-leave", now)
+    store.release_ping("snoozed-leave")
     changed = plan.model_copy(update={"leave_at": now - timedelta(minutes=1),
                                       "prep_at": now - timedelta(minutes=21)})
     assert store.reconcile_poll_replan(plan, changed, now)
     with store._connect() as conn:
         rows = conn.execute("SELECT id, fired, send_attempts, fire_at FROM pings ORDER BY id").fetchall()
-    assert [(r[0], r[1], r[2]) for r in rows] == [("leave", 0, 1), ("prep", 1, 0)]
-    assert utc(datetime.fromisoformat(rows[0][3])) == utc(now + timedelta(minutes=3))
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        ("leave", 1, 1), ("prep", 1, 0), ("snoozed-leave", 0, 1),
+    ]
+    assert utc(datetime.fromisoformat(rows[2][3])) == utc(now + timedelta(minutes=3))
     assert not store.reconcile_poll_replan(plan, changed, now)
     # No existing kind: a past time must produce an immediately due row.
     store.cancel_pings(plan.event.id)
@@ -686,14 +692,17 @@ def test_realtime_refresh_cas_rejects_stale_observation_and_preserves_manual_off
 
 def test_morning_saved_plan_then_serialized_update_refreshes_normal_poll(
     minimal_config: Config, store: Store,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
     from google.transit import gtfs_realtime_pb2 as gtfs
 
     from commutecompass.realtime import Predictions, _accumulate
 
-    now = now_nyc().replace(hour=12, minute=0, second=0, microsecond=0)
+    now = set_logical_day_clock(datetime(2026, 11, 4, 12, tzinfo=NYC_TZ))
     plan = refresh_fixture(store, now)
-    store.cancel_pings(plan.event.id)
+    # Start morning without a previous generation: cancellation alone is durable
+    # consumption and must not be used to request recreation of unchanged alarms.
+    assert store.remove_plan_if_current(plan, now - timedelta(hours=4))
     minimal_config.realtime.enabled = True
     with patch("commutecompass.jobs.morning.CalendarClient") as calendar, patch(
         "commutecompass.jobs.morning.plan_event", return_value=plan,
@@ -804,30 +813,18 @@ def store(tmp_path: Path) -> Store:
 
 @pytest.fixture
 def wide_today_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Widen ``logical_day_bounds_nyc()`` so today-based store queries don't
-    miss test events near the 02:00 NYC boundary.
-
-    Several poll/morning tests construct events at ``now + timedelta(hours=3)``.
-    When CI happens to run shortly after midnight NYC, ``now + 3h`` crosses
-    the logical-day cutoff and ``store.today_plans()`` returns an empty list,
-    causing time-of-day flakes. This fixture replaces the bounds with a
-    ±24h window around real ``now_nyc()`` for the duration of the test.
-
-    Store/job code imports ``logical_day_bounds_nyc`` lazily inside each
-    method, so patching the attribute on ``commutecompass.timeutil`` is enough.
-    """
-    from commutecompass import timeutil
-
-    def _wide_bounds(reference: datetime | None = None, **_: Any) -> tuple[datetime, datetime]:
-        anchor = timeutil.to_nyc(reference) if reference is not None else timeutil.now_nyc()
-        return (anchor - timedelta(hours=24), anchor + timedelta(hours=24))
-
-    monkeypatch.setattr(timeutil, "logical_day_bounds_nyc", _wide_bounds)
+    """Keep legacy callers on a fixed daytime clock, with real NYC day bounds."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    monkeypatch.setitem(globals(), "now_nyc", lambda: now)
+    monkeypatch.setattr("commutecompass.jobs.morning.now_nyc", lambda: now)
 
 
 @pytest.fixture
-def today_events() -> list[Event]:
+def today_events(request: pytest.FixtureRequest) -> list[Event]:
     """Two events today: one with location, one without."""
+    if "wide_today_window" in request.fixturenames:
+        request.getfixturevalue("wide_today_window")
     now = now_nyc()
     return [
         Event(
@@ -856,8 +853,10 @@ def today_events() -> list[Event]:
 
 
 @pytest.fixture
-def sample_route() -> Route:
+def sample_route(request: pytest.FixtureRequest) -> Route:
     """A sample transit route."""
+    if "wide_today_window" in request.fixturenames:
+        request.getfixturevalue("wide_today_window")
     now = now_nyc()
     return Route(
         legs=[
@@ -964,14 +963,13 @@ def test_morning_calendar_failure_preserves_all_reminder_state(
         patch("commutecompass.jobs.morning.build_notifier", return_value=notifier),
         patch("commutecompass.jobs.morning.plan_event") as plan_event,
         patch.object(Store, "upsert_plan") as upsert_plan,
-        patch.object(Store, "today_plans") as today_plans,
         patch.object(Store, "cancel_pings") as cancel_pings,
         patch.object(Store, "schedule_ping") as schedule_ping,
     ):
         calendar.return_value.fetch_events.side_effect = failure
         morning_run(minimal_config)
 
-    for operation in (plan_event, upsert_plan, today_plans, cancel_pings, schedule_ping):
+    for operation in (plan_event, upsert_plan, cancel_pings, schedule_ping):
         operation.assert_not_called()
     assert _morning_state_snapshot(minimal_config) == before
     notifier.send.assert_called_once()
@@ -989,7 +987,7 @@ def test_morning_calendar_failure_preserves_all_reminder_state(
 def test_morning_successful_empty_calendar_cancels_only_today_pings(
     minimal_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verified removal still deletes pending and fired pings, but not another day."""
+    """Confirmed removal invalidates plans without deleting send history/other days."""
     now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
     monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
     store = Store(minimal_config.paths.db_path)
@@ -1002,12 +1000,182 @@ def test_morning_successful_empty_calendar_cancels_only_today_pings(
         digest = _run_morning_capture_digest(minimal_config)
 
     after = _morning_state_snapshot(minimal_config)
-    assert after["plans"] == before["plans"]
-    # SELECT * starts with (id, event_id); compare all columns for the other day.
-    assert after["pings"] == [row for row in before["pings"] if row[1] == "other-day"]
-    assert len(after["pings"]) == 3
+    assert store.get_plan("today") is None
+    assert store.get_pending_ping("today", "prep") is None
+    assert store.get_pending_ping("today", "leave") is None
+    assert after["plans"] == [row for row in before["plans"] if row[0] == "other-day"]
+    # SELECT * starts with (id, event_id); other-day rows must be byte-for-byte stable.
+    assert [row for row in after["pings"] if row[1] == "other-day"] == [
+        row for row in before["pings"] if row[1] == "other-day"
+    ]
+    with sqlite3.connect(minimal_config.paths.db_path) as conn:
+        assert conn.execute(
+            "SELECT fired, send_attempts FROM pings WHERE id = 'today-history'",
+        ).fetchone() == (1, 3)
     assert "No events scheduled for today" in digest
     assert "Calendar unavailable" not in digest
+
+    alert = Alert(id="removed-event-alert", header="Service changed", description="Test",
+                  affected_routes={"C"}, severity="WARNING")
+    planner = MagicMock(side_effect=AssertionError("removed events must not be replanned"))
+    poll_run(
+        minimal_config, store=store, notifier=cast(TelegramNotifier, SpyNotifier()),
+        fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda *args, **kw: [alert],
+        plan_event_fn=planner, now_fn=lambda: now, ha_fetch_fn=lambda *args, **kw: None,
+    )
+    planner.assert_not_called()
+    assert store.get_pending_ping("today", "prep") is None
+    assert store.get_pending_ping("today", "leave") is None
+
+
+@pytest.mark.parametrize("initially_stored", [False, True])
+@pytest.mark.parametrize("fetch_result", ["empty", "stale-plan"])
+def test_morning_stale_fetch_cannot_remove_or_replace_concurrently_committed_plan(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+    initially_stored: bool, fetch_result: str,
+) -> None:
+    """A slow Calendar response cannot remove or overwrite a newer generation."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    event = Event(id="concurrent-calendar", calendar_id="test-cal", calendar_name="Test",
+                  title="Synthetic concurrent event", start=now + timedelta(hours=4),
+                  end=now + timedelta(hours=5))
+    original = Plan(event=event, route=sample_route,
+                    prep_at=now + timedelta(hours=2), leave_at=now + timedelta(hours=3))
+    expected = original if initially_stored else None
+    if initially_stored:
+        assert store.reconcile_morning_plan(original, now, expected=None)
+    newer = original.model_copy(update={
+        "prep_at": now + timedelta(hours=2, minutes=10),
+        "leave_at": now + timedelta(hours=3, minutes=10),
+    })
+    committed: list[dict[str, list[tuple[Any, ...]]]] = []
+
+    def fetch_stale(**kwargs: object) -> list[Event]:
+        other = Store(minimal_config.paths.db_path)
+        assert other.reconcile_morning_plan(newer, now, expected=expected)
+        committed.append(_morning_state_snapshot(minimal_config))
+        return [] if fetch_result == "empty" else [event]
+
+    with patch("commutecompass.jobs.morning.CalendarClient") as calendar, patch(
+        "commutecompass.jobs.morning.fetch_alerts", return_value=[],
+    ), patch("commutecompass.jobs.morning.plan_event", return_value=original), patch(
+        "commutecompass.jobs.morning.build_notifier", return_value=MagicMock(),
+    ), patch("commutecompass.jobs.morning.now_nyc", return_value=now):
+        calendar.return_value.fetch_events.side_effect = fetch_stale
+        morning_run(minimal_config)
+    assert len(committed) == 1
+    assert _morning_state_snapshot(minimal_config) == committed[0]
+    assert same_plan(store.get_plan(event.id), newer)
+    leave = store.get_pending_ping(event.id, "leave")
+    assert leave is not None and utc(leave.fire_at) == utc(newer.leave_at)
+
+
+def test_morning_fetch_window_preserves_second_fall_hour_event(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated Calendar timeMax must not turn a fold-1 event into a removal."""
+    now = datetime(2026, 10, 31, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    start = datetime(2026, 11, 1, 1, 30, tzinfo=NYC_TZ, fold=1)
+    event = Event(id="second-hour", calendar_id="test-cal", calendar_name="Test",
+                  title="Synthetic late event", start=start,
+                  end=datetime(2026, 11, 1, 2, 30, tzinfo=NYC_TZ))
+    plan = Plan(event=event, route=sample_route,
+                prep_at=datetime(2026, 11, 1, 1, 0, tzinfo=NYC_TZ, fold=1),
+                leave_at=datetime(2026, 11, 1, 1, 15, tzinfo=NYC_TZ, fold=1))
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    store.upsert_plan(plan)
+    assert plan.leave_at is not None
+    store.schedule_ping(PingEntry(id="fold-leave", event_id=event.id, kind="leave",
+                                  fire_at=plan.leave_at, message="late journey"))
+    windows: list[tuple[datetime, datetime]] = []
+
+    def fetch_events(*, calendars: object, start: datetime, end: datetime) -> list[Event]:
+        windows.append((start, end))
+        start_instant, event_instant, end_instant = utc(start), utc(event.start), utc(end)
+        assert start_instant is not None and event_instant is not None and end_instant is not None
+        return [event] if start_instant <= event_instant < end_instant else []
+
+    with patch("commutecompass.jobs.morning.CalendarClient") as calendar, patch(
+        "commutecompass.jobs.morning.plan_event", return_value=plan,
+    ), patch("commutecompass.jobs.morning.fetch_alerts", return_value=[]), patch(
+        "commutecompass.jobs.morning.build_notifier", return_value=MagicMock(),
+    ), patch("commutecompass.jobs.morning.now_nyc", return_value=now):
+        calendar.return_value.fetch_events.side_effect = fetch_events
+        morning_run(minimal_config)
+    assert len(windows) == 1
+    assert utc(windows[0][0]) == utc(datetime(2026, 10, 31, 2, tzinfo=NYC_TZ))
+    assert utc(windows[0][1]) == utc(datetime(2026, 11, 1, 2, tzinfo=NYC_TZ))
+    assert same_plan(store.get_plan(event.id), plan)
+    leave = store.get_pending_ping(event.id, "leave")
+    assert leave is not None and leave.id == "fold-leave"
+    assert utc(leave.fire_at) == utc(plan.leave_at)
+
+
+@pytest.mark.parametrize("outcome", ["virtual", "past", "prep-past", "no-route"])
+def test_morning_reconciles_confirmed_changes_but_retains_transient_failure(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """Old physical reminders survive outages, not confirmed obsolete deadlines."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store = Store(minimal_config.paths.db_path)
+    store.init_schema()
+    _seed_morning_reminders(store, now)
+    original = store.get_plan("today")
+    assert original is not None
+    physical = original.model_copy(update={"route": sample_route})
+    store.upsert_plan(physical)
+    if outcome == "virtual":
+        updated = Plan(event=physical.event.model_copy(update={"virtual": True}))
+    elif outcome == "no-route":
+        updated = Plan(event=physical.event, error="no_route")
+    else:
+        updated = physical.model_copy(update={
+            "prep_at": now - timedelta(minutes=5),
+            "leave_at": now - timedelta(minutes=1) if outcome == "past" else now + timedelta(minutes=10),
+        })
+    with patch("commutecompass.jobs.morning.CalendarClient") as calendar, patch(
+        "commutecompass.jobs.morning.plan_event", return_value=updated,
+    ), patch("commutecompass.jobs.morning.fetch_alerts", return_value=[]), patch(
+        "commutecompass.jobs.morning.build_notifier", return_value=MagicMock(),
+    ), patch("commutecompass.jobs.morning.now_nyc", return_value=now):
+        calendar.return_value.fetch_events.return_value = [updated.event]
+        morning_run(minimal_config)
+        morning_run(minimal_config)  # Reconciliation must remain idempotent.
+
+    saved = store.get_plan("today")
+    assert saved is not None
+    assert same_plan(saved, physical if outcome == "no-route" else updated)
+    prep = store.get_pending_ping("today", "prep")
+    leave = store.get_pending_ping("today", "leave")
+    if outcome == "no-route":
+        assert prep is not None and (prep.id, prep.send_attempts) == ("today-prep", 2)
+        assert leave is not None and (leave.id, leave.send_attempts) == ("today-leave", 1)
+    else:
+        assert prep is None
+        if outcome == "prep-past":
+            assert leave is not None
+            assert updated.leave_at is not None and utc(leave.fire_at) == utc(updated.leave_at)
+            assert leave.send_attempts == 0  # A genuinely changed schedule is a new generation.
+            assert leave.id != "today-leave"
+            assert not store.release_ping("today-leave")
+            with sqlite3.connect(minimal_config.paths.db_path) as conn:
+                assert conn.execute(
+                    "SELECT send_attempts, fired_at FROM pings WHERE id = 'today-leave'",
+                ).fetchone() == (1, None)
+        else:
+            assert leave is None
+    with sqlite3.connect(minimal_config.paths.db_path) as conn:
+        assert conn.execute(
+            "SELECT fired, send_attempts FROM pings WHERE id = 'today-history'",
+        ).fetchone() == (1, 3)
 
 
 def _run_morning_capture_digest(config: Config) -> str:
@@ -1096,10 +1264,11 @@ def test_morning_run_fetches_and_plans(
         assert minimal_config.calendars[0].name == call_args.kwargs["calendars"][0].name
         assert minimal_config.calendars[0].enabled == call_args.kwargs["calendars"][0].enabled
 
-        # ── Verify the fetch window matches logical_day_bounds_nyc, not midnight ─
+        # Calendar timeMax is exclusive: next local 02:00, not inclusive day end.
         from commutecompass.timeutil import logical_day_bounds_nyc
 
-        expected_start, expected_end = logical_day_bounds_nyc(now)
+        expected_start, _ = logical_day_bounds_nyc(now)
+        expected_end = expected_start + timedelta(days=1)
         actual_start = call_args.kwargs["start"]
         actual_end = call_args.kwargs["end"]
         assert actual_start == expected_start, (
@@ -1249,14 +1418,15 @@ def test_morning_run_cancel_stale_pings(
     tmp_path: Path,
     today_events: list[Event],
     sample_route: Route,
-    wide_today_window: None,
+    set_logical_day_clock: Callable[[datetime], datetime],
 ) -> None:
     """Events removed from the calendar have their pings cancelled."""
+    now = set_logical_day_clock(datetime(2026, 11, 4, 9, tzinfo=NYC_TZ))
     with patch("commutecompass.jobs.morning.CalendarClient") as mock_cal_class, patch(
         "commutecompass.jobs.morning.fetch_alerts"
     ) as mock_fetch_alerts, patch(
         "commutecompass.jobs.morning.build_notifier"
-    ) as mock_notifier_class:
+    ) as mock_notifier_class, patch("commutecompass.jobs.morning.now_nyc", return_value=now):
         mock_cal = MagicMock()
         mock_fetch_alerts.return_value = []
         mock_notifier = MagicMock()
@@ -1264,7 +1434,6 @@ def test_morning_run_cancel_stale_pings(
         mock_notifier_class.return_value = mock_notifier
         mock_cal_class.return_value = mock_cal
 
-        now = now_nyc()
         store = Store(minimal_config.paths.db_path)
         store.init_schema()
 
@@ -2498,6 +2667,142 @@ def test_poll_mta_fetch_cached_within_ttl(
         poll_mod._alerts_cache = None
 
 
+def _seed_alert_plans(config: Config, route: Route, now: datetime, count: int = 1) -> tuple[Store, list[Plan], Alert]:
+    store = Store(config.paths.db_path)
+    store.init_schema()
+    plans = []
+    for index in range(count):
+        start = now + timedelta(hours=3 + index)
+        event = Event(id=f"alert-event-{index}", calendar_id="test-cal", calendar_name="Test",
+                      title=f"Synthetic event {index}", start=start, end=start + timedelta(hours=1))
+        plan = Plan(event=event, route=route, leave_at=start - timedelta(minutes=45),
+                    prep_at=start - timedelta(minutes=65))
+        store.upsert_plan(plan)
+        plans.append(plan)
+    alert = Alert(id="shared-alert", header="Transit service changed", description="Test delay",
+                  affected_routes={"C"}, severity="WARNING")
+    return store, plans, alert
+
+
+def _changed_alert_plan(plan: Plan) -> Plan:
+    assert plan.leave_at is not None and plan.prep_at is not None
+    return plan.model_copy(update={"leave_at": plan.leave_at - timedelta(minutes=10),
+                                   "prep_at": plan.prep_at - timedelta(minutes=10)})
+
+
+@pytest.mark.parametrize("first_outcome", ["exception", "unchanged", "send-failure"])
+def test_poll_first_affected_event_without_delivery_cannot_hide_second_change(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+    first_outcome: str,
+) -> None:
+    """Processing A is not an announcement of B's changed commute."""
+    from commutecompass.format import format_service_update
+
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store, plans, alert = _seed_alert_plans(minimal_config, sample_route, now, count=2)
+    changed = {plan.event.id: _changed_alert_plan(plan) for plan in plans}
+    calls: list[str] = []
+
+    def planner(event: Event, **kwargs: object) -> Plan:
+        calls.append(event.id)
+        if event.id == plans[0].event.id:
+            if first_outcome == "exception":
+                raise RuntimeError("temporary planning failure")
+            if first_outcome == "unchanged":
+                return plans[0]
+        return changed[event.id]
+
+    notifier = FlakyNotifier(fail_times=1 if first_outcome == "send-failure" else 0)
+    poll_run(
+        minimal_config, store=store, fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda *args, **kw: [alert],
+        notifier=cast(TelegramNotifier, notifier), plan_event_fn=planner,
+        now_fn=lambda: now, ha_fetch_fn=lambda *args, **kw: None,
+    )
+    assert calls == [plan.event.id for plan in plans]
+    second = changed[plans[1].event.id]
+    assert second.route is not None
+    expected = format_service_update(second, alert, second.route)
+    assert notifier.sent[-1] == expected
+    assert len(notifier.sent) == (2 if first_outcome == "send-failure" else 1)
+    assert same_plan(store.get_plan(second.event.id), second)
+    assert store.is_alert_seen_today(alert.id)
+    sent = list(notifier.sent)
+    poll_run(
+        minimal_config, store=Store(minimal_config.paths.db_path),
+        fetch_alerts_fn=lambda **kw: [], alerts_affecting_route_fn=lambda *args, **kw: [],
+        notifier=cast(TelegramNotifier, notifier), plan_event_fn=planner,
+        now_fn=lambda: now + timedelta(minutes=1), ha_fetch_fn=lambda *args, **kw: None,
+    )
+    assert notifier.sent == sent  # B's success suppresses A's failed sibling intent too.
+
+
+def test_poll_failed_service_update_retries_durably_without_new_route_delta(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed route changes must not erase the failed notification intent."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store, plans, alert = _seed_alert_plans(minimal_config, sample_route, now)
+    changed = _changed_alert_plan(plans[0])
+    planner = MagicMock(return_value=changed)
+    failed = SpyNotifier(return_value=False)
+    poll_run(
+        minimal_config, store=store, notifier=cast(TelegramNotifier, failed),
+        fetch_alerts_fn=lambda **kw: [alert], alerts_affecting_route_fn=lambda *args, **kw: [alert],
+        plan_event_fn=planner, now_fn=lambda: now, ha_fetch_fn=lambda *args, **kw: None,
+    )
+    assert len(failed.sent) == 1  # No second dispatch pass retry in this invocation.
+    assert same_plan(store.get_plan(changed.event.id), changed)
+    assert not store.is_alert_seen_today(alert.id)
+    delivered = SpyNotifier()
+    # Fresh Store simulates a later process; no feed delta/planner is available.
+    reopened = Store(minimal_config.paths.db_path)
+    later = now + timedelta(minutes=1)
+    for _ in range(2):
+        poll_run(
+            minimal_config, store=reopened, notifier=cast(TelegramNotifier, delivered),
+            fetch_alerts_fn=lambda **kw: [], alerts_affecting_route_fn=lambda *args, **kw: [],
+            plan_event_fn=planner, now_fn=lambda: later, ha_fetch_fn=lambda *args, **kw: None,
+        )
+    assert delivered.sent == failed.sent
+    assert reopened.is_alert_seen_today(alert.id)
+    planner.assert_called_once()
+
+
+def test_overlapping_poll_cannot_duplicate_inflight_service_update(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second process entering while send is in flight cannot claim the intent."""
+    now = datetime(2026, 11, 4, 9, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store, plans, alert = _seed_alert_plans(minimal_config, sample_route, now)
+    changed = _changed_alert_plan(plans[0])
+    second_notifier = SpyNotifier()
+    outer = MagicMock()
+
+    def send_while_another_poll_runs(text: str) -> bool:
+        poll_run(
+            minimal_config, store=Store(minimal_config.paths.db_path),
+            notifier=cast(TelegramNotifier, second_notifier), fetch_alerts_fn=lambda **kw: [alert],
+            alerts_affecting_route_fn=lambda *args, **kw: [alert],
+            plan_event_fn=MockPlanner(changed), now_fn=lambda: now,
+            ha_fetch_fn=lambda *args, **kw: None,
+        )
+        return True
+
+    outer.send.side_effect = send_while_another_poll_runs
+    poll_run(
+        minimal_config, store=store, notifier=outer, fetch_alerts_fn=lambda **kw: [alert],
+        alerts_affecting_route_fn=lambda *args, **kw: [alert], plan_event_fn=MockPlanner(changed),
+        now_fn=lambda: now, ha_fetch_fn=lambda *args, **kw: None,
+    )
+    outer.send.assert_called_once()
+    assert second_notifier.sent == []
+    assert store.is_alert_seen_today(alert.id)
+
+
 # ── Daily alert dedup across events ───────────────────────────────────────────
 
 
@@ -2801,6 +3106,36 @@ def _seed_due_leave_plan(
         )
     )
     return store
+
+
+def test_poll_send_failure_after_concurrent_replacement_does_not_abort_or_revive(
+    minimal_config: Config, sample_route: Route, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement installed during send survives A's failed-release cleanup."""
+    now = datetime(2026, 11, 4, 12, tzinfo=NYC_TZ)
+    monkeypatch.setattr(timeutil, "now_nyc", lambda: now)
+    store, plans, _ = _seed_alert_plans(minimal_config, sample_route, now)
+    plan = plans[0]
+    store.schedule_ping(PingEntry(id="old", event_id=plan.event.id, kind="leave",
+                                  fire_at=now, message="old payload", send_attempts=1))
+    other = Store(minimal_config.paths.db_path)
+    notifier = MagicMock()
+
+    def fail_after_replacement(text: str) -> bool:
+        assert text == "old payload"
+        other.schedule_ping(PingEntry(id="new", event_id=plan.event.id, kind="leave",
+                                      fire_at=now + timedelta(minutes=5), message="new payload"))
+        return False
+
+    notifier.send.side_effect = fail_after_replacement
+    _poll_at(minimal_config, store, plan, notifier, now)
+    notifier.send.assert_called_once_with("old payload")
+    pending = other.pending_pings(now + timedelta(minutes=5))
+    assert [(ping.id, ping.message, ping.send_attempts) for ping in pending] == [
+        ("new", "new payload", 0),
+    ]
+    assert not store.release_ping("old")
+    assert store.get_job_heartbeat("poll") is not None
 
 
 def _poll_at(config: Config, store: Store, plan: Plan, notifier: object, at: datetime) -> None:
