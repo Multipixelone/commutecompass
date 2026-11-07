@@ -57,6 +57,19 @@ class AlarmConfigError(AlarmError):
     """Alarm misconfigured (HA not set up, malformed script id, …)."""
 
 
+class _IncompletePlanningError(AlarmError):
+    """Incomplete plan with a privacy-safe failure reason."""
+
+    def __init__(self, plan_error: str | None) -> None:
+        # Only fixed reasons may enter warnings; never expose raw plan errors.
+        self.reason = "missing_prep_at" if plan_error is None else {
+            "location_unresolved": "location_unresolved",
+            "no_route": "no_route",
+            "too_imminent": "too_imminent",
+        }.get(plan_error, "unknown_plan_error")
+        super().__init__(self.reason)
+
+
 @dataclass(frozen=True)
 class WakeResult:
     """Outcome of :func:`compute_wake`."""
@@ -171,7 +184,7 @@ def wake_for_day(
             elif now_utc is not None and p.event.start.astimezone(UTC) <= now_utc:
                 prep = p.event.start  # Historical uncertainty cannot cap a future nap.
             else:
-                raise AlarmError(f"incomplete planning for {day_start.date()}")
+                raise _IncompletePlanningError(p.error)
         assert prep is not None
         # Absolute arithmetic: same-zone datetime subtraction is wall-clock.
         candidate = _first_alarm(p, config) if p.error is None else None
@@ -215,6 +228,9 @@ def _compute_wake(
         nonlocal warning
         try:
             wake, plan = wake_for_day(day, plans, config, now=now)
+        except _IncompletePlanningError as exc:
+            warning = f"Alarm planning incomplete; degraded computation (cause={exc.reason})"
+            wake, plan = fallback_for_day(day, config.alarm.fallback_clock()), None
         except AlarmError:
             warning = "Alarm planning incomplete; degraded computation"
             wake, plan = fallback_for_day(day, config.alarm.fallback_clock()), None

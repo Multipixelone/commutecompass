@@ -144,9 +144,10 @@ def test_planner_exception_does_not_hide_manual(tmp_path: Path) -> None:
     assert result.warning and "planning failed" in result.warning
 
 
+@pytest.mark.parametrize("incomplete_plan", [False, True])
 @pytest.mark.parametrize("force", [False, True])
 def test_degraded_planning_retains_earlier_same_day_calendar_unless_forced(
-    tmp_path: Path, force: bool,
+    tmp_path: Path, force: bool, incomplete_plan: bool,
 ) -> None:
     cfg = _config(tmp_path)
     cfg.alarm.window.first_alarm_lead_minutes = 60
@@ -159,14 +160,19 @@ def test_degraded_planning_retains_earlier_same_day_calendar_unless_forced(
     def failed(day: datetime) -> list[Plan]:
         raise RuntimeError("unavailable")
 
+    provider = _provider({date(2026, 11, 5): [
+        _plan(_nyc(2026, 11, 5, 8), error="location_unresolved"),
+    ]}) if incomplete_plan else failed
     with patch("commutecompass.ha_client.call_service", return_value=True), patch(
         "commutecompass.notify.build_notifier",
     ):
-        result, ok = publish(cfg, now=_nyc(2026, 11, 4, 21), plans_for_day=failed)
+        result, ok = publish(cfg, now=_nyc(2026, 11, 4, 21), plans_for_day=provider)
     assert ok
     assert result.source == ("manual" if force else "retained")
     assert result.wake_at == (_nyc(2026, 11, 5, 9) if force else previous.wake_at)
-    assert result.warning
+    assert result.warning and "degraded computation" in result.warning
+    if incomplete_plan:
+        assert "cause=location_unresolved" in result.warning
 
 
 def test_degraded_planning_retains_today_before_tomorrow_forced_manual(tmp_path: Path) -> None:

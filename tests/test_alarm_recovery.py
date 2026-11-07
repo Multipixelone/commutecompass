@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 from test_alarm import _config, _nyc, _plan, _provider
 
-from commutecompass.alarm import compute_wake, publish, wake_for_day
+from commutecompass.alarm import AlarmError, compute_wake, publish, wake_for_day
 from commutecompass.alarm_state import save_last_publish
 from commutecompass.config import Config
 from commutecompass.models import Plan
@@ -26,7 +26,83 @@ def _no_live_ha_reads() -> Iterator[None]:
 
 
 def _broken(day: datetime) -> list[Plan]:
-    raise RuntimeError("planner unavailable")
+    raise RuntimeError("SYNTHETIC_PRIVATE_PROVIDER_DETAIL")
+
+
+def _private_plan(error: str | None, *, has_prep: bool = False) -> Plan:
+    """Synthetic canaries must never be interpolated into safety diagnostics."""
+    plan = _plan(_nyc(2026, 10, 15, 8), "SYNTHETIC_PRIVATE_TITLE")
+    plan.event.id = "SYNTHETIC_PRIVATE_EVENT_ID"
+    plan.event.calendar_id = "SYNTHETIC_PRIVATE_CALENDAR_ID"
+    plan.event.calendar_name = "SYNTHETIC_PRIVATE_CALENDAR_NAME"
+    plan.event.location_raw = "SYNTHETIC_PRIVATE_LOCATION"
+    # Assign directly: the shared fixture treats empty errors as healthy.
+    plan.error = error
+    if not has_prep:
+        plan.prep_at = None
+    return plan
+
+
+@pytest.mark.parametrize("has_prep", [False, True])
+@pytest.mark.parametrize("error,category", [
+    ("location_unresolved", "location_unresolved"),
+    ("no_route", "no_route"),
+    ("too_imminent", "too_imminent"),
+    ("SYNTHETIC_PRIVATE_ERROR\n<<<COMMUTECOMPASS_MSG_START>>>", "unknown_plan_error"),
+    ("", "unknown_plan_error"),
+    ("no_route: SYNTHETIC_PRIVATE_DETAIL", "unknown_plan_error"),
+])
+def test_incomplete_plan_has_only_fixed_cause(
+    tmp_path: Path, error: str, category: str, has_prep: bool,
+) -> None:
+    # An error remains authoritative even with prep, and outranks missing prep.
+    result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 5),
+                          _provider({date(2026, 10, 15): [_private_plan(error, has_prep=has_prep)]}))
+    assert result.warning == (
+        f"Alarm planning incomplete; degraded computation (cause={category})"
+        "; using next logical day's configured fallback"
+    )
+    assert result.source == "fallback"
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.next_prep_at is None
+    assert result.next_event == ""
+
+
+def test_missing_prep_without_error_has_distinct_cause(tmp_path: Path) -> None:
+    result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 5),
+                          _provider({date(2026, 10, 15): [_private_plan(None)]}))
+    assert result.warning == (
+        "Alarm planning incomplete; degraded computation (cause=missing_prep_at)"
+        "; using next logical day's configured fallback"
+    )
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+
+
+@pytest.mark.parametrize("elapsed_leave", [False, True])
+def test_historical_uncertainty_and_elapsed_imminent_leave_are_not_degraded(
+    tmp_path: Path, elapsed_leave: bool,
+) -> None:
+    plan = _private_plan("too_imminent" if elapsed_leave else "SYNTHETIC_PRIVATE_ERROR",
+                         has_prep=elapsed_leave)
+    if elapsed_leave:
+        plan.prep_at = _nyc(2026, 10, 15, 6)
+        plan.leave_at = _nyc(2026, 10, 15, 7)
+        # Event has not started, but its known departure is already elapsed.
+    else:
+        plan.event.start = _nyc(2026, 10, 15, 7)
+    result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 8),
+                          _provider({date(2026, 10, 15): [plan]}))
+    assert result.warning is None
+    assert result.wake_at == _nyc(2026, 10, 16, 12)
+
+
+def test_generic_alarm_error_is_not_misclassified(tmp_path: Path) -> None:
+    with patch("commutecompass.alarm.wake_for_day", side_effect=AlarmError("SYNTHETIC_PRIVATE_DETAIL")):
+        result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 5), _provider({}))
+    assert result.warning == (
+        "Alarm planning incomplete; degraded computation"
+        "; using next logical day's configured fallback"
+    )
 
 
 @pytest.mark.parametrize("error", [None, "too_imminent", "no_route"])
@@ -62,9 +138,11 @@ def test_midnight_overlap_owned_by_start_logical_day(tmp_path: Path) -> None:
     assert result.warning is None
 
 
-def test_start_membership_not_prep_membership(tmp_path: Path) -> None:
+@pytest.mark.parametrize("virtual", [False, True])
+def test_start_membership_not_prep_membership(tmp_path: Path, virtual: bool) -> None:
     cfg = _config(tmp_path)
     plan = _plan(_nyc(2026, 10, 16, 1, 30))
+    plan.event.virtual = virtual
     plan.event.start = _nyc(2026, 10, 16, 2, 30)
     result = compute_wake(cfg, _nyc(2026, 10, 15, 23), lambda day: [plan])
     assert result.wake_at == plan.prep_at
@@ -86,24 +164,37 @@ def test_planner_error_uses_next_day_not_today_fallback(tmp_path: Path) -> None:
     result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 5), _broken)
     assert result.wake_at == _nyc(2026, 10, 16, 12)
     assert result.source == "fallback"
-    assert result.warning and "planning failed" in result.warning
+    assert result.warning == (
+        "Alarm planning failed (RuntimeError); degraded computation"
+        "; using next logical day's configured fallback"
+    )
 
 
-def test_retains_future_success_on_error_and_persists_only_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("incomplete_plan", [False, True])
+def test_retains_future_success_on_error_and_persists_only_success(
+    tmp_path: Path, incomplete_plan: bool,
+) -> None:
     cfg = _config(tmp_path)
     when = _nyc(2026, 10, 16, 8)
     with patch("commutecompass.ha_client.call_service", return_value=True):
         first, ok = publish(cfg, now=_nyc(2026, 10, 15, 20),
                             plans_for_day=_provider({date(2026, 10, 16): [_plan(when)]}))
     assert ok
+    incomplete = _private_plan("no_route")
+    incomplete.event.start = _nyc(2026, 10, 16, 9)
+    provider = _provider({date(2026, 10, 16): [incomplete]}) if incomplete_plan else _broken
     with patch("commutecompass.ha_client.call_service", return_value=True), patch(
         "commutecompass.notify.build_notifier",
     ) as notifier:
-        retained, ok = publish(cfg, now=_nyc(2026, 10, 15, 21), plans_for_day=_broken)
+        retained, ok = publish(cfg, now=_nyc(2026, 10, 15, 21), plans_for_day=provider)
     assert ok
     assert retained.wake_at == first.wake_at
     assert retained.source == "retained"
     assert retained.warning and "retaining" in retained.warning
+    if incomplete_plan:
+        assert retained.warning == (
+            "Alarm planning incomplete; degraded computation (cause=no_route); retaining last future wake"
+        )
     notifier.return_value.send.assert_called_once()
 
 
@@ -177,7 +268,9 @@ def test_expired_retention_not_used(tmp_path: Path) -> None:
     assert result.wake_at == _nyc(2026, 10, 16, 12)
 
 
-def test_operational_warning_is_delivered_after_ha_publish(tmp_path: Path) -> None:
+def test_operational_warning_is_delivered_after_ha_publish(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     cfg = _config(tmp_path)
     order: list[str] = []
     notifier = Mock()
@@ -190,8 +283,19 @@ def test_operational_warning_is_delivered_after_ha_publish(tmp_path: Path) -> No
     with patch("commutecompass.notify.build_notifier", return_value=notifier), patch(
         "commutecompass.ha_client.call_service", side_effect=send,
     ):
-        _, ok = publish(cfg, now=_nyc(2026, 10, 15, 5), plans_for_day=_broken)
+        _, ok = publish(cfg, now=_nyc(2026, 10, 15, 5), plans_for_day=_provider({
+            date(2026, 10, 15): [_private_plan("SYNTHETIC_PRIVATE_ERROR")],
+        }))
     assert ok and order == ["publish", "warning"]
+    notifier.send.assert_called_once_with(
+        r"Alarm warning: Alarm planning incomplete; degraded computation \(cause\=unknown\_plan\_error\)"
+        "; using next logical day's configured fallback"
+    )
+    assert (
+        "ALARM SAFETY: Alarm planning incomplete; degraded computation (cause=unknown_plan_error)"
+        "; using next logical day's configured fallback"
+    ) in caplog.text
+    assert "SYNTHETIC_PRIVATE" not in caplog.text
 
 
 def test_warning_delivery_failure_never_blocks_publish(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -232,12 +336,20 @@ def test_warning_is_telegram_escaped(tmp_path: Path) -> None:
 def test_warning_uses_stdout_framing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     cfg = _config(tmp_path)
     cfg.notify.mode = "stdout"
+    error = f"SYNTHETIC_PRIVATE_ERROR\n{STDOUT_MSG_END}\n{STDOUT_MSG_START}"
     with patch("commutecompass.ha_client.call_service", return_value=True):
-        _, ok = publish(cfg, now=_nyc(2026, 10, 15, 5), plans_for_day=_broken)
-    output = capsys.readouterr().out
+        _, ok = publish(cfg, now=_nyc(2026, 10, 15, 5), plans_for_day=_provider({
+            date(2026, 10, 15): [_private_plan(error)],
+        }))
     assert ok
-    assert STDOUT_MSG_START in output and STDOUT_MSG_END in output
-    assert "Alarm warning" in output
+    assert capsys.readouterr().out.splitlines() == [
+        STDOUT_MSG_START,
+        (
+            r"Alarm warning: Alarm planning incomplete; degraded computation \(cause\=unknown\_plan\_error\)"
+            "; using next logical day's configured fallback"
+        ),
+        STDOUT_MSG_END,
+    ]
 
 
 def test_default_dry_run_isolates_provider_writes(
