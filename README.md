@@ -31,7 +31,7 @@ A self-hosted [Python](https://www.python.org/) service that pulls events from G
 - [`test-notify`](./src/commutecompass/notify.py) — emit a test message via the configured notifier
 - [`where`](./src/commutecompass/cli.py) — print the latest stored current location
 - [`alarm`](./src/commutecompass/cli.py) — wake and nap alarm controls: `publish`, `status`, `wake`, `nap`, `skip`, `on`, `off`, `daemon`
-- [`alarm wake --leave HH:MM [--date YYYY-MM-DD] [--force]`](./src/commutecompass/cli.py) — persist a single-use NYC departure-anchored wake window; `alarm wake --clear` removes the override and republishes the ordinary schedule (also available through `commutecompass-skill`)
+- [`alarm wake --leave HH:MM [--date YYYY-MM-DD] [--force] [--snoozes N]`](./src/commutecompass/cli.py) — persist a single-use NYC wake deadline. Explicit counts (0–12) use 390-second snoozes: `--leave 10:00 --snoozes 3` selects first ring 09:40:30 and final 10:00:00; zero is final-only. Omission preserves configured timing. A past first ring requires explicit `--allow-late`; `--force` only overrides calendar conflicts. `--clear` removes the override and republishes the ordinary schedule (also available through `commutecompass-skill`). See [timing and required HA integration](./docs/alarm-design.md#explicit-manual-snooze-budget) before use.
 - [`gtfs-refresh`](./src/commutecompass/cli.py) — download static subway GTFS and rebuild the realtime identity index
 - [`bot`](./src/commutecompass/cli.py) — Telegram bot mode (stub)
 

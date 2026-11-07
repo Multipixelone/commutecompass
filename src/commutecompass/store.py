@@ -218,6 +218,9 @@ class Store:
                     last_success TEXT NOT NULL
                 );
             """)
+            alarm_cols = {row[1] for row in conn.execute("PRAGMA table_info(alarm_state)")}
+            if "manual_snoozes" not in alarm_cols:
+                conn.execute("ALTER TABLE alarm_state ADD COLUMN manual_snoozes INTEGER")
             # Migrate adjust_log: add columns required for `undo` (single-step
             # restoration of the exact previous prep_at + undone flag).
             adj_cols = {row[1] for row in conn.execute("PRAGMA table_info(adjust_log)").fetchall()}
@@ -321,7 +324,7 @@ class Store:
 
     def load_alarm_manual(
         self, now: datetime, *, dry_run: bool = False
-    ) -> tuple[datetime, bool, int] | None:
+    ) -> tuple[datetime, bool, int, int | None] | None:
         """Read deadline, force, and identity; retire expiry unless dry-run."""
         now_utc = _alarm_instant(now)
         if dry_run:
@@ -337,7 +340,7 @@ class Store:
                     and datetime.fromisoformat(row["manual_deadline"]) <= now_utc
                 ):
                     conn.execute("""
-                        UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                        UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0, manual_snoozes = NULL,
                             bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
                         WHERE id = 1
                     """)
@@ -345,30 +348,44 @@ class Store:
         if row is None or row["manual_deadline"] is None:
             return None
         deadline = datetime.fromisoformat(row["manual_deadline"])
+        from commutecompass.alarm_contract import validate_manual_snoozes
+
+        keys = row.keys()
+        count = row["manual_snoozes"] if "manual_snoozes" in keys else None
+        if count is not None:
+            count = validate_manual_snoozes(count)
         return (
-            (deadline, bool(row["manual_force"]), int(row["manual_version"]))
+            (deadline, bool(row["manual_force"]), int(row["manual_version"]), count)
             if deadline > now_utc else None
         )
 
-    def save_alarm_manual(self, deadline_at: datetime, force: bool = False) -> None:
+    def save_alarm_manual(
+        self, deadline_at: datetime, force: bool = False, manual_snoozes: int | None = None,
+    ) -> None:
         """Replace the manual intent and invalidate every previous binding."""
+        from commutecompass.alarm_contract import validate_manual_snoozes
+
+        if manual_snoozes is not None:
+            validate_manual_snoozes(manual_snoozes)
         deadline = _alarm_instant(deadline_at).isoformat()
         with self._connect() as conn:
             conn.execute("""
-                INSERT INTO alarm_state (id, manual_deadline, manual_force, manual_version)
-                VALUES (1, ?, ?, 1)
+                INSERT INTO alarm_state (id, manual_deadline, manual_force, manual_version,
+                                         manual_snoozes)
+                VALUES (1, ?, ?, 1, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     manual_deadline = excluded.manual_deadline,
                     manual_force = excluded.manual_force,
+                    manual_snoozes = excluded.manual_snoozes,
                     manual_version = alarm_state.manual_version + 1,
                     bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
-            """, (deadline, int(force)))
+            """, (deadline, int(force), manual_snoozes))
 
     def clear_alarm_manual(self) -> None:
         """Clear intent and binding, preserving the last successful publication."""
         with self._connect() as conn:
             conn.execute("""
-                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0, manual_snoozes = NULL,
                     bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
                 WHERE id = 1
             """)
@@ -415,7 +432,7 @@ class Store:
         wake = _alarm_instant(wake_at).isoformat()
         with self._connect() as conn:
             result = conn.execute("""
-                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0,
+                UPDATE alarm_state SET manual_deadline = NULL, manual_force = 0, manual_snoozes = NULL,
                     bound_wake = NULL, bound_deadline = NULL, bound_version = NULL
                 WHERE id = 1 AND bound_wake = ? AND manual_deadline IS NOT NULL
                     AND manual_version = bound_version

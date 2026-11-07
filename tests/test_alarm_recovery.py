@@ -224,13 +224,23 @@ def test_initial_upgrade_preserves_future_live_wake(tmp_path: Path, contract: Li
     raw = (serialize_schedule(new_schedule(issued_at=now, kind="legacy", wake_at=wake,
                                            deadline_at=None, next_prep_at=None))
            if contract == "v1" else wake.isoformat())
-    with patch("commutecompass.alarm.fetch_entity_state", return_value=raw) as read, patch(
+    live_entity = cfg.alarm.schedule_entity if contract == "v1" else cfg.alarm.wake_entity
+
+    def fetch(_base_url: str, _token: str, entity: str) -> str | None:
+        # The policy helper is empty on a pre-extension installation, not a wake timestamp.
+        return raw if entity == live_entity else None
+
+    with patch("commutecompass.alarm.fetch_entity_state", side_effect=fetch) as read, patch(
         "commutecompass.ha_client.call_service", return_value=True,
     ), patch("commutecompass.alarm.publish_v1"), patch("commutecompass.notify.build_notifier"):
         result, ok = publish(cfg, now=now, plans_for_day=_broken)
     assert ok and result.source == "retained"
     assert result.wake_at.astimezone(UTC) == wake.astimezone(UTC)
-    read.assert_called_once()
+    entities_read = [call.args[2] for call in read.call_args_list]
+    assert entities_read.count(live_entity) == 1
+    assert entities_read == ([live_entity] if contract == "v1" else [
+        live_entity, cfg.alarm.window.manual_policy_entity,
+    ])
 
 
 def test_existing_history_never_resurrects_live_manual_after_clear(tmp_path: Path) -> None:

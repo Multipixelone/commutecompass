@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import click
 from pydantic import ValidationError
 
+from commutecompass.alarm_contract import MANUAL_SNOOZE_SECONDS, MAX_MANUAL_SNOOZES
 from commutecompass.config import ConfigError, format_validation_error
 from commutecompass.joblock import JobLock, LockHeld, lock_path_for
 from commutecompass.models import CalendarSpec
@@ -297,6 +298,10 @@ def _alarm_publish_result(cfg: Config, *, dry_run: bool = False) -> None:
     nxt = result.next_prep_at.isoformat() if result.next_prep_at else "-"
     suffix = " (dry-run — HA push skipped)" if dry_run else ""
     click.echo(f"Wake: {result.wake_at.isoformat()} ({result.source}) next_prep_at={nxt}{suffix}")
+    if result.manual_snoozes is not None:
+        click.echo(f"Selected manual: first ring {result.wake_at.isoformat()}, "
+                   f"final {result.deadline_at.isoformat() if result.deadline_at else '-'}, "
+                   f"{result.manual_snoozes} accepted snoozes at 390-second intervals")
     if result.warning:
         click.echo(f"Warning: {result.warning}", err=True)
     if not dry_run and not ok:
@@ -308,10 +313,19 @@ def _alarm_publish_result(cfg: Config, *, dry_run: bool = False) -> None:
 @click.option("--leave", help="Leave deadline in NYC time (HH:MM, 9am or 9:30am).")
 @click.option("--date", "date_value", help="NYC deadline date (YYYY-MM-DD).")
 @click.option("--force", is_flag=True, help="Select this deadline even over an earlier calendar wake.")
+@click.option(
+    "--snoozes", type=click.IntRange(0, MAX_MANUAL_SNOOZES),
+    help="Accepted 390-second snoozes before the exact final (0..12).",
+)
+@click.option(
+    "--allow-late", is_flag=True,
+    help="Allow an explicit snooze window whose first ring is past.",
+)
 @click.option("--clear", is_flag=True, help="Clear the manual deadline and republish the normal wake.")
 @click.pass_context
 def alarm_wake(
     ctx: click.Context, leave: str | None, date_value: str | None, force: bool, clear: bool,
+    snoozes: int | None = None, allow_late: bool = False,
 ) -> None:
     """Set a single-use leave deadline, or clear it, and publish immediately."""
     from datetime import date
@@ -328,8 +342,11 @@ def alarm_wake(
     if not cfg.alarm.window.enabled:
         click.echo("Error: alarm wake requires [alarm.window].enabled", err=True)
         sys.exit(EXIT_USAGE)
-    if (clear and (leave is not None or date_value is not None or force)) or (not clear and not leave):
-        click.echo("Error: use --leave TIME [--date YYYY-MM-DD] [--force] OR --clear", err=True)
+    if ((clear and (leave is not None or date_value is not None or force
+                    or snoozes is not None or allow_late))
+            or (not clear and not leave) or (allow_late and snoozes is None)):
+        click.echo("Error: use --leave TIME [--date YYYY-MM-DD] [--force] "
+                   "[--snoozes 0..12 [--allow-late]] OR --clear", err=True)
         sys.exit(EXIT_USAGE)
     if clear:
         clear_manual(cfg)
@@ -339,11 +356,25 @@ def alarm_wake(
             if day is not None and day.isoformat() != date_value:
                 raise ValueError("date must be YYYY-MM-DD")
             assert leave is not None
-            deadline = parse_manual_deadline(leave, day, now_nyc())
+            from datetime import UTC
+
+            from commutecompass.alarm import manual_first_alarm
+
+            now = now_nyc()
+            deadline = parse_manual_deadline(leave, day, now)
+            intent = ManualWake(deadline_at=deadline, force=force, manual_snoozes=snoozes)
+            first = manual_first_alarm(intent, cfg)
+            if (snoozes is not None and first.astimezone(UTC) < now.astimezone(UTC)
+                    and not allow_late):
+                raise ValueError("calculated first ring is in the past; use --allow-late explicitly")
         except ValueError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(EXIT_USAGE)
-        save_manual(cfg, ManualWake(deadline_at=deadline, force=force))
+        save_manual(cfg, intent)
+        if snoozes is not None:
+            click.echo(f"Pending manual: first ring {first.isoformat()}, final {deadline.isoformat()}, "
+                       f"{snoozes} accepted snoozes at 390-second intervals; "
+                       f"force={'yes' if force else 'no'} (selection/conflicts follow)")
     # Persistence precedes HA: a failed push remains pending for the next publish.
     _alarm_publish_result(cfg)
 
@@ -374,7 +405,7 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
     attrs = states.get(a.next_alarm_entity, {}).get("attributes")
     attrs = attrs if isinstance(attrs, dict) else {}
     hb = parse_ha_datetime(st(a.heartbeat_entity))
-    from datetime import UTC, timedelta
+    from datetime import UTC
 
     from commutecompass.alarm_state import load_manual
     from commutecompass.timeutil import now_nyc, to_nyc
@@ -383,9 +414,9 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
     manual_info: dict[str, object] | None = None
     selected_manual = False
     if manual is not None:
-        manual_wake = manual.deadline_at.astimezone(UTC) - timedelta(
-            minutes=a.window.first_alarm_lead_minutes,
-        )
+        from commutecompass.alarm import manual_first_alarm
+
+        manual_wake = manual_first_alarm(manual, cfg).astimezone(UTC)
         selected_manual = (
             st(a.enabled_entity) == "on" and nxt is not None
             and nxt.astimezone(UTC) == manual_wake and str(attrs.get("kind", "")) != "nap"
@@ -394,9 +425,25 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
             nxt is not None and nxt.astimezone(UTC) < manual_wake
             and str(attrs.get("kind", "")) != "nap"
         )
+        if manual.manual_snoozes is not None:
+            from commutecompass.alarm_daemon import inputs_from_states
+
+            selected = inputs_from_states(states, a)
+            selected_manual = (
+                st(a.enabled_entity) == "on" and selected.wake_at is not None
+                and selected.wake_at.astimezone(UTC) == manual_wake
+                and selected.manual_snoozes == manual.manual_snoozes
+                and selected.deadline_at is not None
+                and selected.deadline_at.astimezone(UTC) == manual.deadline_at.astimezone(UTC)
+            )
+            conflict = (selected.deadline_at is not None
+                        and selected.deadline_at.astimezone(UTC) < manual.deadline_at.astimezone(UTC)
+                        and selected.manual_snoozes is None)
         manual_info = {
             "deadline_at": manual.deadline_at.isoformat(),
             "wake_at": to_nyc(manual_wake).isoformat(),
+            "manual_snoozes": manual.manual_snoozes,
+            "snooze_seconds": MANUAL_SNOOZE_SECONDS if manual.manual_snoozes is not None else None,
             "force": manual.force, "selected": selected_manual, "conflict": conflict,
         }
     enabled_state = st(a.enabled_entity)
@@ -426,7 +473,14 @@ def alarm_status(ctx: click.Context, as_json: bool) -> None:
             f"force={'yes' if manual.force else 'no'}, "
             f"conflict={'yes' if manual_info['conflict'] else 'no'}"
         )
-        click.echo(f"Pending manual: leave {to_nyc(manual.deadline_at).isoformat()} ({flags})")
+        policy = (f", {manual.manual_snoozes} accepted snoozes at 390-second intervals"
+                  if manual.manual_snoozes is not None else "")
+        if manual.manual_snoozes is None:
+            click.echo(f"Pending manual: leave {to_nyc(manual.deadline_at).isoformat()} ({flags})")
+        else:
+            click.echo(f"Pending manual: first ring {manual_info['wake_at']}, "
+                       f"final {manual.deadline_at.isoformat()}{policy} "
+                       f"(selected={'yes' if selected_manual else 'no'}, {flags})")
     if payload["event"]:
         click.echo(f"Event: {payload['event']}")
     click.echo(f"Daemon: {payload['daemon_state'] or 'unknown'} heartbeat={payload['heartbeat'] or 'never'}")

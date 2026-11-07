@@ -29,10 +29,12 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal
 
 from commutecompass.alarm_contract import (
+    MANUAL_SNOOZE_SECONDS,
     ScheduleError,
     ScheduleSnapshot,
     build_publish_payload,
     new_schedule,
+    validate_manual_snoozes,
 )
 from commutecompass.timeutil import NYC_TZ, logical_day_bounds_nyc, now_nyc, to_nyc
 
@@ -89,6 +91,17 @@ class WakeResult:
     manual_deadline_at: datetime | None = None
     # Preserve provenance through retention: fallback is never a calendar conflict.
     deadline_source: Literal["calendar", "fallback", "manual"] | None = None
+    manual_snoozes: int | None = None
+
+
+def manual_first_alarm(manual: ManualWake, config: Config) -> datetime:
+    """Explicit bounded windows use elapsed seconds, not either global lead."""
+    if manual.manual_snoozes is None:
+        return _window_start(manual.deadline_at, config)
+    count = validate_manual_snoozes(manual.manual_snoozes)
+    return (manual.deadline_at.astimezone(UTC) - timedelta(
+        seconds=count * MANUAL_SNOOZE_SECONDS,
+    )).astimezone(NYC_TZ)
 
 
 def _effective_deadline(
@@ -284,7 +297,7 @@ def _compute_wake(
                         "; force selects manual" if manual.force else "; calendar selected"
                     )
                 if not earlier or manual.force:
-                    return _window_start(manual.deadline_at, config), None
+                    return manual_first_alarm(manual, config), None
                 if plan is not None:
                     return (_first_alarm(plan, config) or wake), plan
         return wake, plan
@@ -353,6 +366,7 @@ def _compute_wake(
         warning=warning,
         manual_deadline_at=bound_manual.deadline_at if bound_manual else None,
         deadline_source=deadline_source,
+        manual_snoozes=bound_manual.manual_snoozes if is_manual and bound_manual else None,
     )
 
 
@@ -365,6 +379,7 @@ def _stored_result(result: WakeResult) -> dict[str, object]:
         "deadline_source": result.deadline_source or (
             result.source if result.source in ("calendar", "fallback", "manual") else None
         ),
+        "manual_snoozes": result.manual_snoozes,
         "manual_deadline_at": (result.manual_deadline_at.isoformat()
                                if result.manual_deadline_at else None),
     }
@@ -389,7 +404,19 @@ def _retained(config: Config, now: datetime, manual: ManualWake | None) -> WakeR
             return dt
         wake = stamp("wake_at")
         bound = stamp("manual_deadline_at")
-        if wake is None or wake.astimezone(UTC) <= now.astimezone(UTC):
+        raw_count = data.get("manual_snoozes")
+        count = validate_manual_snoozes(raw_count) if raw_count is not None else None
+        origin = data.get("deadline_source", data.get("source"))
+        if origin == "manual" and manual is not None and manual.manual_snoozes != count:
+            return None
+        if count is not None and (
+                manual is None or manual.manual_snoozes != count
+                or data.get("deadline_source", data.get("source")) != "manual"
+                or not _same_instant(bound, manual.deadline_at)):
+            return None
+        if wake is None or (wake.astimezone(UTC) <= now.astimezone(UTC) and not (
+                count is not None and bound is not None
+                and bound.astimezone(UTC) > now.astimezone(UTC))):
             return None
         if data.get("source") == "manual" and bound is None:
             return None
@@ -398,9 +425,12 @@ def _retained(config: Config, now: datetime, manual: ManualWake | None) -> WakeR
                 or bound.astimezone(UTC) <= now.astimezone(UTC)):
             return None
         deadline = stamp("deadline_at")
-        if deadline is not None and deadline.astimezone(UTC) - wake.astimezone(UTC) != timedelta(
-            minutes=config.alarm.window.first_alarm_lead_minutes
-        ):
+        expected_lead = (timedelta(seconds=count * MANUAL_SNOOZE_SECONDS) if count is not None
+                         else timedelta(minutes=config.alarm.window.first_alarm_lead_minutes))
+        if (deadline is not None
+                and deadline.astimezone(UTC) - wake.astimezone(UTC) != expected_lead):
+            return None
+        if count is not None and (deadline is None or not _same_instant(deadline, bound or wake)):
             return None
         origin = data.get("deadline_source", data.get("source"))
         if "deadline_source" not in data and origin == "retained" and deadline is not None:
@@ -419,7 +449,7 @@ def _retained(config: Config, now: datetime, manual: ManualWake | None) -> WakeR
                           next_prep_at=stamp("next_prep_at"),
                           next_event=str(data.get("next_event", "")),
                           deadline_at=deadline, manual_deadline_at=bound,
-                          deadline_source=deadline_source)
+                          deadline_source=deadline_source, manual_snoozes=count)
     except Exception:  # noqa: BLE001 — corrupt/unavailable state must not prevent fallback
         logger.warning("Could not read a valid retained alarm")
         return None
@@ -471,9 +501,9 @@ def compute_wake(
                 <= tomorrow.astimezone(UTC)):
             manual_day, _ = logical_day_bounds_nyc(manual.deadline_at)
             return WakeResult(
-                _window_start(manual.deadline_at, config), manual_day.date(), "manual",
+                manual_first_alarm(manual, config), manual_day.date(), "manual",
                 deadline_at=manual.deadline_at, manual_deadline_at=manual.deadline_at,
-                deadline_source="manual",
+                deadline_source="manual", manual_snoozes=manual.manual_snoozes,
                 warning=warning + "; publishing usable manual deadline",
             )
         wake, deadline = _fallback_window(tomorrow, config)
@@ -484,7 +514,9 @@ def compute_wake(
         )
 
 
-def _retain_live_on_upgrade(config: Config, now: datetime, result: WakeResult) -> WakeResult:
+def _retain_live_on_upgrade(
+    config: Config, now: datetime, result: WakeResult, manual: ManualWake | None = None,
+) -> WakeResult:
     """Read HA only when no publication history exists (first upgraded run).
 
     Never resurrect a rejected stored manual selection after clear/expiry. A
@@ -501,6 +533,7 @@ def _retain_live_on_upgrade(config: Config, now: datetime, result: WakeResult) -
         base_url, token = require_ha(config)
         deadline: datetime | None = None
         next_prep: datetime | None = None
+        count: int | None = None
         if config.alarm.schedule_contract == "v1":
             raw = fetch_entity_state(base_url, token, config.alarm.schedule_entity)
             if raw is None:
@@ -508,18 +541,41 @@ def _retain_live_on_upgrade(config: Config, now: datetime, result: WakeResult) -
             schedule = parse_schedule(
                 raw, first_lead_seconds=config.alarm.window.first_alarm_lead_minutes * 60,
             )
+            count = schedule.manual_snoozes
             wake = schedule.wake_at
             deadline, next_prep = schedule.deadline_at, schedule.next_prep_at
+            if count is not None and (manual is None or manual.manual_snoozes != count
+                    or not _same_instant(deadline, manual.deadline_at)):
+                # Bootstrap cannot invent or resurrect an explicit manual intent.
+                return result
         else:
             raw = fetch_entity_state(base_url, token, config.alarm.wake_entity)
             if raw is None:
                 return result
             wake = to_nyc(datetime.fromisoformat(raw))
+            policy_raw = fetch_entity_state(
+                base_url, token, config.alarm.window.manual_policy_entity,
+            )
+            if policy_raw not in (None, "", "unknown", "unavailable"):
+                from commutecompass.alarm_daemon import _manual_policy
+
+                deadline_raw = fetch_entity_state(
+                    base_url, token, config.alarm.window.deadline_utc_entity,
+                )
+                deadline = datetime.fromisoformat(deadline_raw) if deadline_raw else None
+                count, known = _manual_policy(policy_raw, wake, deadline)
+                if (not known or count is None or manual is None
+                        or manual.manual_snoozes != count
+                        or not _same_instant(deadline, manual.deadline_at)):
+                    return result
         if wake is None or wake.astimezone(UTC) <= now.astimezone(UTC):
             return result
         day, _ = logical_day_bounds_nyc(deadline or wake)
         return WakeResult(wake, day.date(), "retained", next_prep_at=next_prep,
-                          deadline_at=deadline,
+                          deadline_at=deadline, manual_snoozes=count,
+                          deadline_source="manual" if count is not None else None,
+                          manual_deadline_at=(manual.deadline_at
+                                              if count is not None and manual else None),
                           warning=result.warning + "; retaining future live HA wake")
     except Exception:  # noqa: BLE001 — optional bootstrap recovery fails open to safe fallback
         logger.warning("Could not read a valid future live HA alarm")
@@ -590,6 +646,7 @@ def build_payload(result: WakeResult, *, window: bool = False) -> dict[str, obje
         payload["deadline_at"] = (
             result.deadline_at.isoformat() if result.deadline_at else ""
         )
+    payload["manual_snoozes"] = result.manual_snoozes if result.manual_snoozes is not None else ""
     return payload
 
 
@@ -609,7 +666,9 @@ def build_schedule(
     try:
         return new_schedule(
             issued_at=issued_at,
-            kind="commute" if result.deadline_at is not None else "legacy",
+            kind=("manual" if result.manual_snoozes is not None else
+                  "commute" if result.deadline_at is not None else "legacy"),
+            manual_snoozes=result.manual_snoozes,
             wake_at=result.wake_at,
             deadline_at=result.deadline_at,
             next_prep_at=result.next_prep_at,
@@ -765,7 +824,7 @@ def publish(
             scratch.cleanup()
 
     if not dry_run:
-        result = _retain_live_on_upgrade(config, _now, result)
+        result = _retain_live_on_upgrade(config, _now, result, manual)
 
     def record_success() -> None:
         try:

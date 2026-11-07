@@ -272,6 +272,7 @@ def test_publish_calls_ha_script(tmp_path: Path) -> None:
         "next_event": "Class",
         # Prep-only plan without a leave deadline opens no wake window.
         "deadline_at": "",
+        "manual_snoozes": "",  # Clear any prior explicit manual policy.
     }
     assert result.wake_at == prep
 
@@ -896,8 +897,8 @@ def test_fetch_entity_state_parses_and_fails_closed() -> None:
         assert get.call_args.args[0] == "http://ha/api/states/input_text.x"
 
 
-def test_legacy_default_publish_unchanged(tmp_path: Path) -> None:
-    """Default contract keeps the legacy script and never reads the v1 helper."""
+def test_legacy_default_publish_keeps_script_and_clears_manual_policy(tmp_path: Path) -> None:
+    """Default publication keeps legacy fields and clears any old manual policy."""
     cfg = _config(tmp_path)
     assert cfg.alarm.schedule_contract == "legacy"
     with patch("commutecompass.ha_client.call_service", return_value=True) as cs, patch(
@@ -906,7 +907,9 @@ def test_legacy_default_publish_unchanged(tmp_path: Path) -> None:
         publish(cfg, now=_nyc(2026, 10, 15, 5, 0), plans_for_day=_provider({}))
     fetch.assert_not_called()
     assert cs.call_args.args[3] == "commute_publish_alarm"
-    assert set(cs.call_args.kwargs["data"]) == {"wake_at", "next_prep_at", "next_event", "deadline_at"}
+    data = cs.call_args.kwargs["data"]
+    assert set(data) == {"wake_at", "next_prep_at", "next_event", "deadline_at", "manual_snoozes"}
+    assert data["manual_snoozes"] == ""
 
 
 def test_v1_planner_failure_publishes_safe_fallback_not_clear(tmp_path: Path) -> None:

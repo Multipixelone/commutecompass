@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 
+from commutecompass.alarm_contract import validate_manual_snoozes
 from commutecompass.config import Config
 from commutecompass.store import Store
 from commutecompass.timeutil import NYC_TZ
@@ -20,8 +21,14 @@ from commutecompass.timeutil import NYC_TZ
 class ManualWake:
     deadline_at: datetime
     force: bool = False
+    manual_snoozes: int | None = None
+
     # A loaded intent carries its durable identity without changing value equality.
     _version: int | None = field(default=None, repr=False, compare=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.manual_snoozes is not None:
+            validate_manual_snoozes(self.manual_snoozes)
 
 
 def _aware(value: datetime) -> datetime:
@@ -41,13 +48,13 @@ def load_manual(config: Config, now: datetime, *, dry_run: bool = False) -> Manu
     """Load live intent, expiring deadline <= now (without writes in dry-run)."""
     _aware(now)
     value = _store(config, initialize=not dry_run).load_alarm_manual(now, dry_run=dry_run)
-    return ManualWake(value[0].astimezone(NYC_TZ), value[1], _version=value[2]) if value else None
+    return ManualWake(value[0].astimezone(NYC_TZ), value[1], value[3], _version=value[2]) if value else None
 
 
 def save_manual(config: Config, manual: ManualWake) -> None:
     """Replace intent, invalidating any previous wake binding even for equal values."""
     _aware(manual.deadline_at)
-    _store(config).save_alarm_manual(manual.deadline_at, manual.force)
+    _store(config).save_alarm_manual(manual.deadline_at, manual.force, manual.manual_snoozes)
 
 
 def clear_manual(config: Config) -> None:

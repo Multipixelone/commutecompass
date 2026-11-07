@@ -578,4 +578,5 @@ def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> 
         "next_prep_at": "",
         "next_event": "",
         "deadline_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
+        "manual_snoozes": "",  # Fallback cannot inherit a manual alarm's budget.
     }

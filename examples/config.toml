@@ -267,15 +267,23 @@ cache_path = ""                  # empty = <db dir>/alarm-cache.json
 # lights10:35, first10:45, final11:45 (advance0: 10:50 / 11:00 / noon).
 # Enabled fallback uses normal window snooze/audio/recovery, including desktop-only
 # normal final dismissal (master-off/skip/clear still work). Disabled window is legacy.
-# Manual --leave is exact/unadvanced at deadline lead0; nap caps/settings unchanged.
+# Manual --leave without --snoozes retains configured behavior (exact final at lead0).
+# Per-request --snoozes N (0-12): first = final-N*390 seconds; N=0 is final-only.
+# Explicit final ignores prep/global deadline lead; this does not override global snoozes.
+# Requires the separate HA integration in docs/alarm-design.md before use.
+# Example 10:00/N3: first09:40:30, lights09:30:30 with the existing 10m fade lead.
 [alarm.window]
 enabled = true
 deadline_utc_entity = "input_text.commute_alarm_deadline_utc"
+# Legacy explicit-count helper: JSON wake_at/deadline_at/snoozes, exact UTC pair;
+# empty string clears, missing/malformed/mismatched helper is unknown.
+# Provision via the HA owner first; v1 carries the policy inside the snapshot instead.
+# manual_policy_entity = "input_text.commute_manual_wake_policy"
 window_done_entity = "input_text.commute_alarm_window_done_utc" # empty = don't publish
 prep_advance_minutes = 0        # shared calendar AND fallback advance; legacy alias accepted
 first_alarm_lead_minutes = 37    # first alarm at published deadline-37m
-deadline_lead_minutes = 0        # final at published deadline; keep 0 for exact manual --leave
-snooze_minutes = 6.5             # unlimited; the last snooze is cut to end at the deadline
+deadline_lead_minutes = 0        # configured final lead; explicit --snoozes ignores this
+snooze_minutes = 6.5             # configured unlimited window snoozes; explicit counts use 390s
 rering_start_percent = 20        # re-rings hold here (absolute sink level) ...
 rering_hold_seconds = 30
 rering_ramp_seconds = 60         # ... then ramp to 100%

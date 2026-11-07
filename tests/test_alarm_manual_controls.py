@@ -36,7 +36,7 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
 @pytest.fixture
 def published(monkeypatch: pytest.MonkeyPatch) -> Mock:
     publish = Mock(return_value=(SimpleNamespace(
-        wake_at=WAKE, next_prep_at=None, source="manual", warning=None,
+        wake_at=WAKE, next_prep_at=None, source="manual", warning=None, manual_snoozes=None,
     ), True))
     monkeypatch.setattr(alarm_mod, "publish", publish)
     return publish
@@ -53,7 +53,7 @@ def test_wake_persists_then_publishes(
     def record_publish(*_args: object, **_kw: object) -> tuple[SimpleNamespace, bool]:
         calls.append("publish")
         return SimpleNamespace(
-            wake_at=WAKE, next_prep_at=None, source="manual", warning=None,
+            wake_at=WAKE, next_prep_at=None, source="manual", warning=None, manual_snoozes=None,
         ), True
 
     published.side_effect = record_publish
@@ -116,6 +116,7 @@ def test_clear_is_local_and_republishes(
     monkeypatch.setattr(alarm_state, "clear_manual", clear)
     published.return_value = (SimpleNamespace(
         wake_at=WAKE, next_prep_at=None, source="calendar", warning="calendar conflict",
+        manual_snoozes=None,
     ), False)
     result = CliRunner().invoke(cli.cli, ["alarm", "wake", "--clear"])
     clear.assert_called_once_with(cfg)

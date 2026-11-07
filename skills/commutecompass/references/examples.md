@@ -113,6 +113,49 @@ scripts/config-reset.sh
 scripts/config-reset.sh --yes
 ```
 
+## Manual wake deadlines
+
+> wake me at 10:00 with 3 snoozes
+
+```sh
+scripts/alarm-wake.sh --leave 10:00 --snoozes 3
+scripts/alarm-status.sh
+```
+
+Report first ring **09:40:30**, final deadline **10:00:00**, interval
+**6 minutes 30 seconds (390 seconds)**, and maximum **3** accepted snoozes,
+subject to the command's calendar-conflict and publication results. The requested
+time is the final deadline. Delayed actions may leave fewer full snoozes.
+
+> final alarm at 10 tomorrow, no snoozes
+
+```sh
+# Resolve "tomorrow" to the user's America/New_York date, then:
+scripts/alarm-wake.sh --leave 10:00 --date YYYY-MM-DD --snoozes 0
+```
+
+This starts directly in the desktop-dismissal-only final phase at 10:00:00.
+
+> I need to leave at 9
+
+```sh
+scripts/alarm-wake.sh --leave 09:00
+```
+
+No count was requested: preserve the configured wake lead and snooze behavior.
+Use `--force` only after an explicit instruction to override an earlier calendar
+alarm. If a count-based first ring is already past, ask before retrying with
+`--allow-late`; explain that the final deadline remains unchanged and some
+snooze opportunities have been lost. A manual count is never a global config edit.
+
+> cancel that manual wake alarm
+
+```sh
+scripts/alarm-wake.sh --clear
+```
+
+This clears only the manual override and republishes the ordinary schedule.
+
 ## Snooze, skip, mute
 
 > snooze my next prep ping by 10 min

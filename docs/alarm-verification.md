@@ -1,10 +1,125 @@
 # Alarm verification and activation
 
-## Shared prep advance and fallback window (2026-11-07): offline validation passed
+## Explicit manual snoozes (2026-11-07): offline validation passed
+
+The manual-count extension is based on `0111b87`, preserving the earlier shared
+prep advance/fallback geometry and existing 390-second global snooze defaults.
+Its [request/lifecycle contract](alarm-design.md#explicit-manual-snooze-budget)
+and [HA extension](alarm-ha-contract.md#explicit-manual-snooze-extension) are
+separate from the earlier validation results below. A background validator checked
+the reconciled 19-path staged change in `omos/manual-wake-snoozes`; all five
+required checks passed. Result recording afterward changed documentation only.
+No push, deployment, restart, playback or live HA write occurred. The separate
+infra/HA consumer integration remains required and was not validated here.
+
+### Current source reconciliation — not an executed result
+
+| Area | Inspected definitions | Source-observed behavior |
+|---|---|---|
+| Request | `cli.py::alarm_wake`, `_alarm_publish_result`, `alarm_status`; `alarm_state.py::parse_manual_deadline` | `--snoozes 0..12`; `--allow-late` only with count, required for first < now; `--force` only calendar conflict override; exact first/final and count in output |
+| Selection/publication | `alarm.py::manual_first_alarm`, `_compute_wake`, `_retained`, `build_payload`, `build_schedule` | First = final − N × 390 seconds; only manual winner carries count; omitted count uses configured lead; retained publication carries policy; v1 selects `manual` only for explicit counts |
+| Durable intent | `alarm_state.py::ManualWake`, `load_manual`, `save_manual`; `store.py::init_schema`, `load_alarm_manual`, `save_alarm_manual` | Optional count stored with one-shot intent; old missing column/NULL means omitted policy; invalid counts rejected without coercion |
+| Wire/config | `alarm_contract.py::validate_manual_snoozes`, `_validate`, `serialize_schedule`, `parse_schedule`; `config.py::AlarmWindowConfig` | Strict integer 0–12; v1 appends `snoozes` only for `manual`; manual pair uses N × 390 independently of configured first lead; default legacy helper `input_text.commute_manual_wake_policy` |
+| Adoption/cache | `alarm_daemon.py::_manual_policy`, `inputs_from_states`, `_manual_count`, `_commute_deadline`, `AlarmCache` | Legacy policy requires exact UTC wake/deadline pair and count geometry; active/pending policies and accepted-control timestamp cached separately |
+| Lifecycle | `alarm_daemon.py::_window_step`, `_step` and daemon restart recovery | Explicit policy/final immutable once active; only accepted stop/snooze actions increment budget; explicit max-ring auto-timeout disabled; final ignores HA stop/snooze, with existing desktop dismissal and recovery boundary |
+
+Important distinctions confirmed during reconciliation:
+
+- Legacy `build_payload` sends **an integer `manual_snoozes` for explicit intent,
+  otherwise `""`**. Ordinary legacy payloads therefore gain a clearing field;
+  only the old **v1** strings are byte-for-byte unchanged. HA must write an empty
+  policy helper for the clear case, not retain yesterday's count.
+- The legacy helper is JSON with exactly `wake_at`, `deadline_at`, `snoozes`;
+  its timestamps must be UTC (`Z` or `+00:00`). Empty string is known clear;
+  missing, malformed or mismatched policy is unknown. Unknown policy is not wake
+  cancellation and must not erase a previously adopted cached policy.
+- Explicit-count rings do **not** use the configured fifteen-minute auto-snooze.
+  Timeout is disabled for those rings, whether or not any budget remains.
+  Calendar/fallback and omitted-count window timeouts retain auto-snooze.
+- Active explicit final/policy is immutable across unrelated replans; ordinary
+  calendar/fallback windows retain earlier-only deadline tightening. Pending
+  policy/count, active policy/accepted-action count and duplicate-control
+  timestamp must survive offline restart independently.
+
+`tests/test_manual_snooze_count.py` supplies fake-HA/fake-clock regression
+definitions for geometry, zero/upper bound, late consent, force separation,
+SQLite migration, canonical wire parsing, exact-pair helper adoption,
+duplicate controls, final precedence, and active/pending cache recovery.
+`tests/test_alarm_manual.py`, `test_alarm_manual_controls.py`,
+`test_alarm_calendar_advance.py`, `test_alarm_window.py`, `test_alarm_recovery.py`,
+`test_alarm_overlap.py`, `test_alarm_daemon.py` and `test_alarm_contract.py` are
+existing regression targets. Test definitions are not proof that those tests
+ran or passed, nor evidence of a deployed HA consumer.
+
+### Acceptance matrix for the final validator
+
+| Gate | Required offline evidence |
+|---|---|
+| Exact timing | Final 10:00/N3 → first 09:40:30; prompt snooze targets 09:47:00, 09:53:30, 10:00. N0 first=final; N1 first09:53:30; N12 first08:42. No rounding, no extra prep/first/deadline lead, global settings unchanged |
+| CLI safety | Bounds/types rejected before persistence; omitted count is not zero; W=now accepted; W<now rejected without `--allow-late`, even with force; flag requires count; explicit past final/date rejected; clear excludes policy flags; failed publication leaves saved intent for retry |
+| Winner isolation | Earlier calendar final wins unless forced, never inherits count; fallback does not replace manual; earlier logical days still win; DST folds/gaps, midnight and 02:00 ownership preserved |
+| Budget/final | Both stop and snooze spend exactly one unit only when accepted; stale/duplicate/simultaneous controls and controls during snooze do not double spend; timeout does not spend or silence explicit rings; exhausted budget cannot stop audio; final wins simultaneous controls and preserves continuous audio/ramp |
+| Persistence | Republish before/after first does not move first or replenish budget; save/reload active and pending policies independently; restart mid-snooze, at final and at/beyond final+10; retained/degraded planning; old SQLite/cache/v1 records and missing legacy helper safe |
+| Wire | Original v1 strings unchanged; manual key order and geometry independent of global lead; reject missing/extra/bool/fraction/string counts and mismatched pairs; actual serialized lengths for N0/3/12, null/filled prep and microseconds ≤255 (maximum expected 247); exact readback and idempotent retry |
+| Legacy helper | Integer versus empty payload; empty helper clears; missing/invalid/mismatched helper unknown; UTC-only exact pair; partial multi-helper updates, ordinary publication after manual, cached policy during outage, HA restart restoration |
+| Unchanged behavior | Shared calendar/fallback advance and aliases, unadvanced nap cap, omitted-count policy, naps/prep-only/disabled windows, earlier-only ordinary replans, audio restoration/failure latch, off/skip/desktop completion, phone/critical-alert cadence |
+| HA integration | Rendered/evaluated Nix plus native HA template/runtime scenarios for helpers, publication scripts, v1 selector, next-alarm sensor and lighting; manual 09:40:30 retained; N0 accepted; fade lead applied once; fake end-to-end publication → adoption → budget/final |
+
+The documentation's YAML validator example remains a review artifact, not
+installed configuration. Existing `tests/test_alarm_contract.py` inspects that
+example's declarations/constants and models ordering in Python; this is **not**
+a native HA runtime execution of its manual branch. Test owners must cover the
+new branch and every length combination; the infra owner must supply offline
+consumer evidence. No fresh infra inspection was available to this docs lane;
+the earlier 60-minute inspection below does not demonstrate manual support.
+
+### Executed offline checks
+
+The background validator ran the repository's CI checks after writer reconciliation
+in `.slim/worktrees/manual-wake-snoozes`, using `nix develop` directly for Python
+checks. Each command below used `agent-run-long --timeout 30m` with a 1,860,000 ms
+outer timeout. All exited **0**:
+
+| Command | Result |
+|---|---|
+| `nix develop . --command pytest -q --cov=commutecompass --cov-report=term-missing --cov-fail-under=80` | 2624 passed, 42 warnings; 91.37% coverage (minimum 80%) |
+| `nix develop . --command ruff check .` | All checks passed |
+| `nix develop . --command mypy src tests` | No issues in 87 source files |
+| `nix flake check --print-build-logs` | Passed, including sandboxed mypy/pytest/ruff |
+| `nix build .#packages.x86_64-linux.default --print-build-logs` | Passed; package produced |
+
+The pytest process used
+`COVERAGE_FILE=/tmp/opencode/manual-wake-validation/final-coverage.sqlite` to keep
+tracked `.coverage` unchanged. The 42 warnings concern unclosed SQLite connections;
+they were not failures. Nix omitted incompatible systems, so this is native
+**x86_64-linux** evidence only, not all-platform validation.
+
+Full local logs are under `/tmp/opencode/agent-run-long.final-manual-wake-`, with
+suffixes `pytest-cov.priKU86opU/output.log`, `ruff.cX4WxCJ8S7/output.log`,
+`mypy.Mc68p868Kz/output.log`, `flake-check.UM6imK0oEw/output.log`, and
+`package-build.2fIniqG4ue/output.log`. Before/after fingerprints confirmed no
+concurrent source/index edits; the validated staged-patch SHA-256 was
+`8acc75ee65952c2bd4d851726529e2e0e3f10051eccda0349f17c63ec271bbc7`.
+Initial validation exposed a disabled-window compatibility regression, payload
+fixture expectations, and lint/type findings; all were repaired before this
+passing run. Subsequent result recording is documentation-only.
+
+**Separate required infra work:**
+`modules/iot/commutecompass-alarm.nix` (v1 validator/helpers/scripts/sensor),
+`modules/iot/commutecompass-wake-window.nix` (legacy policy/payload and lighting),
+and `modules/link/commutecompass.nix`/config as needed; see the
+[integration checklist](alarm-design.md#required-infraha-integration-for-manual-counts).
+Do not substitute an app-only test pass for that consumer work, or live
+publication/playback for offline tests. Activation stays separately authorized.
+
+## Shared prep advance and fallback window (2026-11-07): earlier offline validation passed
 
 The agreed contract is in [alarm-design.md](alarm-design.md#calendar-and-fallback-wake-window-revised-2026-11-07).
 Background validators checked the reconciled source/tests in the isolated
-`fix/fallback-wake-window` worktree based on `6e8bb77`. All commands below exited 0:
+`fix/fallback-wake-window` worktree based on `6e8bb77`. This earlier result
+predates explicit manual counts; its commands and counts are retained as
+historical evidence, not a pass for the current worktree. All commands below
+exited 0 for that revision:
 
 | Command | Result |
 |---|---|
@@ -78,7 +193,9 @@ Acceptance requirements covered by the tests and source reconciliation:
 
 ### Source reconciliation checkpoint — static inspection only
 
-Current definitions match the shared geometry and alias contract:
+At the shared-advance checkpoint, definitions matched the geometry and alias
+contract below. The current manual-count additions are recorded separately at
+the top of this page:
 
 - `config.py::AlarmWindowConfig` stores `prep_advance_minutes`, normalizes the
   legacy alias and rejects conflicting values. `_canonical_edit_key` makes set
@@ -109,9 +226,10 @@ Current definitions match the shared geometry and alias contract:
   `tests/test_alarm_recovery.py`; contract cases in `tests/test_alarm.py` and
   `tests/test_alarm_contract.py`. These definitions are not executed results.
 
-Static inspection alone does not establish a pass. The fresh validation results
-above establish offline behavior for the reconciled source/tests; no rendered
-HA result, live-device delivery or audible outcome is inferred.
+Static inspection alone does not establish a pass. The recorded validation
+results above apply to that shared-advance revision, not the current manual
+extension; no rendered HA result, live-device delivery or audible outcome is
+inferred.
 
 ### Separate infra integration — not executed
 
@@ -164,9 +282,10 @@ render the versioned script before any separately authorized migration.
   fails, not a periodic notification storm. Evidence required: evaluated Nix
   host config, rendered YAML and Jinja scenarios. These do not establish
   live-device delivery. The coordinated private infra migration is **pending**.
-- Orchestrator after writers reconcile: delegated pytest/ruff/mypy checks and
-  separate Nix checks/build passed as recorded above. Source/test evidence remains
-  distinct from historical runs below and from unexecuted infra activation.
+- Final validator after writers reconcile: execute and report the current
+  manual-count gates at the top of this page. The recorded shared-advance
+  pytest/ruff/mypy and Nix passes are earlier evidence only, distinct from current
+  validation and unexecuted infra activation.
 
 ## Changes to earlier design notes
 
@@ -179,7 +298,9 @@ render the versioned script before any separately authorized migration.
   `next_prep_at` is empty if absent. Window-enabled or bound-manual payloads add
   **`deadline_at`** (empty only for a wake with no window anchor). An enabled
   fallback now has a real deadline. No `prep_at`, `logical_date`, `summary` or
-  `has_events` arguments are sent; the wire schema is unchanged.
+  `has_events` arguments are sent. Shared advance alone left the wire unchanged;
+  the later manual extension adds integer/empty-string `manual_snoozes` on legacy
+  payloads and `kind = manual` with appended `snoozes` on v1.
 - Publication uses **`deadline_at`** and configuration reads
   **`input_text.commute_alarm_deadline_utc`**, replacing the departure helper.
   Defaults are `first_alarm_lead_minutes = 37` and
@@ -305,6 +426,10 @@ new fallback/alias cases are listed above, not included in that historical pass.
 
 ### Publisher, lifecycle and regression checklist
 
+These are the configured calendar/fallback and uncounted-window regressions.
+The explicit manual budget/final-only cases and disabled timeout are in the
+[current acceptance matrix](#acceptance-matrix-for-the-final-validator).
+
 - Publication/config migration: `deadline_at`, deadline UTC entity, first/final
   leads 37/0 by default, UTC folds and epoch-zero clear; old departure helper
   not consumed. Only exact matching wake/deadline pairs enable the window.
@@ -348,8 +473,11 @@ new fallback/alias cases are listed above, not included in that historical pass.
 This is a consumer coordination checklist for the separate infra owner to verify
 or migrate where not yet satisfied. Supplied source inspection already confirms
 the 60-minute light geometry; no additional light change is needed for shared
-advance. No infra files, running HA, devices or deployed services are changed by
-this docs lane.
+advance. Explicit manual counts additionally require the
+[manual integration checklist](alarm-design.md#required-infraha-integration-for-manual-counts),
+including variable-width eligibility, helper/payload and lighting consumers.
+No infra files, running HA, devices or deployed services are changed by this
+docs lane.
 
 1. `script.commute_publish_alarm` accepts **`deadline_at`**, stores offset-bearing
    UTC text in **`input_text.commute_alarm_deadline_utc`**, and clears a missing
@@ -373,8 +501,9 @@ this docs lane.
    **`input_boolean.morning_meds_taken`** is off; toggle it once, guarding
    repeated/stale action delivery so it never toggles back. Clear the
    notification on the `window_done` completion event.
-4. HA stop maps to 6-minute-30-second snooze capped at L before final, and is ignored
-   in final. Phone actions cannot bypass that phase gate.
+4. HA stop maps to 6-minute-30-second snooze capped at L before final, subject
+   to any explicit manual budget, and is ignored in final. Phone actions cannot
+   bypass the phase gate or an exhausted budget.
 5. Leave existing iOS Clock and critical alerts untouched. The compatibility of
    those layers with the silent intent is **OPEN for Finn's decision**.
 

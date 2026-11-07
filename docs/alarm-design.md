@@ -6,7 +6,11 @@ automatic, commute-aware, and loud.
 The shared calendar/fallback advance below is the agreed 2026-11-07 contract,
 reconciled against source and verified by offline tests, lint, type checks and
 Nix checks/build; see [alarm-verification.md](alarm-verification.md).
-This is not a deployment or live-device claim.
+This is not a deployment or live-device claim. The later
+[explicit manual-snooze budget](#explicit-manual-snooze-budget) is a separate
+extension: its final validation and coordinated infra/HA integration are pending.
+Do not apply the earlier pass to the manual extension; see the
+[current source checkpoint](alarm-verification.md#explicit-manual-snoozes-2026-11-07-validation-pending).
 
 ## Decisions (from grilling session)
 
@@ -43,8 +47,8 @@ Finn to decide**; do not silently remove or reinterpret those existing layers.
 
 ```
 tomorrow job / morning job / replan hook
-    → script.commute_publish_alarm(wake_at, next_prep_at, next_event[, deadline_at])
-    → HA stores wake/next-prep/event + optional deadline; next prep supplies nap cap
+    → script.commute_publish_alarm(wake_at, next_prep_at, next_event[, deadline_at], manual_snoozes)
+    → HA stores wake/next-prep/event + optional deadline/manual policy; next prep supplies nap cap
     → sensor.commute_next_alarm = min(wake, nap) respecting enabled/skip
         → link daemon polls → desktop audio ramp + loop
         → HA lights fade (10 min lead-in)
@@ -55,6 +59,10 @@ tomorrow job / morning job / replan hook
 Legacy `alarm.build_payload` always sends `wake_at`, `next_prep_at` (empty if
 absent) and `next_event`. It adds `deadline_at` when the window is enabled or a
 manual deadline is bound; an empty deadline means this wake has no window.
+The explicit manual-count extension additionally sends `manual_snoozes`: an
+integer for a selected counted manual wake, otherwise an empty string to clear
+stale policy; see the
+[legacy helper contract](alarm-ha-contract.md#legacy-manual-policy-helper).
 Enabled fallback windows carry a real deadline, not an empty anchor. The payload
 does not send `prep_at`, `logical_date`, `summary` or `has_events`.
 `deadline_at` replaces the former departure argument: it is the effective alarm
@@ -88,6 +96,9 @@ activate v1, publish upstream, edit infra, or establish live-device behavior.
 - Skip: `input_boolean.commute_alarm_skip_next` + skip-until timestamp
 - Published `wake_at`, `next_prep_at` (absolute future nap cap), and `next_event`
 - Optional `deadline_at` for calendar, fallback or manual wake windows
+- For explicit manual counts on the legacy contract: JSON policy helper
+  `input_text.commute_manual_wake_policy` (wake/deadline pair plus `snoozes`);
+  provisioning is separate infra work, not implied by the application default
 - Nap request timestamp; next-alarm template chooses wake/nap
 - Link state: `input_select.commute_alarm_state` (`idle`/`ringing`/`snoozed`)
 - Heartbeat: `input_text.commute_alarm_heartbeat_utc` plus compatibility
@@ -227,10 +238,13 @@ unset` with either name removes both spellings so the zero default applies.
 edit the declarative source through its owner rather than the generated `/etc`
 file. See the [allowlist reference](../skills/commutecompass/references/config-allowlist.md).
 
-Manual `alarm wake --leave X` is exact: no prep advance is subtracted from X.
-With deadline lead zero, its first ring is X minus the first lead and its final
-is X. Manual/calendar conflict selection compares X to the calendar's effective
-final; an earlier calendar deadline wins unless `--force` selects manual. Fallback
+Without `--snoozes`, manual `alarm wake --leave X` retains configured behavior:
+no prep advance is subtracted from X; with deadline lead zero, its first ring
+is X minus the first lead and its final is X. An explicit count instead uses
+[the fixed 390-second manual geometry](#explicit-manual-snooze-budget), with final
+exactly X even when the global deadline lead is nonzero. Manual/calendar conflict
+selection compares X to the calendar's effective final; an earlier calendar
+deadline wins unless `--force` selects manual. Fallback
 does not displace manual intent. Retained schedules already contain effective
 timestamps and are not advanced again.
 
@@ -310,17 +324,25 @@ minutes`, and bases the fade transition on the published wake/deadline. **No lig
 logic change or extra advance is needed for that consumer.** Do not derive lights
 from `next_prep_at`, and never subtract A again. Keep any v1 validation's first
 lead consistent with the producer (3600 seconds for this example). Both legacy
-and v1 carry the same effective wake/deadline geometry; no wire schema changes.
+and v1 carry the same effective calendar/fallback geometry; the shared advance
+alone changes no wire schema. **This is not sufficient for explicit manual
+counts:** that extension requires the separate consumer changes
+[listed below](#required-infraha-integration-for-manual-counts).
 
 `deadline_lead_minutes = 15` is not a substitute for the shared advance: it moves
-only final ringing, shortens the window, and also moves manual final. Keep it at
-zero for the geometry above and exact manual `--leave` semantics.
+only final ringing, shortens the configured window, and also moves an uncounted
+manual final. Keep it at zero for the geometry above. Explicit `--snoozes` manual
+finals ignore that global lead.
 
 ### Window eligibility
 
-A window requires an enabled daemon window and a published wake matching
-`deadline_at - first_alarm_lead_minutes` exactly. Enabled fallback publications
-now supply that pair and use the **same window lifecycle** as calendar wakes.
+A configured calendar/fallback or uncounted manual window requires an enabled
+daemon window and a published wake matching
+`deadline_at - first_alarm_lead_minutes` exactly. An explicit manual policy uses
+`deadline_at - snoozes * 390 seconds` instead, including equal instants for zero;
+its validated policy must travel with the pair. Enabled fallback publications
+supply the configured first-lead pair and use the **same window lifecycle** as
+calendar wakes.
 They are no longer noon-only legacy alarms. Naps, prep-only wakes, and
 window-disabled automatic wakes retain the configured legacy first ramp,
 6-minute-30-second snooze, maximum two snoozes, fifteen-minute terminal timeout, and
@@ -330,6 +352,10 @@ fallback. Final dismissal rules below apply equally to calendar and fallback
 windows.
 
 ### Window lifecycle
+
+The unlimited pre-final policy below is for calendar/fallback and uncounted
+manual windows. Explicit manual counts use the separate budget below without
+changing final dismissal, audio ownership or recovery limits.
 
 1. Before first ring, follow replans normally. Lock the deadline **only at first
    ring**, not at publication or daemon observation. Persist original wake key,
@@ -364,12 +390,161 @@ recovery cutoff. Warn visibly if activity monitoring is disabled or unavailable:
 final then cannot be dismissed by desktop activity and needs master-off or
 explicit skip/clear. A connected HA is not a substitute for an activity monitor.
 
+## Explicit manual-snooze budget
+
+This is the agreed per-manual extension, separate from the shared advance and
+existing global 6-minute-30-second default. See the
+[source/validation checkpoint](alarm-verification.md#explicit-manual-snoozes-2026-11-07-validation-pending)
+before relying on it. The HA changes below are **required integration work**, not
+configuration supplied or activated by this repository.
+
+### Request and timing
+
+```text
+commutecompass alarm wake --leave TIME [--date YYYY-MM-DD] [--snoozes N] [--allow-late] [--force]
+commutecompass alarm wake --clear
+```
+
+These are operational commands, not offline tests: setting/clearing intent
+writes the local database and immediately attempts schedule publication to the
+configured HA instance, with calendar/routing reads as needed. They require
+`[alarm].enabled`, `[alarm.window].enabled` and configured HA access. Obtain
+permission for the target schedule change first; publication can cause a daemon
+to ring. No `alarm wake --dry-run` is defined. `alarm publish --dry-run` previews
+existing intent without pushing to HA, but can still contact planning providers.
+
+- `--leave` is the exact final/ready-by instant, not the first ring. Times are
+  NYC civil time (`10:00`, `10am`, `9:30am`); `--date` is a civil date, not a
+  planning logical date. Without a date, parsing chooses the next future
+  occurrence. DST gaps are rejected; repeated-hour choices use absolute future
+  instants. Lead arithmetic uses elapsed UTC seconds.
+- `--snoozes N` accepts integers **0–12**. For final F, first W is
+  **F − N × 390 seconds**. Shared prep advance, global first lead, global
+  deadline lead and configured snooze duration do not change this explicit
+  geometry or final. **N=0 means final-only**, with W=F.
+- Omitting `--snoozes` retains the configured manual-window behavior; omission
+  is not zero. This does not retune calendar/fallback windows, prep-only wakes,
+  naps, their caps, route preparation or global snooze settings.
+- If W is already before now while F is still future, require **`--allow-late`**
+  for the explicit-count request. Equality W=now does not need that flag. The
+  flag is valid only with a count and does not permit a past final. Preserve W's
+  exact seconds rather than rounding or shifting the final to fit the request.
+- `--force` remains only the earlier-calendar-conflict override. It is **not**
+  late-start consent; a late forced request still needs `--allow-late`. Without
+  force an earlier effective calendar final wins and keeps its own policy; the
+  manual count must not leak into that calendar winner. Fallback never displaces
+  manual intent. None of these flags bypass an already active window's lock.
+- `--clear` removes the one-shot override and republishes ordinary selection;
+  it is exclusive with the setting flags. Replacing a publication is not itself
+  dismissal of an already active session. Use the existing master-off/skip or
+  desktop controls when an active alarm must end.
+
+For an authorized request `alarm wake --leave 10:00 --snoozes 3`, on a day when
+manual wins:
+
+| Instant | NYC time |
+|---|---|
+| Lights begin, with the existing ten-minute fade lead | 09:30:30 |
+| First ring, F − 3 × 390 seconds | 09:40:30 |
+| First prompt accepted snooze target | 09:47:00 |
+| Second prompt accepted snooze target | 09:53:30 |
+| Third prompt accepted snooze target / final | 10:00:00 |
+
+These are nominal targets assuming prompt snooze actions, not scheduled
+automatic rings or a promise of exact audible wall-clock execution. An accepted
+snooze targets `min(daemon now + 390 seconds, F)`; its control timestamp must be
+newer than ring start and the previously accepted control. For example, a first
+action accepted at 09:40:31 targets 09:47:01. Poll observation and delayed actions
+can affect re-ring timing, but cannot postpone final. Preserve 09:40:**30** in
+publication, parsing and lighting; do not round to 09:40 or 09:41.
+With N=0 there is no preliminary ring; lights still use the existing fade lead
+before the published final-only wake, once.
+
+### Budget, active session and recovery
+
+The explicit count is a **budget of accepted user actions**, not a ring counter:
+
+- Before final, either HA snooze or HA stop may spend one unit only when the
+  ringing session actually accepts a snooze. Stop is not dismissal. Duplicate
+  delivery, actions during an existing snooze, rejected/exhausted actions and
+  automatic ring timeouts must not spend units.
+- Accepted snooze uses the fixed 390-second interval capped at final. Explicit
+  manual rings ignore automatic ring timeouts: timeout neither spends a unit
+  nor silences audio. When exhausted, another button press must also leave audio
+  ringing. Calendar/fallback timeout auto-snoozes remain unchanged.
+- Final always wins a simultaneous snooze/stop/timeout. If already ringing,
+  continue audio and its ramp rather than restart; if snoozed, enter final with
+  the configured first-alarm ramp. Final has no snooze, HA stop or timeout.
+  Desktop activity is normal dismissal; master-off and explicit skip/clear
+  retain their existing escape paths. Existing pre-final re-ring profiles and
+  audio restoration ownership remain unchanged.
+- Persist the selected policy and accepted-action count for the **active**
+  session, separately from the policy accompanying a **pending** wake. A new
+  publication, same-pair retry, tomorrow schedule or daemon restart must neither
+  reset an active budget nor replace it with another request's policy. The
+  explicit manual final stays locked; an unrelated calendar replan does not
+  tighten it. Ordinary calendar/fallback windows retain their earlier-only
+  tightening rule, without acquiring a manual budget.
+- Preserve the pending policy across cache reload/outage before first ring, and
+  preserve the active policy/count and accepted-control timestamp across ringing
+  or snoozed recovery so a repeated button state cannot spend again. Missing
+  fields in old records mean configured behavior, not an invented explicit
+  count. Invalid policy data must not grant new snoozes or silently change an
+  unrelated window. Exact validation rules are in the
+  [HA contract](alarm-ha-contract.md#legacy-manual-policy-helper).
+- The existing recovery cutoff remains final+10 minutes inclusive for cached
+  windows, including final-only ones. Only continuously live audible final is
+  unbounded. Desktop completion retains original-wake dedupe and the dismissal
+  timestamp; failed publication does not prove the intent was adopted by HA.
+
+### Required infra/HA integration for manual counts
+
+Coordinate these changes in the sibling `infra` repository **before use**; they
+are separate owner work, not changes made here. Earlier evidence that a
+60-minute calendar/fallback pair works does not cover variable-width manual
+pairs or final-only wakes.
+
+1. **`modules/iot/commutecompass-alarm.nix`:** extend the v1 validator and every
+   schedule-consuming helper/script/sensor for `kind = manual` and the appended
+   integer `snoozes`. Keep original v1 strings unchanged, the single atomic
+   commit, exact readback, canonical ordering and ≤255 limit. Validate manual
+   geometry with N × 390, not the configured calendar lead. Carry exact seconds
+   through next-alarm selection, compatibility mirrors and phone/fallback
+   consumers; invalid v1 remains no new information, never legacy fallback.
+2. **`modules/iot/commutecompass-wake-window.nix`:** accept the legacy
+   `manual_snoozes` service field, provision the restored JSON policy helper and
+   validate its exact wake/deadline pair. Clear stale policy on ordinary
+   publications. Teach window/lighting eligibility about manual geometry and
+   N=0; the old fixed 60-minute check cannot admit these pairs. Fade from
+   **published first wake minus the existing fade lead**, reaching full warm at
+   that wake. Apply the fade lead once, no prep/global lead again, and do not
+   derive lights from `next_prep_at`.
+3. **`modules/link/commutecompass.nix` / config owner, as needed:** coordinate
+   application revision, helper entity name, contract selector and consumer
+   readiness. Do not solve a one-shot request by changing global first lead or
+   snooze duration. Keep private origin configuration private and credentials
+   encrypted; no personal values are needed for this integration.
+4. **Offline validation first:** render/evaluate the affected HA configuration
+   and run native-template/runtime cases for both publication contracts,
+   09:40:30 preservation, N=0/3/12, malformed/mismatched policy, old helpers,
+   partial writes and restart restoration. Include producer → HA selection →
+   lighting timing → fake daemon budget/final tests. Text matching a YAML/Jinja
+   block is not a runtime pass. The
+   [verification matrix](alarm-verification.md#explicit-manual-snoozes-2026-11-07-validation-pending)
+   separates these requirements from historical results.
+
+No live API calls, infra edits, deployment, service restart or playback are
+included. Subsequent activation and audible testing need separate permission;
+keep the manual backup alarm until those gates are met.
+
 ## Private infra follow-up contract — pending, NO deployment
 
 These are consumer requirements for the separate infra owner to verify or
 migrate where not yet satisfied, not evidence of evaluated or deployed
-configuration. The supplied inspection above already confirms the 60-minute
-light geometry; this revision does not require changing that light logic:
+configuration. The earlier supplied inspection confirms the 60-minute light
+geometry for shared calendar/fallback advance only. Explicit manual counts also
+require the [consumer updates above](#required-infraha-integration-for-manual-counts).
+The common completion/notification requirements remain:
 
 - `script.commute_publish_alarm` accepts **`deadline_at`**, writes offset-bearing
   UTC text to `input_text.commute_alarm_deadline_utc`, and clears a missing anchor
@@ -393,14 +568,15 @@ light geometry; this revision does not require changing that light logic:
   `input_boolean.morning_meds_taken` is off; its action toggles it once, never
   toggles it back on repeated/stale taps. Clear the notification on the
   `window_done` completion event. Notification actions do not bypass final-phase rules.
-- HA stop maps to the same 6-minute-30-second capped snooze **before final** and is
-  **ignored in final**. Do not wire it to unconditional final dismissal.
+- HA stop maps to the same 6-minute-30-second capped snooze **before final**,
+  subject to any explicit manual budget, and is **ignored in final**. Do not
+  wire it to unconditional final dismissal or bypass an exhausted budget.
 - Leave existing iOS Clock and critical-alert behavior untouched. Whether those
   layers are compatible with the silent intent remains **OPEN: Finn decision**.
 
 No infra edits, activation or deployment are part of this change.
-[alarm-verification.md](alarm-verification.md) separates historical validation
-from the passing shared-advance/fallback revision checks. Read-only infra
-inspection establishes the existing 60-minute light geometry, not deployment
-of this application revision. Live verification remains separately authorized
-owner work.
+[alarm-verification.md](alarm-verification.md) separates the pending manual-count
+validation from earlier shared-advance/fallback results. Earlier read-only infra
+inspection establishes the 60-minute light geometry, not manual-count readiness
+or deployment of this application revision. Live verification remains separately
+authorized owner work.

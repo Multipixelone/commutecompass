@@ -30,14 +30,16 @@ from typing import Literal
 
 SCHEDULE_VERSION = 1
 MAX_SNAPSHOT_LENGTH = 255
+MANUAL_SNOOZE_SECONDS = 390
+MAX_MANUAL_SNOOZES = 12
 DEFAULT_FIRST_LEAD_SECONDS = 37 * 60  # 2220: approved window first-alarm lead
 STATUS_MIN_FRESHNESS_SECONDS = 90
 
-ScheduleKind = Literal["commute", "legacy", "none"]
+ScheduleKind = Literal["commute", "legacy", "none", "manual"]
 ScheduleOrder = Literal["same", "newer", "stale", "conflict"]
 
 _KEYS = ("v", "id", "issued_at", "kind", "wake_at", "deadline_at", "next_prep_at")
-_KINDS: tuple[ScheduleKind, ...] = ("commute", "legacy", "none")
+_KINDS: tuple[ScheduleKind, ...] = ("commute", "legacy", "none", "manual")
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 _UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{6})?Z")
 
@@ -90,6 +92,14 @@ class ScheduleSnapshot:
     wake_at: datetime | None
     deadline_at: datetime | None
     next_prep_at: datetime | None
+    manual_snoozes: int | None = None
+
+
+def validate_manual_snoozes(value: object) -> int:
+    """Reject booleans, floats and out-of-range manual counts."""
+    if type(value) is not int or not 0 <= value <= MAX_MANUAL_SNOOZES:
+        raise ScheduleError(f"manual snoozes must be an integer in 0..{MAX_MANUAL_SNOOZES}")
+    return value
 
 
 def _validate(s: ScheduleSnapshot, first_lead_seconds: int) -> None:
@@ -97,7 +107,17 @@ def _validate(s: ScheduleSnapshot, first_lead_seconds: int) -> None:
         raise ScheduleError("id must be 32 lowercase hex characters")
     if s.kind not in _KINDS:
         raise ScheduleError(f"unknown kind: {s.kind!r}")
-    if s.kind == "none":
+    if s.kind != "manual" and s.manual_snoozes is not None:
+        raise ScheduleError("snoozes is only valid for kind 'manual'")
+    if s.kind == "manual":
+        count = validate_manual_snoozes(s.manual_snoozes)
+        if s.wake_at is None or s.deadline_at is None:
+            raise ScheduleError("kind 'manual' requires wake_at and deadline_at")
+        if s.deadline_at.astimezone(UTC) - s.wake_at.astimezone(UTC) != timedelta(
+            seconds=count * MANUAL_SNOOZE_SECONDS
+        ):
+            raise ScheduleError("manual wake must equal deadline minus snoozes * 390s")
+    elif s.kind == "none":
         if s.wake_at is not None or s.deadline_at is not None or s.next_prep_at is not None:
             raise ScheduleError("kind 'none' requires null wake_at, deadline_at, next_prep_at")
     elif s.kind == "legacy":
@@ -132,8 +152,10 @@ def serialize_schedule(
         "deadline_at": ts(schedule.deadline_at),
         "next_prep_at": ts(schedule.next_prep_at),
     }
+    if schedule.kind == "manual":
+        body["snoozes"] = schedule.manual_snoozes
     raw = json.dumps(body, separators=(",", ":"), ensure_ascii=True)
-    if len(raw) > MAX_SNAPSHOT_LENGTH:  # pragma: no cover — worst case is 235
+    if len(raw) > MAX_SNAPSHOT_LENGTH:
         raise ScheduleError(f"snapshot is {len(raw)} chars (max {MAX_SNAPSHOT_LENGTH})")
     return raw
 
@@ -146,6 +168,7 @@ def new_schedule(
     deadline_at: datetime | None,
     next_prep_at: datetime | None,
     schedule_id: str | None = None,
+    manual_snoozes: int | None = None,
     first_lead_seconds: int = DEFAULT_FIRST_LEAD_SECONDS,
 ) -> ScheduleSnapshot:
     """Build a validated snapshot with a fresh random id (unless given).
@@ -169,6 +192,7 @@ def new_schedule(
         wake_at=utc(wake_at),
         deadline_at=utc(deadline_at),
         next_prep_at=utc(next_prep_at),
+        manual_snoozes=manual_snoozes,
     )
     _validate(snap, first_lead_seconds)
     return snap
@@ -211,8 +235,11 @@ def parse_schedule(
         raise
     except ValueError as exc:
         raise ScheduleError(f"invalid JSON: {exc}") from exc
-    if not isinstance(data, dict) or tuple(data) != _KEYS:
-        raise ScheduleError("snapshot keys must be exactly " + ",".join(_KEYS))
+    if not isinstance(data, dict):
+        raise ScheduleError("snapshot must be an object")
+    keys = (*_KEYS, "snoozes") if data.get("kind") == "manual" else _KEYS
+    if tuple(data) != keys:
+        raise ScheduleError("snapshot keys must be exactly " + ",".join(keys))
     v = data["v"]
     if type(v) is not int or v != SCHEDULE_VERSION:
         raise ScheduleError(f"unsupported version: {v!r}")
@@ -234,6 +261,7 @@ def parse_schedule(
         wake_at=opt("wake_at"),
         deadline_at=opt("deadline_at"),
         next_prep_at=opt("next_prep_at"),
+        manual_snoozes=validate_manual_snoozes(data["snoozes"]) if kind == "manual" else None,
     )
     if serialize_schedule(snap, first_lead_seconds=first_lead_seconds) != raw:
         raise ScheduleError("snapshot is not in canonical form")

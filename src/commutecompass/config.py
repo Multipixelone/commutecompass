@@ -294,6 +294,7 @@ class AlarmWindowConfig(BaseModel):
     enabled: bool = True
     # Written by the publish script from the payload's buffered ``deadline_at``.
     deadline_utc_entity: str = "input_text.commute_alarm_deadline_utc"
+    manual_policy_entity: str = "input_text.commute_manual_wake_policy"
     # The daemon writes the UTC instant a window was dismissed at the desk;
     # empty disables the publish.
     window_done_entity: str = "input_text.commute_alarm_window_done_utc"

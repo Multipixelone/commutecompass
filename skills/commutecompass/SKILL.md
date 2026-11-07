@@ -47,6 +47,7 @@ to stdout; relay that stdout back to the user.
 | "when is my wake/nap alarm?" | `scripts/alarm-status.sh [--json]` |
 | "nap for 30 minutes" / "wake me at 15:30" | `scripts/alarm-nap.sh 30` or `--until 15:30` |
 | "I need to leave at 9" / "wake me so I can leave by X" | `scripts/alarm-wake.sh --leave HH:MM [--date YYYY-MM-DD] [--force]` |
+| "wake me at 10 with 3 snoozes" / "final alarm at X, no snoozes" | `scripts/alarm-wake.sh --leave HH:MM --snoozes N [--date YYYY-MM-DD]` |
 | "clear my manual departure alarm" | `scripts/alarm-wake.sh --clear` |
 | "skip my next wake/nap alarm" | `scripts/alarm-skip.sh` |
 | "enable wake alarms" / "disable wake alarms" | `scripts/alarm-on.sh` / `scripts/alarm-off.sh` |
@@ -75,8 +76,33 @@ scripts/alarm-wake.sh --clear
 With a 60-minute first-alarm lead, departure at 09:00 means lights at 07:50,
 first alarm at 08:00, and final alarm at 09:00. The departure is used directly:
 no extra travel or safety buffer is subtracted. This is the normal commute wake
-window: unlimited five-minute snoozes before departure and desktop-only dismissal
-of the final alarm. Wake windows must be enabled.
+window: configured snoozes before departure and desktop-only dismissal of the
+final alarm. Wake windows must be enabled.
+
+For an explicit snooze count, interpret the requested time as the **final
+deadline**, and pass `--snoozes N` (integer **0–12**, inclusive). Each accepted
+snooze is at most **390 seconds (6 minutes 30 seconds)**, clamped to the final
+deadline. First ring is `final deadline − N × 390 seconds`, using elapsed time
+across DST and retaining seconds. For example:
+
+```sh
+scripts/alarm-wake.sh --leave 10:00 --snoozes 3
+scripts/alarm-wake.sh --leave 10:00 --snoozes 0
+```
+
+The first command selects first ring **09:40:30**, with immediate-action snooze
+targets **09:47:00**, **09:53:30**, and **10:00:00**. The second rings directly
+in the final phase at **10:00:00**. Delayed responses may allow fewer full
+snoozes; the deadline never moves. Exhausted snoozes cannot silence another ring.
+
+If the calculated first ring is already past, relay the error and ask whether
+to start late with fewer full snooze opportunities. Only after explicit user
+confirmation, repeat the command with `--allow-late`. This flag is separate from
+`--force`, which only overrides calendar conflicts. Omit `--snoozes` when the
+user has not requested a count: that preserves configured lead and snooze
+behavior. This is a single-alarm override, not a `config set` operation. Relay
+first ring, final deadline, interval, count, and selection/conflict status from
+the command and status output, preserving seconds.
 
 The manual wake survives periodic publishing and replaces that logical day's
 noon fallback. An earlier calendar departure wins on the same logical day;

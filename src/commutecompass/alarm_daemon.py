@@ -55,7 +55,13 @@ from uuid import uuid4
 
 import httpx
 
-from commutecompass.alarm_contract import ScheduleError, format_utc, parse_schedule
+from commutecompass.alarm_contract import (
+    MANUAL_SNOOZE_SECONDS,
+    ScheduleError,
+    format_utc,
+    parse_schedule,
+    validate_manual_snoozes,
+)
 from commutecompass.timeutil import now_nyc, to_nyc
 
 if TYPE_CHECKING:
@@ -103,6 +109,9 @@ class Inputs:
     deadline_known: bool = False
     # Local desktop activity (never from HA): the only final-alarm dismissal.
     activity_at: datetime | None = None
+    manual_snoozes: int | None = None
+    # Missing/malformed/mismatched legacy helper is unknown, not global policy.
+    manual_policy_known: bool = False
 
 
 class HAUnavailable(Exception):
@@ -167,6 +176,32 @@ def _helper_time(
     return (None if instant.timestamp() == 0 else instant), True
 
 
+def _manual_policy(
+    raw: object, wake: datetime | None, deadline: datetime | None,
+) -> tuple[int | None, bool]:
+    """Legacy paired policy: empty clears; JSON is valid only for its exact UTC pair."""
+    if raw == "":
+        return None, True
+    if not isinstance(raw, str) or wake is None or deadline is None:
+        return None, False
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or set(data) != {"wake_at", "deadline_at", "snoozes"}:
+            return None, False
+        count = validate_manual_snoozes(data["snoozes"])
+        first = datetime.fromisoformat(data["wake_at"])
+        final = datetime.fromisoformat(data["deadline_at"])
+        if (first.utcoffset() is None or final.utcoffset() is None
+                or first.utcoffset() != timedelta(0) or final.utcoffset() != timedelta(0)
+                or not _same_instant(first, wake) or not _same_instant(final, deadline)
+                or final.astimezone(UTC) - first.astimezone(UTC)
+                != timedelta(seconds=count * MANUAL_SNOOZE_SECONDS)):
+            return None, False
+        return count, True
+    except (ValueError, TypeError, KeyError):
+        return None, False
+
+
 def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> Inputs:
     """Map the raw HA state dump onto :class:`Inputs`."""
     v1 = cfg.schedule_contract == "v1"
@@ -184,6 +219,9 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> I
     deadline_known = False
     if not v1 and cfg.window.enabled and cfg.window.deadline_utc_entity:
         deadline, deadline_known = _helper_time(states, cfg.window.deadline_utc_entity)
+    manual_snoozes, policy_known = _manual_policy(
+        states.get(cfg.window.manual_policy_entity, {}).get("state"), wake, deadline,
+    ) if not v1 else (None, False)
     if cfg.schedule_contract == "v1":
         # A partial migration/write is no new wake knowledge, not a downgrade.
         wake = deadline = threshold = None
@@ -198,6 +236,7 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> I
                 logger.warning("alarm daemon: ignoring invalid v1 schedule: %s", exc)
             else:
                 wake, deadline = schedule.wake_at, schedule.deadline_at
+                manual_snoozes, policy_known = schedule.manual_snoozes, True
                 # Despite its name, next_prep_at is the publisher's effective first-alarm
                 # / nap cap (WakeResult.next_prep_at), not raw prep. Never subtract twice.
                 threshold = schedule.next_prep_at
@@ -218,6 +257,8 @@ def inputs_from_states(states: dict[str, dict[str, Any]], cfg: AlarmConfig) -> I
         prep_known=prep_known,
         deadline_at=deadline,
         deadline_known=deadline_known,
+        manual_snoozes=manual_snoozes,
+        manual_policy_known=policy_known,
         stop_pressed_at=parse_ha_datetime(states.get(cfg.stop_button, {}).get("state")),
         snooze_pressed_at=parse_ha_datetime(states.get(cfg.snooze_button, {}).get("state")),
     )
@@ -297,6 +338,9 @@ class DaemonState:
     ring: RingStatus | None = None
     ended_wake: TerminalStatus | None = None
     ended_nap: TerminalStatus | None = None
+    manual_snoozes: int | None = None
+    pending_manual_snoozes: int | None = None
+    accepted_control_at: datetime | None = None
 
     def is_done(self, instant: datetime) -> bool:
         return _key(instant) in self.done
@@ -408,7 +452,14 @@ class AlarmCache:
         ring = _load_ring(raw.get("ring"), stopped=restored_mode == "snoozed") if session else None
         if ring is not None and not _same_instant(ring.started_at, ring_started):
             ring = None
+        def count(key: str) -> int | None:
+            value = raw.get(key)
+            return validate_manual_snoozes(value) if value is not None else None
+
         return DaemonState(
+            manual_snoozes=count("manual_snoozes") if phase else None,
+            pending_manual_snoozes=count("pending_manual_snoozes"),
+            accepted_control_at=parse_ha_datetime(raw.get("accepted_control_at")),
             mode=restored_mode,
             enabled=raw.get("enabled", True) is not False,
             active=active if restored_mode != "idle" else None,
@@ -444,6 +495,10 @@ class AlarmCache:
             "ring_started": state.ring_started.isoformat() if state.ring_started else None,
             "snooze_until": state.snooze_until.isoformat() if state.snooze_until else None,
             "snoozes": state.snoozes,
+            "manual_snoozes": state.manual_snoozes,
+            "pending_manual_snoozes": state.pending_manual_snoozes,
+            "accepted_control_at": (state.accepted_control_at.isoformat()
+                                    if state.accepted_control_at else None),
             "audio_failed": state.audio_failed,
             "window_done_pending": (state.window_done_pending.isoformat()
                                     if state.window_done_pending else None),
@@ -579,21 +634,48 @@ def _cancelled(
 
 def _idle(state: DaemonState) -> DaemonState:
     return replace(state, mode="idle", active=None, active_kind="", ring_started=None,
-                   snooze_until=None, snoozes=0, deadline=None, phase="")
+                   snooze_until=None, snoozes=0, deadline=None, phase="",
+                   manual_snoozes=None, accepted_control_at=None)
 
 def _minus(instant: datetime, delta: timedelta) -> datetime:
     """Absolute-time subtraction (DST-safe), returned in ``instant``'s zone."""
     return (instant.astimezone(UTC) - delta).astimezone(instant.tzinfo)
 
+def _manual_count(instant: datetime, kind: str, inputs: Inputs, state: DaemonState) -> int | None:
+    if kind != "wake":
+        return None
+    # A recognized pending manual session cannot be implicitly globalized by a
+    # missing helper or a republish of the same instant with different policy.
+    if (_same_instant(instant, state.pending) and state.pending_manual_snoozes is not None
+            and state.pending_deadline is not None):
+        return validate_manual_snoozes(state.pending_manual_snoozes)
+    if (inputs.ha_ok and _same_instant(instant, inputs.wake_at)
+            and inputs.deadline_at is not None and inputs.manual_snoozes is not None):
+        count = validate_manual_snoozes(inputs.manual_snoozes)
+        if inputs.deadline_at.astimezone(UTC) - instant.astimezone(UTC) == timedelta(
+            seconds=count * MANUAL_SNOOZE_SECONDS,
+        ):
+            return count
+    return None
+
+
 def _commute_deadline(
     instant: datetime, kind: str, inputs: Inputs, state: DaemonState, settings: Settings,
 ) -> datetime | None:
-    """D for a commute wake, or None (nap, fallback, window off, helpers disagree).
+    """Return the deadline for a validated manual or globally configured window.
 
-    Only an exact ``D - first_alarm_lead == wake`` match counts, so a stale or
-    half-written deadline helper degrades to the legacy alarm, never a window.
+    Manual windows require matching paired policy; ordinary windows require
+    exact global-lead geometry. Naps and unrecognized windows return None.
     """
-    if settings.window is None or kind != "wake":
+    if kind != "wake":
+        return None
+    count = _manual_count(instant, kind, inputs, state)
+    if count is not None:
+        if (_same_instant(instant, state.pending) and state.pending_manual_snoozes == count
+                and state.pending_deadline is not None):
+            return state.pending_deadline
+        return inputs.deadline_at
+    if settings.window is None:
         return None
     sources = [state.pending_deadline]
     if inputs.ha_ok and inputs.deadline_known:
@@ -620,20 +702,22 @@ def ring_profile(state: DaemonState, settings: Settings) -> RingProfile | None:
 def _window_step(
     state: DaemonState, now: datetime, inputs: Inputs, settings: Settings, actions: list[Action],
 ) -> DaemonState:
-    """Commute wake window: unlimited short snoozes, then an undismissable final."""
+    """Honor bounded manual or global snooze policy, then enforce the final alarm."""
     window = settings.window or WindowSettings()
     deadline = state.deadline
     active = state.active
     assert deadline is not None and active is not None
     # A replan may pull D earlier (same day) but never push the deadline later.
     if (
-        inputs.ha_ok and inputs.deadline_known and inputs.deadline_at is not None
+        state.manual_snoozes is None and inputs.manual_snoozes is None
+        and inputs.ha_ok and inputs.deadline_known and inputs.deadline_at is not None
         and not _le(deadline, inputs.deadline_at)
         and to_nyc(inputs.deadline_at).date() == to_nyc(deadline).date()
     ):
         deadline = inputs.deadline_at
         state = replace(state, deadline=deadline)
-    deadline = _minus(deadline, window.deadline_lead)
+    if state.manual_snoozes is None:
+        deadline = _minus(deadline, window.deadline_lead)
     if state.snooze_until is not None and _le(deadline, state.snooze_until):
         state = replace(state, snooze_until=deadline)
 
@@ -659,15 +743,21 @@ def _window_step(
         return replace(state, mode="ringing", phase="final", ring_started=now, snooze_until=None)
     if state.mode == "ringing":
         # HA stop is never a dismissal here: treat it like snooze.
-        if _after(inputs.snooze_pressed_at, state.ring_started) or _after(
-            inputs.stop_pressed_at, state.ring_started,
-        ):
-            until = (now.astimezone(UTC) + window.snooze).astimezone(now.tzinfo)
+        controls = [stamp for stamp in (inputs.snooze_pressed_at, inputs.stop_pressed_at)
+                    if stamp is not None and _after(stamp, state.ring_started) and (
+                        state.accepted_control_at is None or _after(stamp, state.accepted_control_at)
+                    )]
+        allowed = state.manual_snoozes is None or state.snoozes < state.manual_snoozes
+        if controls and allowed:
+            interval = (timedelta(seconds=MANUAL_SNOOZE_SECONDS)
+                        if state.manual_snoozes is not None else window.snooze)
+            until = (now.astimezone(UTC) + interval).astimezone(now.tzinfo)
             if _le(deadline, until):
                 until = deadline
             actions += [StopRing("snooze"), PublishState("snoozed")]
-            return replace(state, mode="snoozed", snooze_until=until, snoozes=state.snoozes + 1)
-        if state.ring_started is not None and (
+            return replace(state, mode="snoozed", snooze_until=until, snoozes=state.snoozes + 1,
+                           accepted_control_at=max(controls, key=lambda d: d.astimezone(UTC)))
+        if state.manual_snoozes is None and state.ring_started is not None and (
             now.astimezone(UTC) - state.ring_started.astimezone(UTC) >= settings.max_ring
         ):
             # Auto-snooze briefly, then re-ring even without a button press.
@@ -786,12 +876,17 @@ def _step(
         _commute_deadline(pending, kind, inputs, state, settings) if pending is not None else None
     )
     deadlines = {_key(t): _commute_deadline(t, k, inputs, state, settings) for t, k in due}
-    state = replace(state, pending=pending, pending_kind=kind, pending_deadline=pending_deadline)
+    counts = {_key(t): _manual_count(t, k, inputs, state) for t, k in due}
+    pending_count = _manual_count(pending, kind, inputs, state) if pending is not None else None
+    state = replace(state, pending=pending, pending_kind=kind, pending_deadline=pending_deadline,
+                    pending_manual_snoozes=pending_count)
     for instant, kind in due:
         state = _mark_done(state, instant)
         anchor = deadlines[_key(instant)]
+        count = counts[_key(instant)]
         if anchor is not None:
-            final_at = _minus(anchor, (settings.window or WindowSettings()).deadline_lead)
+            final_at = (anchor if count is not None else
+                        _minus(anchor, (settings.window or WindowSettings()).deadline_lead))
             if now.astimezone(UTC) - final_at.astimezone(UTC) > settings.stale_limit:
                 logger.warning("alarm daemon: skipping commute wake %s (final recovery expired)",
                                instant.isoformat())
@@ -799,6 +894,7 @@ def _step(
                 actions += [StartRing(instant, kind), PublishState("ringing")]
                 state = replace(state, mode="ringing", active=instant, active_kind=kind,
                                 ring_started=now, snoozes=0, deadline=anchor,
+                                manual_snoozes=count, accepted_control_at=None,
                                 phase="final" if _le(final_at, now) else "window")
             continue
         if now.astimezone(UTC) - instant.astimezone(UTC) > settings.stale_limit:
@@ -866,7 +962,8 @@ def step(
               or _after(inputs.activity_at, previous.ring_started)):
             reason = "desktop_activity"
         elif (previous.deadline is not None and now.astimezone(UTC)
-              - _minus(previous.deadline, (settings.window or WindowSettings()).deadline_lead).astimezone(UTC)
+              - (previous.deadline if previous.manual_snoozes is not None else
+                 _minus(previous.deadline, (settings.window or WindowSettings()).deadline_lead)).astimezone(UTC)
               > settings.stale_limit):
             reason = "recovery_expired"
         elif _after(inputs.stop_pressed_at, previous.ring_started):
@@ -1414,12 +1511,14 @@ class AlarmDaemon:
             # A cached ring is not currently audible. Apply missed-final bounds,
             # unlike a live ring which must continue indefinitely in final phase.
             deadline = self.state.deadline
-            if (inputs.ha_ok and inputs.deadline_known
+            if (self.state.manual_snoozes is None and inputs.manual_snoozes is None
+                    and inputs.ha_ok and inputs.deadline_known
                     and inputs.deadline_at is not None and deadline is not None
                     and to_nyc(inputs.deadline_at).date() == to_nyc(deadline).date()):
                 deadline = min(deadline, inputs.deadline_at, key=lambda d: d.astimezone(UTC))
             if deadline is not None:
-                final_at = _minus(deadline, (self.settings.window or WindowSettings()).deadline_lead)
+                final_at = (deadline if self.state.manual_snoozes is not None else
+                            _minus(deadline, (self.settings.window or WindowSettings()).deadline_lead))
                 expired = now.astimezone(UTC) - final_at.astimezone(UTC) > self.settings.stale_limit
                 if _le(final_at, now) and (self._resume_audio or expired):
                     self.state = replace(self.state, mode="snoozed", phase="window", snooze_until=now)

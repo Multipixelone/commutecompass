@@ -3,9 +3,11 @@
 This is the relay contract for the infra owner, not production HA configuration.
 No activation, infra pin change, notification cadence change, or live-device
 verification is implied. The application defaults to `legacy` publication.
-The shared calendar/fallback advance revision passed offline tests, lint, type
-checks and Nix checks/build. See [alarm-verification.md](alarm-verification.md)
-for evidence and the separate, unexecuted infra integration.
+The earlier shared calendar/fallback advance revision has recorded offline
+validation. That result does **not** validate the explicit manual-snooze extension
+below. See [alarm-verification.md](alarm-verification.md#explicit-manual-snoozes-2026-11-07-validation-pending)
+for the current source checkpoint and pending validator/infra work. The manual
+extension requires coordinated HA consumers even though the version stays 1.
 
 ## Liveness and audio dead-man fallback
 
@@ -63,11 +65,12 @@ ID, issue time, and body, rather than generating a new identity per HTTP attempt
 
 Kinds:
 
-| Kind | Wake | Deadline | Next prep |
-|---|---|---|---|
-| `commute` | required | required; wake = deadline − configured first lead | optional |
-| `legacy` | required | null | optional |
-| `none` | null | null | null |
+| Kind | Wake | Deadline | Next prep | `snoozes` |
+|---|---|---|---|---|
+| `commute` | required | required; wake = deadline − configured first lead | optional | absent |
+| `manual` | required | required; wake = deadline − N × 390 seconds | optional | required integer N, 0–12 |
+| `legacy` | required | null | optional | absent |
+| `none` | null | null | null | absent |
 
 `commute` is the existing wire kind for a wake/deadline window, not proof that
 an event supplied its anchor. An enabled fallback window uses `commute` too;
@@ -81,6 +84,74 @@ For calendar windows it remains `leave_at - first_alarm_lead_minutes`, **before*
 applying `alarm.window.prep_advance_minutes`. The shared advance moves wake and
 deadline only. Fallback does not create a synthetic prep cap. Do not subtract a
 lead again or use the nap cap to derive wake lights.
+
+### Explicit manual-snooze extension
+
+`alarm wake --leave TIME --snoozes N` selects a per-manual policy, not a global
+snooze override. Its v1 kind is `manual`; the only added key is `snoozes`, appended
+**after `next_prep_at`**. The seven-key strings for `commute`, `legacy` and `none`
+remain byte-for-byte unchanged. An omitted count keeps configured manual behavior
+and the existing `commute` wire kind, not `manual` with a null count.
+
+Example for final 10:00 NYC on an EST date, N=3, no nap cap:
+
+```json
+{
+  "snapshot": "{\"v\":1,\"id\":\"34d3d3db0cba4eedb39eb9986f71d7d7\",\"issued_at\":\"2026-11-08T01:00:00Z\",\"kind\":\"manual\",\"wake_at\":\"2026-11-08T14:40:30Z\",\"deadline_at\":\"2026-11-08T15:00:00Z\",\"next_prep_at\":null,\"snoozes\":3}",
+  "next_event": ""
+}
+```
+
+Validate `deadline_at - wake_at == N * 390 seconds` as elapsed UTC time,
+**independently of the configured first lead**. Both instants are required even
+for N=0, when they are equal. Reject missing/null counts, booleans, floats,
+numeric strings, out-of-range values, wrong geometry and `snoozes` on any other
+kind. Keep canonical ordering, timestamp precision, idempotency and the exact
+readback requirement. An older v1 consumer rejects `manual`; unchanged version 1
+is not evidence of consumer readiness.
+
+The manual final is the requested `--leave` instant, without shared prep advance
+or global deadline-lead subtraction. Count limits accepted pre-final stop/snooze
+actions; it is not a total-ring limit. Duplicate actions do not spend the count.
+Automatic ring timeout is disabled for explicit policies, exhaustion must not
+silence audio, and final wins over stop/snooze/timeout. See
+[manual timing and lifecycle](alarm-design.md#explicit-manual-snooze-budget)
+for late opt-in, persistence and recovery requirements.
+
+### Legacy manual policy helper
+
+The legacy service keeps its existing fields and adds **`manual_snoozes`**:
+an integer when an explicit count is selected, otherwise **`""` to clear stale
+policy**. Unlike the v1 extension, this adds a field even to ordinary legacy
+payloads. This service field is not named `snoozes`; `snoozes` is the field inside
+the helper JSON and v1 snapshot. The separate HA integration must store the
+selected policy in `alarm.window.manual_policy_entity`, whose application default is
+`input_text.commute_manual_wake_policy`, with `max: 255`, restored state and no
+resetting `initial`. Required helper value for the same example:
+
+```json
+{"wake_at":"2026-11-08T14:40:30Z","deadline_at":"2026-11-08T15:00:00Z","snoozes":3}
+```
+
+Use UTC timestamps (`Z` or `+00:00`); the daemon rejects naive or nonzero-offset
+policy timestamps. Validate the count, geometry, and **exact pair of wake and
+deadline instants** against the authoritative UTC helpers. A matching wake alone
+is insufficient; a stale policy must not attach to another deadline. Store an
+empty helper string on publications without an explicit count (and accept a
+missing service field from older publishers as no explicit policy). This helper
+does not make legacy multi-helper writes atomic; offline tests must cover partial
+writes, HA restart restoration and stale policy data. The daemon treats empty
+string as known clear, but missing/malformed/mismatched policy as unknown.
+
+Older schedules/SQLite/cache records without a count keep configured behavior.
+A missing/unknown/invalid legacy policy helper must not invent a count, suppress
+a wake or upgrade an unrelated pair to a manual window. Only a valid matching
+policy grants the explicit budget; without it the ordinary legacy geometry check
+still applies. A previously adopted pending/active policy is cached separately
+and must not be erased by an unavailable helper. This compatibility path is
+**not** assurance that a newly counted manual request works against old HA scripts.
+Provision and test the helper and payload consumer first; v1 never falls back
+to this helper.
 
 ### Shared calendar/fallback geometry
 
@@ -98,9 +169,10 @@ The canonical advance defaults to 0 (integer 0–1440). The legacy
 value; conflicting dual keys are rejected. Config output is canonical and
 `config set`/`config unset` through either name target the same setting. It is not
 `prep.prep_minutes`, which remains route/event preparation time. Manual
-`alarm wake --leave X` stays exact and unadvanced; manual/calendar conflict and
-`--force` still compare against the calendar's effective final. Nap caps and
-window-disabled legacy waking remain unchanged.
+`alarm wake --leave X` stays unadvanced (exact final with deadline lead 0 when
+count is omitted; exact regardless of that lead with explicit `--snoozes`).
+Manual/calendar conflict and `--force` still compare against the calendar's
+effective final. Nap caps and window-disabled legacy waking remain unchanged.
 
 With fallback base noon, first lead 60 and deadline lead 0:
 
@@ -126,16 +198,19 @@ not a genuine no-events result, and never permission to read legacy wake,
 deadline, prep, or the wake portion of a legacy next-alarm sensor. Nap controls,
 buttons, skip and master-off remain independent.
 
-The longest record is 235 characters with all three schedule timestamps and
-`issued_at` containing microseconds. Event titles are deliberately outside it.
-The 255-character limit applies to the actual serialized helper state. Do not
-truncate or spread a record across helpers. Exact received-string lengths are
-covered for every valid kind/null combination:
+The original kinds remain at most 235 characters. With the manual extension the
+maximum is **247 characters**: two-digit N plus all four timestamps containing
+microseconds. Event titles stay outside the record. The 255-character limit
+applies to the actual serialized helper state; do not truncate or spread a record
+across helpers. These canonical lengths are acceptance expectations, not a fresh
+test result; the validator must cover every kind/null/count combination:
 
 | Kind | `next_prep_at` | Whole-second length | With microseconds |
 |---|---|---:|---:|
 | `commute` | null | 189 | 210 |
 | `commute` | filled | 207 | 235 |
+| `manual`, N=0–9 / 10–12 | null | 200 / 201 | 221 / 222 |
+| `manual`, N=0–9 / 10–12 | filled | 218 / 219 | 246 / 247 |
 | `legacy` | null | 170 | 184 |
 | `legacy` | filled | 188 | 209 |
 | `none` | null (required) | 150 | 157 |
@@ -147,9 +222,11 @@ it into a running installation without the infra consumer review and explicit
 activation approval. Omit `initial` so helper state restores on HA restart.
 The example uses the application default 37-minute first lead (2220 seconds),
 not the separately configured 60-minute infra lead. For the 60-minute integration
-example, the validator's duration must be 3600 seconds. Change producer and
-validation together; do not change the JSON schema or subtract the prep advance
-in HA.
+example, the **`commute`** validator's duration must be 3600 seconds. The
+**`manual`** branch always uses N × 390 seconds, never that configured lead.
+Change producer and consumer validation together; do not subtract prep advance
+in HA. This revised documentation example is not rendered/deployed HA evidence;
+its manual branch needs offline native-template/runtime validation.
 
 ```yaml
 input_text:
@@ -190,6 +267,9 @@ script:
             {% if loop.first or raw not in ['', 'unknown', 'unavailable'] %}
             {% set p = raw | from_json(none) %}
             {% set keys = ['v','id','issued_at','kind','wake_at','deadline_at','next_prep_at'] %}
+            {% if p is mapping and p.get('kind') == 'manual' %}
+              {% set keys = keys + ['snoozes'] %}
+            {% endif %}
             {% set ts = '^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d{6})?Z$' %}
             {% set ns = namespace(ok=p is mapping and raw is string and raw | length <= 255) %}
             {% if ns.ok %}
@@ -197,7 +277,7 @@ script:
                  and p.v is integer and p.v == 1
                  and p.id is string and p.id | length == 32
                  and p.id is match('^[0-9a-f]{32}$')
-                 and p.kind in ['commute','legacy','none'] %}
+                 and (p.kind in ['commute','legacy','none'] or p.kind == 'manual') %}
               {% for key in ['issued_at','wake_at','deadline_at','next_prep_at'] %}
                 {% set value = p.get(key) %}
                 {% if value is not none or key == 'issued_at' %}
@@ -212,12 +292,22 @@ script:
                    kind=p.kind, wake_at=p.wake_at, deadline_at=p.deadline_at,
                    next_prep_at=p.next_prep_at) | to_json
                    | replace(', ', ',') | replace(': ', ':') %}
+                {% if p.kind == 'manual' %}
+                  {% set canonical = canonical[:-1] ~ ',"snoozes":' ~ (p.snoozes | to_json) ~ '}' %}
+                {% endif %}
                 {% set ns.ok = raw == canonical and '.000000Z' not in raw %}
               {% endif %}
               {% if p.kind == 'none' %}
                 {% set ns.ok = ns.ok and p.wake_at is none and p.deadline_at is none and p.next_prep_at is none %}
               {% elif p.kind == 'legacy' %}
                 {% set ns.ok = ns.ok and p.wake_at is not none and p.deadline_at is none %}
+              {% elif p.kind == 'manual' %}
+                {% if ns.ok and p.wake_at is not none and p.deadline_at is not none
+                      and p.snoozes is integer and 0 <= p.snoozes <= 12 %}
+                  {% set ns.ok = (as_datetime(p.deadline_at) - as_datetime(p.wake_at)).total_seconds() == p.snoozes * 390 %}
+                {% else %}
+                  {% set ns.ok = false %}
+                {% endif %}
               {% elif p.kind == 'commute' %}
                 {% if ns.ok and p.wake_at is not none and p.deadline_at is not none %}
                   {% set ns.ok = (as_datetime(p.deadline_at) - as_datetime(p.wake_at)).total_seconds() == 2220 %}
@@ -259,7 +349,7 @@ script:
 ```
 
 Before the single write, reject malformed field types/unknown fields, invalid
-canonical UTC timestamps, bad commute tuples, and overlong payloads. Preserve
+canonical UTC timestamps, bad commute/manual tuples, and overlong payloads. Preserve
 microseconds; compare ordering as instants, not lexicographic ISO strings.
 Same ID plus exact content is an idempotent success. Same ID/different content,
 an older issue time, or different content at equal issue time is a conflict.
@@ -363,9 +453,17 @@ and `audio_failed == false`; match the session/ring identity before acting on an
 older rendered notification. `ringing` alone is scheduling intent, not player
 health. `starting`, `failed`, `stopped`, missing or stale observations are not
 evidence of running playback. Snooze is available only in the appropriate
-legacy/window phase, never final. Final dismissal remains local desktop activity
+legacy/window phase and subject to any remaining explicit manual budget, never
+final. Final dismissal remains local desktop activity
 (or independent master-off/skip), not an HA stop button. Advisory status must
 never block those independent local safety controls.
+
+The manual **schedule** kind still uses daemon session kind `wake`. The status
+schema above does not export an explicit count or remaining budget; the current
+published schedule may belong to a different pending session. Do not infer an
+active session's remaining snoozes from it, or treat a rendered Snooze button as
+permission to bypass the daemon's budget/final gate. Persisted daemon policy and
+accepted-control timestamp are local state, not added status fields.
 
 A terminal record applies only to its session ID. A late wake terminal cannot
 cancel a newer wake, and a nap start/termination cannot acknowledge a wake.
@@ -389,6 +487,13 @@ Python `schedule_contract = "v1"` and selector `v1` while idle and away from an
 alarm boundary. Activation
 and rollback require separate authorization. Missing entities are not rollback.
 No upstream publication or infra pin change is authorized by this implementation.
+
+For **explicit manual counts**, legacy mode also needs its new helper/payload
+consumer; choosing legacy is not a bypass for that requirement. Follow the
+[required infra/HA integration checklist](alarm-design.md#required-infraha-integration-for-manual-counts),
+including offline validation and seconds-preserving lighting. Keep the existing
+fade lead exactly once before the published first ring, including N=0. No extra
+prep advance or global deadline lead belongs on a manual pair.
 
 For calendar and fallback windows, L is the base final (`Plan.leave_at` or
 `alarm.fallback_time`) minus the one shared `alarm.window.prep_advance_minutes`
