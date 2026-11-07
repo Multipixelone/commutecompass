@@ -125,13 +125,24 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> 
     # Parse active periods
     active_periods: list[tuple[datetime, datetime | None]] = []
     for period in gtfs_alert.active_period:
-        start = _parse_timestamp(period.start)
+        if not period.HasField("start") and not period.HasField("end"):
+            logger.warning("Discarding empty alert active period")
+            continue
+        # An omitted start is open, not the protobuf scalar default (zero).
+        # Keep the model's required datetime start using an aware lower bound.
+        start = (
+            _parse_timestamp(period.start)
+            if period.HasField("start")
+            else datetime.min.replace(tzinfo=NYC_TZ)
+        )
         end = _parse_timestamp(period.end) if period.HasField("end") else None
-        if start is not None:
-            if end is not None and end < start:
-                logger.warning("Discarding inverted alert active period")
-                continue
-            active_periods.append((start, end))
+        if start is None or (period.HasField("end") and end is None):
+            logger.warning("Discarding invalid alert active period")
+            continue
+        if end is not None and end < start:
+            logger.warning("Discarding inverted alert active period")
+            continue
+        active_periods.append((start, end))
 
     if gtfs_alert.active_period and not active_periods:
         return None
@@ -162,10 +173,8 @@ def _parse_alert(gtfs_alert: GtfsAlert, system: str, *, entity_id: str = "") -> 
 
     # Extract URL if present
     url: str | None = None
-    if gtfs_alert.HasField("url") and gtfs_alert.url.HasField("translation"):
-        translations = gtfs_alert.url.translation
-        if translations:
-            url = translations[0].text if translations[0].text else None
+    if gtfs_alert.HasField("url"):
+        url = _extract_text(gtfs_alert.url) or None
 
     # Prefer the feed's own entity id — it is the canonical stable identifier.
     # Fall back to a derived id (routes + first-period start) only when the feed
@@ -468,37 +477,26 @@ def _heuristic_relevance_decision(
 
 
 def _alert_affects_route(alert: Alert, route: Route, at_time: datetime) -> bool:
-    """Check if a single alert affects the route (system/line overlap + time overlap)."""
-    # 1. System/line overlap check
-    if not _systems_lines_overlap(alert, route):
-        return False
-
-    # 2. Time-window overlap check
-    return _time_overlaps(alert, route, at_time)
+    """Require system, line and active-period overlap on the same transit leg."""
+    return any(
+        _leg_matches_alert(alert, leg) and _leg_time_overlaps(alert, leg)
+        for leg in route.legs
+    )
 
 
 def _systems_lines_overlap(alert: Alert, route: Route) -> bool:
     """Check if any route leg's (system, line) intersects alert's affected routes/systems."""
-    for leg in route.legs:
-        if leg.mode != "TRANSIT":
-            continue
+    return any(_leg_matches_alert(alert, leg) for leg in route.legs)
 
-        # Check system match
-        # System matches — now check line/route overlap
-        if (
-            alert.affected_systems
-            and leg.system
-            and leg.system in alert.affected_systems
-            and _line_matches(alert, leg)
-        ):
-            return True
 
-        # Also check route-level: some alerts affect entire systems
-        if alert.affected_systems and leg.system and "*" in alert.affected_routes:
-            # Wildcard means the whole system is affected
-            return True
-
-    return False
+def _leg_matches_alert(alert: Alert, leg: TransitLeg) -> bool:
+    """Match line or whole-system selectors only within the affected system."""
+    return (
+        leg.mode == "TRANSIT"
+        and leg.system is not None
+        and leg.system in alert.affected_systems
+        and _line_matches(alert, leg)
+    )
 
 
 def _line_matches(alert: Alert, leg: TransitLeg) -> bool:
@@ -509,8 +507,8 @@ def _line_matches(alert: Alert, leg: TransitLeg) -> bool:
     a hypothetical "10".  A decorated line like "C-local" still matches affected
     route "C" because we also compare against the line's alphanumeric tokens.
     """
-    if not alert.affected_routes:
-        # No specific routes means whole system is affected
+    if not alert.affected_routes or "*" in alert.affected_routes:
+        # Empty routes and wildcard selectors both mean the whole system.
         return True
 
     if not leg.line:
@@ -539,20 +537,24 @@ def _time_overlaps(alert: Alert, route: Route, at_time: datetime) -> bool:
     Returns:
         True if any leg's time window overlaps any alert active period.
     """
-    for leg in route.legs:
-        if leg.mode != "TRANSIT":
+    return any(
+        leg.mode == "TRANSIT" and _leg_time_overlaps(alert, leg)
+        for leg in route.legs
+    )
+
+
+def _leg_time_overlaps(alert: Alert, leg: TransitLeg) -> bool:
+    """Check active periods against this leg, without borrowing another leg's time."""
+    leg_start = _ensure_aware(leg.depart_at)
+    leg_end = _ensure_aware(leg.arrive_at)
+    for active_start, active_end in alert.active_periods:
+        start = _ensure_aware(active_start)
+        end = _ensure_aware(active_end) if active_end is not None else None
+        if end is not None and end < start:
+            logger.warning("Discarding inverted alert active period")
             continue
-
-        leg_start = _ensure_aware(leg.depart_at)
-        leg_end = _ensure_aware(leg.arrive_at)
-
-        for active_start, active_end in alert.active_periods:
-            if active_end is not None and _ensure_aware(active_end) < _ensure_aware(active_start):
-                logger.warning("Discarding inverted alert active period")
-                continue
-            if _periods_overlap(leg_start, leg_end, active_start, active_end):
-                return True
-
+        if _periods_overlap(leg_start, leg_end, start, end):
+            return True
     return False
 
 

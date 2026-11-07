@@ -32,13 +32,31 @@ def test_negative_alert_timestamp_is_rejected() -> None:
     assert _parse_timestamp(1) == datetime.fromtimestamp(1, NYC_TZ)
 
 
-def test_inverted_alert_period_is_discarded() -> None:
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        pytest.param(None, None, id="both-omitted"),
+        pytest.param(0, None, id="explicit-zero-start"),
+        pytest.param(0, 4000, id="invalid-start-with-valid-end"),
+        pytest.param(2**64 - 1, None, id="unrepresentable-start"),
+        pytest.param(None, 0, id="end-only-invalid-zero"),
+        pytest.param(None, 2**64 - 1, id="end-only-unrepresentable"),
+        pytest.param(2000, 0, id="explicit-zero-end"),
+        pytest.param(2000, 2**64 - 1, id="unrepresentable-end"),
+        pytest.param(2000, 1000, id="inverted"),
+    ],
+)
+def test_invalid_alert_period_is_discarded(start: int | None, end: int | None) -> None:
+    """Bad bounds must not become open bounds or poison an adjacent valid period."""
     from google.transit import gtfs_realtime_pb2 as gtfs
 
     proto = gtfs.Alert()
     proto.informed_entity.add().route_id = "C"
     period = proto.active_period.add()
-    period.start, period.end = 2000, 1000
+    if start is not None:
+        period.start = start
+    if end is not None:
+        period.end = end
     assert _parse_alert(proto, "MTA Subway") is None
     valid = proto.active_period.add()
     valid.start, valid.end = 3000, 4000
@@ -47,6 +65,56 @@ def test_inverted_alert_period_is_discarded() -> None:
     assert parsed.active_periods == [
         (datetime.fromtimestamp(3000, NYC_TZ), datetime.fromtimestamp(4000, NYC_TZ)),
     ]
+
+
+@pytest.mark.parametrize(
+    ("end_hour", "matches"),
+    [pytest.param(11, True, id="ends-after-trip"), pytest.param(9, False, id="expired")],
+)
+def test_end_only_alert_period_has_aware_open_start(end_hour: int, matches: bool) -> None:
+    """Omitting start is valid; the end still limits applicability to a journey."""
+    from google.transit import gtfs_realtime_pb2 as gtfs
+
+    departure = datetime(2026, 11, 4, 10, tzinfo=NYC_TZ)
+    end = departure.replace(hour=end_hour)
+    proto = gtfs.Alert()
+    proto.informed_entity.add().route_id = "C"
+    proto.active_period.add().end = int(end.timestamp())
+
+    parsed = _parse_alert(proto, "MTA Subway")
+    assert parsed is not None
+    assert len(parsed.active_periods) == 1
+    start, parsed_end = parsed.active_periods[0]
+    assert start.utcoffset() is not None
+    assert start <= departure
+    assert parsed_end == end
+
+    arrival = departure + timedelta(minutes=30)
+    route = sample_route(
+        [subway_leg("C", depart_at=departure, arrive_at=arrival)],
+        depart_at=departure,
+        arrive_at=arrival,
+    )
+    # Checking later must not invent a new start and hide an earlier valid trip.
+    result = alerts_affecting_route([parsed], route, departure + timedelta(days=1))
+    assert result == ([parsed] if matches else [])
+
+
+def test_alert_without_periods_keeps_current_open_ended_fallback() -> None:
+    """No periods remains valid, unlike an explicitly present but empty period."""
+    from google.transit import gtfs_realtime_pb2 as gtfs
+
+    proto = gtfs.Alert()
+    proto.informed_entity.add().route_id = "C"
+    before = datetime.now(NYC_TZ)
+    parsed = _parse_alert(proto, "MTA Subway")
+    after = datetime.now(NYC_TZ)
+
+    assert parsed is not None
+    assert len(parsed.active_periods) == 1
+    start, end = parsed.active_periods[0]
+    assert before <= start <= after
+    assert end is None
 
 
 def test_inverted_stored_period_does_not_overlap() -> None:
@@ -206,6 +274,45 @@ class TestFetchAlerts:
             )
 
         assert alerts == []
+
+    @pytest.mark.parametrize(
+        ("url_texts", "expected_url"),
+        [
+            pytest.param(["https://example.com/status"], "https://example.com/status", id="url"),
+            pytest.param(
+                ["", "https://example.com/status"],
+                "https://example.com/status",
+                id="first-nonempty-translation",
+            ),
+            pytest.param([], None, id="empty-translations"),
+        ],
+    )
+    def test_real_protobuf_url_preserves_neighboring_alerts(
+        self, url_texts: list[str], expected_url: str | None,
+    ) -> None:
+        """Repeated URL translations cannot turn a usable feed into an empty result."""
+        from google.transit.gtfs_realtime_pb2 import FeedMessage
+
+        feed = FeedMessage()
+        feed.header.gtfs_realtime_version = "2.0"
+        for entity_id in ("before-url", "with-url", "after-url"):
+            entity = feed.entity.add()
+            entity.id = entity_id
+            entity.alert.informed_entity.add().route_id = "C"
+            entity.alert.header_text.translation.add().text = entity_id
+            entity.alert.active_period.add().start = 1700000000
+            if entity_id == "with-url":
+                entity.alert.url.SetInParent()
+                for text in url_texts:
+                    entity.alert.url.translation.add().text = text
+
+        mock_client = MagicMock()
+        mock_client.get.return_value.content = feed.SerializeToString()
+        alerts = _fetch_feed("https://example.com/subway.pb", "MTA Subway", mock_client)
+
+        assert [alert.header for alert in alerts] == ["before-url", "with-url", "after-url"]
+        assert [alert.url for alert in alerts] == [None, expected_url, None]
+        assert all(alert.affected_routes == {"C"} for alert in alerts)
 
     def test_distinct_alerts_same_route_and_time_get_distinct_ids(self) -> None:
         """Two different alerts on the same route/time must not collapse to one id.
@@ -450,6 +557,58 @@ class TestAlertsAffectingRoute:
 
         result = alerts_affecting_route([alert], route, now)
         assert len(result) == 1
+
+    @pytest.mark.parametrize(
+        ("early_system", "early_line", "later_system", "later_line", "affected_routes"),
+        [
+            pytest.param("MTA Subway", "A", "MTA Subway", "C", {"C"}, id="different-line"),
+            pytest.param("LIRR", "C", "MTA Subway", "C", {"C"}, id="different-system"),
+            pytest.param("LIRR", "Port Washington", "MTA Subway", "C", {"*"}, id="wildcard"),
+            pytest.param("LIRR", "Port Washington", "MTA Subway", "C", set(), id="whole-subway"),
+            pytest.param("MTA Subway", "C", "LIRR", "Port Washington", set(), id="whole-lirr"),
+        ],
+    )
+    def test_system_line_and_time_must_match_one_leg(
+        self,
+        early_system: str,
+        early_line: str,
+        later_system: str,
+        later_line: str,
+        affected_routes: set[str],
+    ) -> None:
+        """An unrelated earlier leg cannot lend its time window to a matching leg."""
+        departure = datetime(2026, 11, 4, 10, tzinfo=NYC_TZ)
+        arrival = departure + timedelta(hours=1)
+        route = sample_route(
+            [
+                subway_leg(
+                    early_line,
+                    system=early_system,
+                    depart_at=departure,
+                    arrive_at=departure + timedelta(minutes=20),
+                ),
+                subway_leg(
+                    later_line,
+                    system=later_system,
+                    depart_at=departure + timedelta(minutes=40),
+                    arrive_at=arrival,
+                ),
+            ],
+            depart_at=departure,
+            arrive_at=arrival,
+        )
+        wrong_leg_time = alert_with_period(
+            "wrong-leg-time", affected_routes, {later_system},
+            departure + timedelta(minutes=5), departure + timedelta(minutes=15),
+        )
+        same_leg_match = alert_with_period(
+            "same-leg-match", affected_routes, {later_system},
+            departure + timedelta(minutes=45), departure + timedelta(minutes=55),
+        )
+
+        assert alerts_affecting_route(
+            [wrong_leg_time, same_leg_match], route, departure,
+        ) == [same_leg_match]
 
     def test_open_ended_active_period(self) -> None:
         """Alert with no end time (open-ended) overlaps route at check time."""
