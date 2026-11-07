@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
@@ -12,6 +14,8 @@ import httpx
 import pytest
 
 from commutecompass.config import Config
+from commutecompass.format import escape_md, format_alerts_block
+from commutecompass.models import Alert
 from commutecompass.notify import (
     _MAX_MESSAGE_CHARS,
     STDOUT_MSG_END,
@@ -251,6 +255,166 @@ class TestTelegramNotifierSend:
 # ── Chunking tests ─────────────────────────────────────────────────────────────
 
 
+# This is a deliberately small *output* grammar, not a chunking algorithm: the
+# project emits escaped text, bold and simple links.  Full coverage of Telegram's
+# renderer is outside these local tests.  Matching each chunk separately catches
+# unmatched entities and dangling escapes without prescribing split positions.
+_MD_TEXT = r"(?:\\[\x01-\x7f]|[^\\_*\[\]()~`>#+=|{}.!-])"
+_MD_CHUNK_TOKEN = re.compile(
+    rf"\\[\x01-\x7f]|\*(?P<bold>{_MD_TEXT}+)\*"
+    rf"|\[(?P<label>{_MD_TEXT}+)\]\((?P<url>(?:\\[\\)]|[^\\)\n])+)\)"
+    rf"|{_MD_TEXT}"
+)
+
+
+def _render_safe_markdown_chunk(text: str) -> tuple[str, list[str]]:
+    """Validate supported MarkdownV2 and recover its text and link targets."""
+    visible: list[str] = []
+    urls: list[str] = []
+    position = 0
+    for token in _MD_CHUNK_TOKEN.finditer(text):
+        assert token.start() == position, f"Unsafe Markdown near {text[position:position + 40]!r}"
+        position = token.end()
+        if token.group("url") is not None:
+            visible.append(re.sub(r"\\(.)", r"\1", token.group("label")))
+            urls.append(re.sub(r"\\(.)", r"\1", token.group("url")))
+        elif token.group("bold") is not None:
+            visible.append(re.sub(r"\\(.)", r"\1", token.group("bold")))
+        else:
+            visible.append(re.sub(r"\\(.)", r"\1", token.group()))
+    assert position == len(text), f"Unclosed Markdown at {text[position:position + 40]!r}"
+    return "".join(visible), urls
+
+
+def _long_markdown_case(case: str) -> tuple[str, str, list[str]]:
+    if case == "generated_alerts":
+        headers = [f"Alert {i:02d}: use platform \\B (east). " + "Service changes " * 8
+                   for i in range(75)]
+        alerts = [Alert(
+            id=str(i), header=header, description="", severity="WARNING",
+            affected_routes={"C"}, affected_systems=set(), active_periods=[],
+        ) for i, header in enumerate(headers)]
+        visible = "Active service alerts:\n" + "\n".join(
+            f"⚠️ {header}\n  Routes: C" for header in headers
+        )
+        return format_alerts_block(alerts), visible, []
+    if case == "multiline_bold":
+        # Each line fits; the complete entity does not. A newline is not
+        # automatically a safe place to break a bold entity.
+        visible = "\n".join("Platform change " * 100 for _ in range(4))
+        return f"*{visible}*", visible, []
+    if case == "oversized_link":
+        url = "https://maps.example/route?waypoints=" + "40%2C-73%7C" * 500
+        return f"[Open directions]({url})", "Open directions", [url]
+    if case == "escape_boundary":
+        visible = "x" * (_MAX_MESSAGE_CHARS - 1) + ". Next platform \\B. " * 100
+        return escape_md(visible), visible, []
+    if case == "malformed_bold":
+        source = "*Unclosed service update\n" + "Keep original text and punctuation! " * 200
+        return source, source, []
+    if case == "unsupported_code":
+        source = "`" + "Use platform B " * 400 + "`"
+        return source, source, []
+    if case == "bold_and_links":
+        urls = [f"https://maps.example/route/{i}" for i in range(90)]
+        titles = [f"Rehearsal {i:02d} (east) \\B" for i in range(90)]
+        source = "\n".join(
+            f"*{escape_md(title)}*\n[Directions]({url})\n{escape_md('Leave at 7.30!')}\n"
+            for title, url in zip(titles, urls, strict=True)
+        )
+        visible = "\n".join(f"{title}\nDirections\nLeave at 7.30!\n" for title in titles)
+        return source, visible, urls
+    raise AssertionError(f"Unknown test case: {case}")
+
+
+@pytest.mark.parametrize("case", [
+    "generated_alerts", "multiline_bold", "oversized_link", "escape_boundary", "bold_and_links",
+    "malformed_bold", "unsupported_code",
+])
+def test_long_markdown_delivery_is_independently_safe_and_lossless(case: str) -> None:
+    """D5: character/newline splits must not cut bold, URLs or escape pairs.
+
+    Previous length-only chunk tests could pass while Telegram rejected the
+    pieces. A safe literal-source fallback may lose styling but not content.
+    """
+    source, expected_visible, expected_urls = _long_markdown_case(case)
+    assert len(source) > _MAX_MESSAGE_CHARS
+    payloads: list[dict[str, object]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.Client
+    with patch("httpx.Client", side_effect=lambda **kw: real_client(
+        transport=httpx.MockTransport(transport), **kw,
+    )):
+        assert TelegramNotifier("SYNTHETIC_TOKEN", 12345).send(source) is True
+
+    assert len(payloads) > 1
+    visible_parts: list[str] = []
+    urls: list[str] = []
+    for payload in payloads:
+        assert payload["chat_id"] == 12345
+        chunk = payload["text"]
+        assert isinstance(chunk, str)
+        assert 0 < len(chunk) <= _MAX_MESSAGE_CHARS
+        mode = payload.get("parse_mode")
+        if mode == "MarkdownV2":
+            visible, targets = _render_safe_markdown_chunk(chunk)
+            visible_parts.append(visible)
+            urls.extend(targets)
+        else:
+            assert mode in (None, "")  # an explicitly plain fallback is safe too
+            visible_parts.append(chunk)
+    rendered = "".join(visible_parts)
+    assert (rendered, urls) in [(expected_visible, expected_urls), (source, [])]
+
+
+@pytest.mark.parametrize("parse_mode", ["HTML", ""])
+def test_non_markdown_large_messages_keep_raw_content(parse_mode: str) -> None:
+    """D5's Markdown fallback must not start escaping other parse modes."""
+    source = "<b>Platform B</b> & \\ corridor!\n" * 300
+    payloads: list[dict[str, object]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.Client
+    with patch("httpx.Client", side_effect=lambda **kw: real_client(
+        transport=httpx.MockTransport(transport), **kw,
+    )):
+        assert TelegramNotifier("SYNTHETIC_TOKEN", 12345).send(source, parse_mode=parse_mode) is True
+    assert len(payloads) > 1
+    assert all(payload["parse_mode"] == parse_mode for payload in payloads)
+    chunks = [payload["text"] for payload in payloads]
+    assert all(isinstance(chunk, str) and 0 < len(chunk) <= _MAX_MESSAGE_CHARS for chunk in chunks)
+    assert "".join(str(chunk) for chunk in chunks) == source
+
+
+def test_safe_markdown_chunks_stop_on_partial_failure_in_order() -> None:
+    """D5: safe splitting must not reorder/retry accepted chunks or send after failure."""
+    source, _, _ = _long_markdown_case("bold_and_links")
+    runs: list[list[dict[str, object]]] = [[], []]
+    run = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        runs[run].append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": not (run == 1 and len(runs[run]) == 2)})
+
+    real_client = httpx.Client
+    with patch("httpx.Client", side_effect=lambda **kw: real_client(
+        transport=httpx.MockTransport(transport), **kw,
+    )):
+        notifier = TelegramNotifier("SYNTHETIC_TOKEN", 12345)
+        assert notifier.send(source) is True
+        assert len(runs[0]) >= 3
+        run = 1
+        assert notifier.send(source) is False
+    assert runs[1] == runs[0][:2]
+
+
 class TestChunkMessage:
     """Tests for _chunk_message helper."""
 
@@ -402,6 +566,13 @@ class TestStdoutNotifier:
         assert out.count(STDOUT_MSG_START) == 2
         assert out.count(STDOUT_MSG_END) == 2
 
+    def test_long_markdown_is_relayed_unchanged_not_telegram_chunked(self) -> None:
+        """Telegram safety changes must not escape/chunk the OpenClaw protocol body."""
+        source, _, _ = _long_markdown_case("bold_and_links")
+        stream = io.StringIO()
+        assert StdoutNotifier(stream=stream).send(source) is True
+        assert stream.getvalue() == f"{STDOUT_MSG_START}\n{source}\n{STDOUT_MSG_END}\n"
+
     def test_send_ignores_parse_mode(self) -> None:
         """parse_mode is accepted for protocol compatibility but doesn't affect output."""
         stream = io.StringIO()
@@ -501,6 +672,13 @@ class TestStripMarkdownV2:
     def test_strips_escape_backslashes(self) -> None:
         assert _strip_markdown_v2(r"Leave by 7\.30 \(C train\)") == "Leave by 7.30 (C train)"
 
+    @pytest.mark.parametrize("original", [
+        r"Platform \B", "trailing\\", r"two\\slashes", r"\*title*", r"\_name\.",
+    ])
+    def test_literal_backslashes_survive_plaintext_conversion(self, original: str) -> None:
+        """D6: HA must undo Markdown escaping exactly once, not eat original slashes."""
+        assert _strip_markdown_v2(escape_md(original)) == original
+
     def test_leaves_plain_text_unchanged(self) -> None:
         assert _strip_markdown_v2("nothing to do here.") == "nothing to do here."
 
@@ -520,7 +698,9 @@ class TestHomeAssistantAlarmNotifier:
             mock_instance = mock_client.return_value.__enter__.return_value
             mock_instance.post.return_value = httpx.Response(status_code=200, json=[])
 
-            ok = notifier.send(r"⏰ Get ready for *Rehearsal* \- leave by 7\.30")
+            ok = notifier.send(
+                r"⏰ Get ready for *Rehearsal* \- leave by 7\.30 " + escape_md(r"via \B")
+            )
 
         assert ok is True
         call_args = mock_instance.post.call_args
@@ -528,7 +708,7 @@ class TestHomeAssistantAlarmNotifier:
         body = call_args.kwargs["json"]
         assert body["title"] == "CommuteCompass"
         # Backslash escapes stripped; star left as-is (HA doesn't care)
-        assert body["message"] == "⏰ Get ready for *Rehearsal* - leave by 7.30"
+        assert body["message"] == r"⏰ Get ready for *Rehearsal* - leave by 7.30 via \B"
 
     def test_extra_data_is_merged_and_can_override_title(self) -> None:
         notifier = HomeAssistantAlarmNotifier(

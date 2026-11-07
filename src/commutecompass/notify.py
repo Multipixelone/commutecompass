@@ -11,6 +11,7 @@ from typing import TextIO
 import httpx
 
 from commutecompass.config import Config
+from commutecompass.format import escape_md
 from commutecompass.ha_client import call_service as _ha_call_service
 from commutecompass.http_logging import sensitive_http_logging
 
@@ -49,12 +50,90 @@ def _escape_stdout_delimiters(body: str) -> str:
     )
 
 
-def _chunk_message(text: str) -> list[str]:
-    """Split a message into chunks of at most _MAX_MESSAGE_CHARS chars.
+# Deliberately small grammar: escaped literal characters, plain text, bold and
+# simple inline links. These cover our formatters without attempting a general
+# Markdown parser. Nested/other entities take the literal fallback below.
+_MD_SPECIAL = "\\_*[]()~`>#+-=|{}.!"
+_MD_LITERAL = rf"[^{re.escape(_MD_SPECIAL)}]"
+_MD_ESCAPE = r"\\[\x01-\x7e]"
+_MD_BODY = rf"(?:{_MD_ESCAPE}|{_MD_LITERAL})+"
+_MD_LINK_URL = r"(?:\\[\\)]|[^\\()\s])+"
+_MD_TOKEN = re.compile(
+    rf"{_MD_ESCAPE}|\*{_MD_BODY}\*|\[{_MD_BODY}\]\({_MD_LINK_URL}\)|{_MD_LITERAL}"
+)
 
-    Prefers splitting on newline boundaries. Falls back to a hard split
-    (at _MAX_MESSAGE_CHARS) if no newline is found in the overflow region.
+
+def _markdown_tokens(text: str) -> list[str] | None:
+    """Return indivisible, independently valid tokens, or request fallback.
+
+    Entity tokens cannot contain other entities or unescaped reserved chars.
+    In particular an over-limit bold span/link is never hard-split. Each match
+    consumes input, and the alternatives have disjoint first characters.
     """
+    tokens: list[str] = []
+    pos = 0
+    while pos < len(text):
+        # A token beyond the wire limit cannot be retained anyway. Bound the
+        # scan as well as the output instead of scanning an arbitrary huge URL.
+        match = _MD_TOKEN.match(text, pos, pos + _MAX_MESSAGE_CHARS + 1)
+        if match is None or match.end() - pos > _MAX_MESSAGE_CHARS:
+            return None
+        tokens.append(match.group())
+        pos = match.end()
+    return tokens
+
+
+def _pack_markdown_tokens(tokens: list[str]) -> list[str]:
+    """Pack whole entities/escape pairs, preferring a literal newline boundary."""
+    chunks: list[str] = []
+    pending: list[str] = []
+    size = 0
+    newline_end = 0
+    for token in tokens:
+        if size + len(token) > _MAX_MESSAGE_CHARS:
+            if newline_end:
+                chunks.append("".join(pending[:newline_end]))
+                pending = pending[newline_end:]
+                size = sum(map(len, pending))
+            # A newline split can leave too much tail to fit this next entity.
+            if size + len(token) > _MAX_MESSAGE_CHARS:
+                chunks.append("".join(pending))
+                pending = []
+                size = 0
+            newline_end = 0
+        pending.append(token)
+        size += len(token)
+        if token == "\n":
+            newline_end = len(pending)
+    if pending:
+        chunks.append("".join(pending))
+    return chunks
+
+
+def _chunk_message(text: str, *, markdown_v2: bool = True) -> list[str]:
+    """Split oversized MarkdownV2 only between complete supported entities.
+
+    Short messages are unchanged. Oversized messages outside our small grammar
+    (including a single over-limit entity) are sent as escaped literal text:
+    decode backslash escapes once, retain all other content/URLs, and escape
+    again before packing. This sacrifices styling/clickable link entities, not
+    content, and avoids silently truncating or sending invalid MarkdownV2.
+    Other parse modes retain the original raw splitting behavior.
+    """
+    if len(text) <= _MAX_MESSAGE_CHARS:
+        return [text]
+    if not markdown_v2:
+        return _chunk_plain_message(text)
+    tokens = _markdown_tokens(text)
+    if tokens is None:
+        tokens = _markdown_tokens(escape_md(_strip_markdown_v2(text)))
+        # Escaped literals contain only one-character or two-character tokens.
+        assert tokens is not None
+    return _pack_markdown_tokens(tokens)
+
+
+def _chunk_plain_message(text: str) -> list[str]:
+    """Split raw text at newlines where possible, otherwise at the size limit."""
     if len(text) <= _MAX_MESSAGE_CHARS:
         return [text]
 
@@ -100,7 +179,8 @@ class TelegramNotifier:
         """Send a message via the Telegram Bot API.
 
         Oversized messages (above 3900 chars) are automatically split into
-        multiple chunks sent in order. All chunks use the same parse_mode.
+        multiple chunks sent in order. MarkdownV2 keeps supported entities whole
+        or falls back to escaped literal content; all chunks keep parse_mode.
         If any chunk fails, returns False.
 
         Args:
@@ -114,7 +194,7 @@ class TelegramNotifier:
             duplicate chunks already accepted (there are no notifier retries).
         """
         url = _TELEGRAM_API_URL.format(token=self.bot_token)
-        chunks = _chunk_message(text)
+        chunks = _chunk_message(text, markdown_v2=parse_mode == "MarkdownV2")
 
         for chunk in chunks:
             payload = {

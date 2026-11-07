@@ -185,10 +185,24 @@ class TestEscapeMd:
         result = escape_md("Watch out!")
         assert result == r"Watch out\!"
 
-    def test_escape_md_backslash(self) -> None:
-        """Backslashes themselves are not escaped (not special in MD2)."""
-        result = escape_md(r"path\to\file")
-        assert result == r"path\to\file"
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (r"path\to\file", r"path\\to\\file"),
+            ("trailing\\", "trailing\\\\"),
+            (r"two\\slashes", r"two\\\\slashes"),
+            (r"\*title*", r"\\\*title\*"),
+            (r"\_name\.", r"\\\_name\\\."),
+            (r"\[room\](east)", r"\\\[room\\\]\(east\)"),
+        ],
+    )
+    def test_escape_md_backslash(self, raw: str, expected: str) -> None:
+        """Literal slashes survive, even next to punctuation or at end of input.
+
+        Escaping punctuation first and then doubling its new slashes would
+        expose Markdown entities instead of preserving the original text.
+        """
+        assert escape_md(raw) == expected
 
     def test_escape_md_complex_title(self) -> None:
         """Complex event titles with dots and parens are escaped."""

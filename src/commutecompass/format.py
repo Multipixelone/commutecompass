@@ -114,9 +114,11 @@ def _sanitize_text(s: str | None, *, max_len: int = _SANITIZE_MAX_LEN) -> str:
 def escape_md(s: str) -> str:
     """Escape special characters for Telegram MarkdownV2.
 
-    MarkdownV2 special chars: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    MarkdownV2 special chars: backslash and _ * [ ] ( ) ~ ` > # + - = | { } . !
     """
-    # Build escape_chars explicitly to avoid backslash interpretation issues
+    # Escape original backslashes FIRST, not the escapes added below. Otherwise
+    # a literal backslash can consume the escape before adjacent punctuation.
+    s = s.replace("\\", "\\\\")
     _SPECIAL = "_*[]()~`>#+-=|{}.!"
     for c in _SPECIAL:
         s = s.replace(c, f"\\{c}")
