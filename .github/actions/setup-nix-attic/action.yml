@@ -3,8 +3,9 @@ description: Install Nix and configure the Attic system cache as a substituter.
 
 inputs:
   attic-key:
-    description: Attic auth token (write access).
-    required: true
+    description: Optional Attic auth token (write access); omit to skip cache setup.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -16,15 +17,18 @@ runs:
           accept-flake-config = true
 
     - name: Install attic-client
+      if: ${{ inputs.attic-key != '' }}
       shell: bash
       run: nix profile install nixpkgs#attic-client
 
     - name: Login to Attic
+      if: ${{ inputs.attic-key != '' }}
       shell: bash
       env:
         ATTIC_KEY: ${{ inputs.attic-key }}
       run: attic login fly https://attic-cache.fly.dev "$ATTIC_KEY"
 
     - name: Use system cache as substituter
+      if: ${{ inputs.attic-key != '' }}
       shell: bash
       run: attic use system
