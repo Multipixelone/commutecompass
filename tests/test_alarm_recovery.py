@@ -1,6 +1,7 @@
 """Safety recovery and cross-logical-day anchor regression coverage."""
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -239,19 +240,36 @@ def test_warning_uses_stdout_framing(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "Alarm warning" in output
 
 
-def test_default_dry_run_isolates_provider_writes(tmp_path: Path) -> None:
+def test_default_dry_run_isolates_provider_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = _config(tmp_path)
     token = Path(cfg.paths.oauth_token_path)
     token.write_text("original")
+    temp_parent = tmp_path / "host-temp"
+    temp_parent.mkdir()
+    monkeypatch.setenv("TMPDIR", str(temp_parent))
+    # tempfile caches its default; reset only for this test to exercise TMPDIR.
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    scratch_roots: set[Path] = set()
 
     def planning(config: Config, start: datetime, end: datetime) -> list[Plan]:
         assert config.paths.db_path != cfg.paths.db_path
+        root = Path(config.paths.db_path).parent
+        scratch_roots.add(root)
+        assert root.parent == temp_parent
+        assert root.stat().st_mode & 0o777 == 0o700
         Path(config.paths.db_path).write_bytes(b"scratch")
         Path(config.paths.oauth_token_path).write_text("refreshed")
         return []
 
-    with patch("commutecompass.jobs.tomorrow.plan_window", side_effect=planning):
+    with patch(
+        "commutecompass.alarm.TemporaryDirectory", wraps=tempfile.TemporaryDirectory,
+    ) as scratch_factory, patch("commutecompass.jobs.tomorrow.plan_window", side_effect=planning):
         result, ok = publish(cfg, dry_run=True, now=_nyc(2026, 10, 15, 5))
     assert not ok and result.warning is None
+    scratch_factory.assert_called_once()
+    assert scratch_factory.call_args.kwargs.get("dir") is None
+    assert scratch_roots and all(not root.exists() for root in scratch_roots)
     assert not Path(cfg.paths.db_path).exists()
     assert token.read_text() == "original"

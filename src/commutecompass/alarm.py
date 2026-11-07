@@ -666,7 +666,7 @@ def publish(
         provider_config = config
         if dry_run and plans_for_day is None:
             # Never initialize/migrate the live DB or refresh the live OAuth token.
-            scratch = TemporaryDirectory(prefix="alarm-dry-run-", dir="/tmp/opencode")
+            scratch = TemporaryDirectory(prefix="alarm-dry-run-")
             root = Path(scratch.name)
             db = Path(config.paths.db_path)
             if db.exists():
