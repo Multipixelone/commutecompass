@@ -17,6 +17,7 @@ subway_station = "Jay St-MetroTech"
 lirr_station = "Atlantic Terminal"
 
 [prep]
+# Route/event prep lead; separate from alarm.window.prep_advance_minutes.
 prep_minutes = 20
 safety_buffer_minutes = 5
 # Get-ready lead (ping + wake alarm) for video-call events with no location.
@@ -213,7 +214,7 @@ mode = "bicycling"
 # ── Wake & nap alarm (HA owns nap caps and final next-alarm selection) ──────────
 [alarm]
 enabled = false
-fallback_time = "12:00"          # HH:MM NYC; latest morning wake, even without events
+fallback_time = "12:00"          # HH:MM NYC; BASE final with window on, latest wake with it off
 wake_lead_minutes = 0
 publish_script = "script.commute_publish_alarm"
 # Opt-in repair contract: stage/review HA consumers before separately approved activation.
@@ -234,7 +235,7 @@ heartbeat_entity = "input_datetime.commute_alarm_heartbeat"
 wake_entity = "input_datetime.commute_wake_at"
 nap_entity = "input_datetime.commute_nap_at"
 skipped_entity = "input_datetime.commute_alarm_skipped_at"
-next_prep_entity = "input_datetime.commute_next_prep_at" # cap; wake lead already applied
+next_prep_entity = "input_datetime.commute_next_prep_at" # cap; applicable lead applied, no prep advance
 wake_utc_entity = "input_text.commute_wake_utc" # authoritative instants; survive DST folds
 nap_utc_entity = "input_text.commute_nap_utc"
 skipped_utc_entity = "input_text.commute_alarm_skipped_utc"
@@ -254,17 +255,24 @@ max_snoozes = 2
 poll_seconds = 30
 cache_path = ""                  # empty = <db dir>/alarm-cache.json
 
-# Commute wake window anchored on a healthy plan's buffered leave_at deadline.
-# Published deadline = leave_at - calendar_advance_minutes; both leads use it,
-# not informational depart_at:
-# safety/weather/realtime buffers therefore move the entire window earlier.
-# Upstream HA contract only: lights at published deadline-47m (100% over 10m).
-# Naps and fallback wakes keep the snooze/ring settings above.
+# Calendar/fallback wake window: see docs/alarm-design.md and alarm-verification.md.
+# BASE final = healthy leave_at or alarm.fallback_time (not window.fallback_time).
+# Canonical setting: prep_advance_minutes (0-1440, default 0), one shared value.
+# Published deadline = base final - prep advance ONCE; first = deadline-first lead.
+# Legacy calendar_advance_minutes is an accepted alias, not a second buffer.
+# If both names are present they must agree; config output/set uses the canonical key.
+# Safety/weather/realtime buffers already live in leave_at; do not subtract twice.
+# HA lights = published first-10m, full warm at first; never apply another advance.
+# Example with noon base / advance15 / first lead60 / deadline lead0:
+# lights10:35, first10:45, final11:45 (advance0: 10:50 / 11:00 / noon).
+# Enabled fallback uses normal window snooze/audio/recovery, including desktop-only
+# normal final dismissal (master-off/skip/clear still work). Disabled window is legacy.
+# Manual --leave is exact/unadvanced at deadline lead0; nap caps/settings unchanged.
 [alarm.window]
 enabled = true
 deadline_utc_entity = "input_text.commute_alarm_deadline_utc"
 window_done_entity = "input_text.commute_alarm_window_done_utc" # empty = don't publish
-calendar_advance_minutes = 0    # calendar windows only; 15 moves first AND final earlier
+prep_advance_minutes = 0        # shared calendar AND fallback advance; legacy alias accepted
 first_alarm_lead_minutes = 37    # first alarm at published deadline-37m
 deadline_lead_minutes = 0        # final at published deadline; keep 0 for exact manual --leave
 snooze_minutes = 5               # unlimited; the last snooze is cut to end at the deadline

@@ -68,14 +68,14 @@ def test_live_shaped_timed_multiday_google_overlap(
     })
 
     result = compute_wake(cfg, now, provider)
-    expected = (_nyc(2026, 11, 5, 12) if now.astimezone(UTC)
-                < _nyc(2026, 11, 5, 12).astimezone(UTC)
+    expected = (_nyc(2026, 11, 5, 11) if now.astimezone(UTC)
+                < _nyc(2026, 11, 5, 11).astimezone(UTC)
                 else stamp("2026-11-06T08:30:32-05:00"))
     assert result.wake_at.astimezone(UTC) == expected.astimezone(UTC)
     assert len(provider.calls) == 2
     fifth = _nyc(2026, 11, 5, 2)
     sixth = _nyc(2026, 11, 6, 2)
-    assert wake_for_day(fifth, [overlap], cfg, now=now) == (_nyc(2026, 11, 5, 12), None)
+    assert wake_for_day(fifth, [overlap], cfg, now=now) == (_nyc(2026, 11, 5, 11), None)
     sixth_wake, sixth_plan = wake_for_day(sixth, [overlap, morning, evening], cfg, now=now)
     assert sixth_wake.astimezone(UTC) == stamp("2026-11-06T08:30:32-05:00").astimezone(UTC)
     assert sixth_plan is morning

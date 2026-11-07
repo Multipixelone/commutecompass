@@ -366,7 +366,10 @@ def test_plan_failure_skips_partial_prep_push_but_publishes_safe_wake(tomorrow_c
     assert result is None
     mock_push.assert_not_called()
     publish_wake.assert_called_once()
-    assert publish_wake.call_args.kwargs["data"]["wake_at"] == expected_fallback.isoformat()
+    expected_first = expected_fallback.replace(hour=11, minute=23)
+    payload = publish_wake.call_args.kwargs["data"]
+    assert payload["wake_at"] == expected_first.isoformat()
+    assert payload["deadline_at"] == expected_fallback.isoformat()
     notifier.return_value.send.assert_called_once()
 
 
@@ -490,6 +493,9 @@ def test_partial_plan_failure_skips_prep_push_but_publishes_fallback(tomorrow_co
     legacy.assert_not_called()
     alarm.assert_called_once()
     assert alarm.call_args.kwargs["data"]["wake_at"] == datetime(
+        2026, 10, 16, 11, 23, tzinfo=NYC_TZ,
+    ).isoformat()
+    assert alarm.call_args.kwargs["data"]["deadline_at"] == datetime(
         2026, 10, 16, 12, tzinfo=NYC_TZ,
     ).isoformat()
     notifier.return_value.send.assert_called_once()
@@ -568,8 +574,8 @@ def test_verified_empty_tomorrow_publishes_fallback(tomorrow_config: Config) -> 
         assert tomorrow_run(tomorrow_config) is None
     alarm.assert_called_once()
     assert alarm.call_args.kwargs["data"] == {
-        "wake_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
+        "wake_at": datetime(2026, 10, 16, 11, 23, tzinfo=NYC_TZ).isoformat(),
         "next_prep_at": "",
         "next_event": "",
-        "deadline_at": "",
+        "deadline_at": datetime(2026, 10, 16, 12, tzinfo=NYC_TZ).isoformat(),
     }

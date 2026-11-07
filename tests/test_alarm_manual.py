@@ -305,7 +305,7 @@ def test_calendar_winner_tied_to_manual_not_retained_after_clear_or_expiry(
     ):
         result, ok = publish(cfg, now=now, plans_for_day=failed)
     assert ok and result.source == "fallback"
-    assert result.wake_at == (_nyc(2026, 10, 16, 12) if clear else _nyc(2026, 10, 17, 12))
+    assert result.wake_at == (_nyc(2026, 10, 16, 11, 23) if clear else _nyc(2026, 10, 17, 11, 23))
 
 
 def test_cleared_manual_publication_is_not_retained(tmp_path: Path) -> None:
@@ -318,4 +318,4 @@ def test_cleared_manual_publication_is_not_retained(tmp_path: Path) -> None:
         raise RuntimeError("unavailable")
     result = compute_wake(cfg, _nyc(2026, 10, 15, 21), failed)
     assert result.source == "fallback"
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)

@@ -281,14 +281,14 @@ class MonitoringConfig(BaseModel):
 class AlarmWindowConfig(BaseModel):
     """Commute wake window — see docs/alarm-design.md "Wake window".
 
-    Applies only to wake alarms anchored on a healthy plan's buffered
-    ``leave_at`` deadline, advanced by ``calendar_advance_minutes``. The first
+    Wake alarms use a healthy plan's buffered ``leave_at`` or the configured
+    fallback deadline, advanced once by ``prep_advance_minutes``. The first
     alarm rings at that published deadline minus ``first_alarm_lead_minutes``;
     snoozes are unlimited until the deadline minus ``deadline_lead_minutes``,
     and the final alarm then rings
     without snooze or timeout until desktop activity dismisses it.
     Both leads use the published alarm deadline, never unbuffered ``depart_at``.
-    Naps and fallback wakes keep the plain alarm settings.
+    Naps keep their unadvanced timing and plain alarm settings.
     """
 
     enabled: bool = True
@@ -298,14 +298,36 @@ class AlarmWindowConfig(BaseModel):
     # empty disables the publish.
     window_done_entity: str = "input_text.commute_alarm_window_done_utc"
     first_alarm_lead_minutes: int = Field(default=37, ge=1, le=24 * 60)
-    # Calendar windows only: never change manual deadlines, nap caps or routes.
-    calendar_advance_minutes: int = Field(default=0, ge=0, le=24 * 60)
+    # Wake windows only: never change manual deadlines, nap caps or routes.
+    prep_advance_minutes: int = Field(default=0, ge=0, le=24 * 60)
     deadline_lead_minutes: int = Field(default=0, ge=0, le=24 * 60)
     snooze_minutes: int = Field(default=5, ge=1, le=240)
     # Re-rings after a snooze: hold at an absolute sink level, then ramp.
     rering_start_percent: int = Field(default=20, ge=0, le=100)
     rering_hold_seconds: int = Field(default=30, ge=0, le=3600)
     rering_ramp_seconds: int = Field(default=60, ge=0, le=3600)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_prep_advance(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "calendar_advance_minutes" in data:
+            data = dict(data)
+            legacy = data.pop("calendar_advance_minutes")
+            if "prep_advance_minutes" in data and data["prep_advance_minutes"] != legacy:
+                raise ValueError(
+                    "alarm.window.prep_advance_minutes conflicts with calendar_advance_minutes"
+                )
+            data["prep_advance_minutes"] = legacy
+        return data
+
+    @property
+    def calendar_advance_minutes(self) -> int:
+        """Legacy attribute alias; only the canonical value is stored/rendered."""
+        return self.prep_advance_minutes
+
+    @calendar_advance_minutes.setter
+    def calendar_advance_minutes(self, value: int) -> None:
+        self.prep_advance_minutes = value
 
     @model_validator(mode="after")
     def _validate_leads(self) -> AlarmWindowConfig:
@@ -689,6 +711,7 @@ CONFIG_SET_ALLOWLIST: dict[str, Any] = {
     # Wake alarm tuning — safe to tweak from chat ("wake me 15 min earlier").
     "alarm.fallback_time": _coerce_hhmm,
     "alarm.wake_lead_minutes": _coerce_int,
+    "alarm.window.prep_advance_minutes": _coerce_int,
     "alarm.window.calendar_advance_minutes": _coerce_int,
 }
 
@@ -752,6 +775,23 @@ def _walk_or_none(doc: Any, path_parts: list[str]) -> Any:
     return node
 
 
+def _canonical_edit_key(doc: Any, dotted_key: str) -> str:
+    """Migrate the legacy advance spelling before editing either alias."""
+    canonical = "alarm.window.prep_advance_minutes"
+    if dotted_key not in (canonical, "alarm.window.calendar_advance_minutes"):
+        return dotted_key
+    node = _walk_or_none(doc, ["alarm", "window"])
+    if node is not None and "calendar_advance_minutes" in node:
+        legacy = node["calendar_advance_minutes"]
+        if "prep_advance_minutes" in node and node["prep_advance_minutes"] != legacy:
+            raise ConfigSetValidationError(
+                "alarm.window.prep_advance_minutes conflicts with calendar_advance_minutes"
+            )
+        node["prep_advance_minutes"] = legacy
+        del node["calendar_advance_minutes"]
+    return canonical
+
+
 def _atomic_write_config(path: Path, content: str) -> None:
     """Replace a config only after the complete, permission-preserving write."""
     mode = stat.S_IMODE(path.stat().st_mode)
@@ -794,6 +834,7 @@ def update_config_field(toml_path: Path, dotted_key: str, value: str) -> Any:
     with open(toml_path, encoding="utf-8") as fh:
         doc = tomlkit.parse(fh.read())
 
+    dotted_key = _canonical_edit_key(doc, dotted_key)
     path_parts, leaf = _split_dotted(dotted_key)
     node = _walk_or_create(doc, path_parts)
     node[leaf] = coerced
@@ -831,6 +872,7 @@ def delete_config_field(toml_path: Path, dotted_key: str) -> bool:
     with open(toml_path, encoding="utf-8") as fh:
         doc = tomlkit.parse(fh.read())
 
+    dotted_key = _canonical_edit_key(doc, dotted_key)
     path_parts, leaf = _split_dotted(dotted_key)
     node = _walk_or_none(doc, path_parts)
     if node is None or leaf not in node:

@@ -6,11 +6,10 @@ logic and the final "next alarm" selection, and ``alarm daemon`` rings it.
 
 Wake rule (Q2/Q8)::
 
-    wake = min(first_alarm(first_event), fallback_time on that day)
-    first_alarm = leave_at - window.calendar_advance - window.first_alarm_lead
-                                                      (healthy wake window)
+    final = min(leave_at, fallback_time on that day) - window.prep_advance
+    first_alarm = final - window.first_alarm_lead       (healthy wake window)
                 = prep_at - wake_lead                  (window disabled / no leave_at)
-    no plan-able events -> fallback_time
+    no plan-able events -> fallback window (plain fallback_time if disabled)
 
 Target logical day: today's wake if it is still in the future, else
 tomorrow's, then the following day's if both have elapsed. All arithmetic is done
@@ -83,11 +82,26 @@ class WakeResult:
     # For wake-window plans this is the unadvanced first window alarm instead.
     next_prep_at: datetime | None = None
     next_event: str = ""
-    # Calendar-advanced buffered leave deadline anchoring a commute wake window
-    # (``wake_at == deadline_at - first_alarm_lead``); None for fallback/prep wakes.
+    # Effective final deadline anchoring a wake window, including fallback.
+    # ``wake_at == deadline_at - first_alarm_lead``; None for plain prep wakes.
     deadline_at: datetime | None = None
     warning: str | None = None
     manual_deadline_at: datetime | None = None
+    # Preserve provenance through retention: fallback is never a calendar conflict.
+    deadline_source: Literal["calendar", "fallback", "manual"] | None = None
+
+
+def _effective_deadline(
+    base: datetime, config: Config, *, advance: bool = True,
+) -> datetime:
+    """Apply shared wake preparation advance once, in elapsed UTC time."""
+    minutes = config.alarm.window.prep_advance_minutes if advance else 0
+    return (base.astimezone(UTC) - timedelta(minutes=minutes)).astimezone(NYC_TZ)
+
+
+def _window_start(deadline: datetime, config: Config) -> datetime:
+    lead = timedelta(minutes=config.alarm.window.first_alarm_lead_minutes)
+    return (deadline.astimezone(UTC) - lead).astimezone(NYC_TZ)
 
 
 def _window_deadline(
@@ -97,12 +111,11 @@ def _window_deadline(
 
     ``depart_at`` is informational only: safety, weather and realtime buffers
     are already included in ``leave_at`` and must move the entire wake window.
-    Nap caps opt out of the calendar advance to retain their existing timing.
+    Nap caps opt out of the shared advance to retain their existing timing.
     """
     if not config.alarm.window.enabled or plan.error is not None or plan.leave_at is None:
         return None
-    advance = config.alarm.window.calendar_advance_minutes if advance_calendar else 0
-    return (plan.leave_at.astimezone(UTC) - timedelta(minutes=advance)).astimezone(NYC_TZ)
+    return _effective_deadline(plan.leave_at, config, advance=advance_calendar)
 
 
 def _first_alarm(
@@ -111,8 +124,7 @@ def _first_alarm(
     """First alarm a healthy plan needs: window start, else prep minus lead."""
     deadline = _window_deadline(plan, config, advance_calendar=advance_calendar)
     if deadline is not None:
-        lead = timedelta(minutes=config.alarm.window.first_alarm_lead_minutes)
-        return (deadline.astimezone(UTC) - lead).astimezone(NYC_TZ)
+        return _window_start(deadline, config)
     if plan.prep_at is None:
         return None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
@@ -129,7 +141,7 @@ def _earliest_alarm_plan(
             continue
         if after is not None and p.prep_at.astimezone(UTC) <= after.astimezone(UTC):
             continue
-        # Calendar advance moves waking only; preserve the existing nap cap.
+        # Shared advance moves waking only; preserve the existing nap cap.
         alarm = _first_alarm(p, config, advance_calendar=False)
         if alarm is None:
             continue
@@ -151,6 +163,15 @@ def fallback_for_day(day_start: datetime, fallback: time) -> datetime:
     return candidate
 
 
+def _fallback_window(day_start: datetime, config: Config) -> tuple[datetime, datetime | None]:
+    """Return first wake and effective final deadline from the wall-clock anchor."""
+    base = fallback_for_day(day_start, config.alarm.fallback_clock())
+    if not config.alarm.window.enabled:
+        return base, None
+    deadline = _effective_deadline(base, config)
+    return _window_start(deadline, config), deadline
+
+
 def wake_for_day(
     day_start: datetime, plans: list[Plan], config: Config, *, now: datetime | None = None
 ) -> tuple[datetime, Plan | None]:
@@ -161,7 +182,7 @@ def wake_for_day(
     dropping the event and inventing a second wake from a later appointment.
     Unknown future timings still fail closed, even after the day's fallback.
     """
-    wake = fallback_for_day(day_start, config.alarm.fallback_clock())
+    wake, selected_deadline = _fallback_window(day_start, config)
     first: Plan | None = None
     lead = timedelta(minutes=config.alarm.wake_lead_minutes)
     now_utc = now.astimezone(UTC) if now is not None else None
@@ -190,8 +211,15 @@ def wake_for_day(
         candidate = _first_alarm(p, config) if p.error is None else None
         if candidate is None:
             candidate = (prep.astimezone(UTC) - lead).astimezone(NYC_TZ)
-        if candidate.astimezone(UTC) < wake.astimezone(UTC):
-            wake, first = candidate, p
+        deadline = _window_deadline(p, config)
+        # Compare like-for-like final deadlines for healthy windows. Prep-only
+        # and historical evidence keep their existing first-wake semantics.
+        if deadline is not None and selected_deadline is not None:
+            candidate_key, selected_key = deadline, selected_deadline
+        else:
+            candidate_key, selected_key = candidate, wake
+        if candidate_key.astimezone(UTC) < selected_key.astimezone(UTC):
+            wake, first, selected_deadline = candidate, p, deadline
     return wake, first
 
 
@@ -230,10 +258,12 @@ def _compute_wake(
             wake, plan = wake_for_day(day, plans, config, now=now)
         except _IncompletePlanningError as exc:
             warning = f"Alarm planning incomplete; degraded computation (cause={exc.reason})"
-            wake, plan = fallback_for_day(day, config.alarm.fallback_clock()), None
+            wake, _ = _fallback_window(day, config)
+            plan = None
         except AlarmError:
             warning = "Alarm planning incomplete; degraded computation"
-            wake, plan = fallback_for_day(day, config.alarm.fallback_clock()), None
+            wake, _ = _fallback_window(day, config)
+            plan = None
         if manual is not None and manual.deadline_at.astimezone(UTC) > now_utc:
             manual_day, _ = logical_day_bounds_nyc(manual.deadline_at)
             if manual_day == day:
@@ -254,9 +284,7 @@ def _compute_wake(
                         "; force selects manual" if manual.force else "; calendar selected"
                     )
                 if not earlier or manual.force:
-                    return ((manual.deadline_at.astimezone(UTC) - timedelta(
-                        minutes=config.alarm.window.first_alarm_lead_minutes
-                    )).astimezone(NYC_TZ), None)
+                    return _window_start(manual.deadline_at, config), None
                 if plan is not None:
                     return (_first_alarm(plan, config) or wake), plan
         return wake, plan
@@ -294,8 +322,15 @@ def _compute_wake(
     from commutecompass.format import _sanitize_text
 
     deadline: datetime | None = None
+    deadline_source: Literal["calendar", "fallback", "manual"] | None = None
     if plan is not None and _same_instant(_first_alarm(plan, config), wake):
         deadline = _window_deadline(plan, config)
+        if deadline is not None:
+            deadline_source = "calendar"
+    elif plan is None:
+        _, deadline = _fallback_window(day_start, config)
+        if deadline is not None:
+            deadline_source = "fallback"
     bound_manual = manual if (manual is not None
         and manual.deadline_at.astimezone(UTC) > now_utc
         and logical_day_bounds_nyc(manual.deadline_at)[0] == day_start) else None
@@ -306,6 +341,7 @@ def _compute_wake(
         raise AlarmError(warning)
     if is_manual and bound_manual is not None:
         deadline = bound_manual.deadline_at
+        deadline_source = "manual"
     return WakeResult(
         wake_at=to_nyc(wake),
         day=to_nyc(day_start).date(),
@@ -316,6 +352,7 @@ def _compute_wake(
         deadline_at=to_nyc(deadline) if deadline is not None else None,
         warning=warning,
         manual_deadline_at=bound_manual.deadline_at if bound_manual else None,
+        deadline_source=deadline_source,
     )
 
 
@@ -325,6 +362,9 @@ def _stored_result(result: WakeResult) -> dict[str, object]:
         "source": result.source, "next_event": result.next_event,
         "next_prep_at": result.next_prep_at.isoformat() if result.next_prep_at else None,
         "deadline_at": result.deadline_at.isoformat() if result.deadline_at else None,
+        "deadline_source": result.deadline_source or (
+            result.source if result.source in ("calendar", "fallback", "manual") else None
+        ),
         "manual_deadline_at": (result.manual_deadline_at.isoformat()
                                if result.manual_deadline_at else None),
     }
@@ -362,10 +402,24 @@ def _retained(config: Config, now: datetime, manual: ManualWake | None) -> WakeR
             minutes=config.alarm.window.first_alarm_lead_minutes
         ):
             return None
+        origin = data.get("deadline_source", data.get("source"))
+        if "deadline_source" not in data and origin == "retained" and deadline is not None:
+            # Legacy fallback had no window. A manual binding may also accompany
+            # a selected calendar conflict; only an equal deadline is manual.
+            # New fallback windows always carry explicit provenance.
+            origin = "manual" if _same_instant(bound, deadline) else "calendar"
+        deadline_source: Literal["calendar", "fallback", "manual"] | None = None
+        if origin == "calendar":
+            deadline_source = "calendar"
+        elif origin == "fallback":
+            deadline_source = "fallback"
+        elif origin == "manual":
+            deadline_source = "manual"
         return WakeResult(wake, date.fromisoformat(str(data["day"])), "retained",
                           next_prep_at=stamp("next_prep_at"),
                           next_event=str(data.get("next_event", "")),
-                          deadline_at=deadline, manual_deadline_at=bound)
+                          deadline_at=deadline, manual_deadline_at=bound,
+                          deadline_source=deadline_source)
     except Exception:  # noqa: BLE001 — corrupt/unavailable state must not prevent fallback
         logger.warning("Could not read a valid retained alarm")
         return None
@@ -389,7 +443,8 @@ def compute_wake(
             if retained.day > manual_day:
                 return None
             if retained.day == manual_day:
-                if (manual.force or retained.deadline_at is None
+                if (manual.force or retained.deadline_source != "calendar"
+                        or retained.deadline_at is None
                         or retained.deadline_at.astimezone(UTC) >= manual.deadline_at.astimezone(UTC)):
                     return None
                 retained = replace(retained, manual_deadline_at=manual.deadline_at)
@@ -416,15 +471,15 @@ def compute_wake(
                 <= tomorrow.astimezone(UTC)):
             manual_day, _ = logical_day_bounds_nyc(manual.deadline_at)
             return WakeResult(
-                (manual.deadline_at.astimezone(UTC) - timedelta(
-                    minutes=config.alarm.window.first_alarm_lead_minutes
-                )).astimezone(NYC_TZ), manual_day.date(), "manual",
+                _window_start(manual.deadline_at, config), manual_day.date(), "manual",
                 deadline_at=manual.deadline_at, manual_deadline_at=manual.deadline_at,
+                deadline_source="manual",
                 warning=warning + "; publishing usable manual deadline",
             )
+        wake, deadline = _fallback_window(tomorrow, config)
         return WakeResult(
-            fallback_for_day(tomorrow, config.alarm.fallback_clock()),
-            tomorrow.date(), "fallback",
+            wake, tomorrow.date(), "fallback", deadline_at=deadline,
+            deadline_source="fallback" if deadline is not None else None,
             warning=warning + "; using next logical day's configured fallback",
         )
 

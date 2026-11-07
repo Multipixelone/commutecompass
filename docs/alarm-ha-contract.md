@@ -2,7 +2,10 @@
 
 This is the relay contract for the infra owner, not production HA configuration.
 No activation, infra pin change, notification cadence change, or live-device
-verification is implied. Existing installations default to `legacy`.
+verification is implied. The application defaults to `legacy` publication.
+The shared calendar/fallback advance revision passed offline tests, lint, type
+checks and Nix checks/build. See [alarm-verification.md](alarm-verification.md)
+for evidence and the separate, unexecuted infra integration.
 
 ## Liveness and audio dead-man fallback
 
@@ -66,11 +69,56 @@ Kinds:
 | `legacy` | required | null | optional |
 | `none` | null | null | null |
 
+`commute` is the existing wire kind for a wake/deadline window, not proof that
+an event supplied its anchor. An enabled fallback window uses `commute` too;
+there is no new `fallback` kind, field or schema version. A window-disabled
+fallback remains `legacy`. Legacy helper publication and v1 snapshot publication
+carry identical effective wake/deadline geometry.
+
 `next_prep_at` retains its existing publisher meaning despite the historical
 name: it is the next nap-cap instant, not necessarily a plan's raw `prep_at`.
-For calendar windows it is the first-alarm instant **before** applying
-`alarm.window.calendar_advance_minutes`; that advance moves wake/deadline only.
-Do not subtract either lead again or use the nap cap to derive wake lights.
+For calendar windows it remains `leave_at - first_alarm_lead_minutes`, **before**
+applying `alarm.window.prep_advance_minutes`. The shared advance moves wake and
+deadline only. Fallback does not create a synthetic prep cap. Do not subtract a
+lead again or use the nap cap to derive wake lights.
+
+### Shared calendar/fallback geometry
+
+For enabled windows, the base final is a healthy plan's buffered `leave_at` or
+`alarm.fallback_time` on the target NYC logical day. Subtract
+`alarm.window.prep_advance_minutes` **once** to obtain the effective final /
+`deadline_at`; publish `wake_at = deadline_at - first_alarm_lead_minutes`.
+This assumes `deadline_lead_minutes = 0`. Compare calendar and fallback by their
+effective finals, not calendar first ring versus an unadvanced fallback clock.
+HA derives its ten-minute lights fade from published `wake_at` (or the equivalent
+published deadline minus first lead), with **no additional prep advance**.
+
+The canonical advance defaults to 0 (integer 0–1440). The legacy
+`calendar_advance_minutes` spelling is accepted as an alias for the same shared
+value; conflicting dual keys are rejected. Config output is canonical and
+`config set`/`config unset` through either name target the same setting. It is not
+`prep.prep_minutes`, which remains route/event preparation time. Manual
+`alarm wake --leave X` stays exact and unadvanced; manual/calendar conflict and
+`--force` still compare against the calendar's effective final. Nap caps and
+window-disabled legacy waking remain unchanged.
+
+With fallback base noon, first lead 60 and deadline lead 0:
+
+| Shared advance | Lights begin | Published first wake | Published final deadline |
+|---|---|---|---|
+| 0 | 10:50 | 11:00 | 12:00 |
+| 15 | 10:35 | 10:45 | 11:45 |
+
+All subtraction/comparison uses elapsed UTC time; retain NYC logical-day
+ownership and offset-bearing timestamps through DST. Both enabled fallback and
+calendar windows use normal window snoozes, audio and restart recovery. Final
+ignores HA stop/snooze and has no timeout; desktop activity is the normal
+dismissal, with master-off and explicit skip/clear as escape hatches.
+
+See [the separate infra integration guidance](alarm-design.md#infra-integration-guidance--separate-work-not-executed)
+for the optional noon / 15 / 60 / 0 configuration and supplied read-only consumer
+inspection. Rolling the application revision and activating configuration are
+separate owner work, not performed here.
 
 Only a validated `none` clears a v1 wake. A missing/invalid/unavailable snapshot
 or contract selector mismatch means **no new information**, not cancellation,
@@ -97,8 +145,11 @@ covered for every valid kind/null combination:
 The following is a documented example for a Nix-managed HA package. Do not paste
 it into a running installation without the infra consumer review and explicit
 activation approval. Omit `initial` so helper state restores on HA restart.
-The example assumes the approved 37-minute first lead; change both producers
-and validation together if that setting is deliberately changed.
+The example uses the application default 37-minute first lead (2220 seconds),
+not the separately configured 60-minute infra lead. For the 60-minute integration
+example, the validator's duration must be 3600 seconds. Change producer and
+validation together; do not change the JSON schema or subtract the prep advance
+in HA.
 
 ```yaml
 input_text:
@@ -339,10 +390,14 @@ alarm boundary. Activation
 and rollback require separate authorization. Missing entities are not rollback.
 No upstream publication or infra pin change is authorized by this implementation.
 
-L is buffered `Plan.leave_at` minus `alarm.window.calendar_advance_minutes`
-(default 0): lights L−47, first L−37, final L with the default first lead. Unlimited
-five-minute window snoozes cap at L; re-rings use 20%/30-second hold/60-second
-ramp. Final has no timeout and ignores HA stop/snooze; desktop dismissal,
-master-off and skip retain their existing meaning. Naps remain legacy. A
-continuously live final may ring past L+10; only restart recovery is cut off
-there. No overlap precedence or medication behavior is changed.
+For calendar and fallback windows, L is the base final (`Plan.leave_at` or
+`alarm.fallback_time`) minus the one shared `alarm.window.prep_advance_minutes`
+(default 0). With default first lead 37 and deadline lead 0: lights L−47, first
+L−37, final L; with first lead 60: lights L−70, first L−60, final L. HA consumes
+published timestamps without another advance. Unlimited five-minute window
+snoozes cap at L; re-rings use 20%/30-second hold/60-second ramp. Final has no
+timeout and ignores HA stop/snooze; desktop dismissal, master-off and explicit
+skip/clear retain their existing meaning. Naps remain legacy, as do automatic
+wakes when the window is disabled. A continuously live final may ring past L+10;
+only restart recovery is cut off there. No overlap precedence, manual force
+rule, logical-day ownership or medication behavior is changed.

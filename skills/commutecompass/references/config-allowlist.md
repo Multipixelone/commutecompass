@@ -11,7 +11,7 @@ Nix module (or the cron entry) as well to change when the job actually runs.
 
 | Key                                       | Type        | Notes                                           |
 |-------------------------------------------|-------------|-------------------------------------------------|
-| `prep.prep_minutes`                       | int (min)   | Default prep buffer for every event             |
+| `prep.prep_minutes`                       | int (min)   | Route/event prep lead; separate from the alarm window's shared prep advance |
 | `prep.safety_buffer_minutes`              | int (min)   | Extra slack added on top of route duration      |
 | `scheduling.morning_run_time`             | "HH:MM"     | Advisory; update the Nix/systemd timer too      |
 | `scheduling.poll_interval_seconds`        | int (sec)   | Advisory; update the Nix/systemd timer too      |
@@ -24,9 +24,37 @@ Nix module (or the cron entry) as well to change when the job actually runs.
 | `home_assistant.max_age_minutes`          | int (min)   | Max acceptable age of an HA location reading    |
 | `realtime.enabled`                        | bool        | Toggle real-time GTFS-RT departure delay buffer |
 | `realtime.max_buffer_minutes`             | int (min)   | Cap on minutes a live delay can add to leave time |
-| `alarm.fallback_time`                     | "HH:MM"     | Latest wake time (NYC); used when no events      |
-| `alarm.wake_lead_minutes`                 | int (min)   | Wake this many minutes before the first prep     |
-| `alarm.window.calendar_advance_minutes`   | int (min)   | Advance calendar first/final together; 0–1440, default 0; manual wakes, nap caps and routes unchanged |
+| `alarm.fallback_time`                     | "HH:MM"     | NYC base final deadline with window enabled; legacy latest wake when disabled; default `12:00` |
+| `alarm.wake_lead_minutes`                 | int (min)   | Prep-only/window-disabled wake lead and corresponding nap cap; not the window's prep advance |
+| `alarm.window.prep_advance_minutes`       | int (min)   | Canonical shared calendar + fallback advance; 0–1440, default 0; subtract once from base final |
+| `alarm.window.calendar_advance_minutes`   | int (min)   | Legacy input alias for `alarm.window.prep_advance_minutes`; not a second or calendar-only setting |
+
+## Shared wake-window setting
+
+Both advance spellings address **one value**. Effective TOML/JSON config output
+uses `prep_advance_minutes`; `config set` through either spelling writes the
+canonical key instead of leaving an independent override. If both keys exist in
+a file, equal values are accepted and conflicting values are rejected on load
+and by set/unset without rewriting the file; the configuration owner must repair
+the conflicting source first. Do not add a second 15-minute buffer. On a
+non-conflicting config, `config unset` through either spelling clears both keys;
+reset likewise removes the setting and restores default 0.
+
+With `alarm.window.enabled = true`, first ring is the effective final minus
+`first_alarm_lead_minutes`; the effective final is healthy `leave_at` or
+`alarm.fallback_time` minus the shared advance, with `deadline_lead_minutes = 0`.
+Calendar and fallback windows compare effective finals. Noon fallback, advance
+15 and first lead 60 therefore give first 10:45 / final 11:45; lights start 10:35
+from the published first ring, never from another advance. At advance 0 the same
+example gives lights 10:50 / first 11:00 / final noon.
+
+`prep.prep_minutes` remains separate route/event prep. Manual `alarm wake --leave`
+deadlines are not advanced, naps keep their existing caps, and disabling the
+window retains legacy automatic-wake behavior. `alarm.window.enabled`,
+`first_alarm_lead_minutes` and `deadline_lead_minutes` are not chat-editable keys
+in this allowlist. The [infra integration guidance](../../../docs/alarm-design.md#infra-integration-guidance--separate-work-not-executed)
+is separate, unexecuted owner work; Nix-managed values belong in their declarative
+source, not an attempted edit of generated `/etc` configuration.
 
 ## How to revert
 

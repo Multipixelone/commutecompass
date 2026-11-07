@@ -63,7 +63,7 @@ def test_incomplete_plan_has_only_fixed_cause(
         "; using next logical day's configured fallback"
     )
     assert result.source == "fallback"
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
     assert result.next_prep_at is None
     assert result.next_event == ""
 
@@ -75,7 +75,7 @@ def test_missing_prep_without_error_has_distinct_cause(tmp_path: Path) -> None:
         "Alarm planning incomplete; degraded computation (cause=missing_prep_at)"
         "; using next logical day's configured fallback"
     )
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
 
 
 @pytest.mark.parametrize("elapsed_leave", [False, True])
@@ -93,7 +93,7 @@ def test_historical_uncertainty_and_elapsed_imminent_leave_are_not_degraded(
     result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 8),
                           _provider({date(2026, 10, 15): [plan]}))
     assert result.warning is None
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
 
 
 def test_generic_alarm_error_is_not_misclassified(tmp_path: Path) -> None:
@@ -111,7 +111,7 @@ def test_overlapping_started_event_cannot_poison_three_future_days(tmp_path: Pat
     stale = _plan(_nyc(2026, 10, 12, 7), error=error)
     # An overlap provider returns the same older event on every requested day.
     result = compute_wake(cfg, _nyc(2026, 10, 15, 20), lambda day: [stale])
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
     assert result.warning is None
     assert result.next_prep_at is None
 
@@ -122,7 +122,7 @@ def test_multiday_overlap_does_not_reanchor_on_each_day(tmp_path: Path) -> None:
     plan.event.end = _nyc(2026, 10, 20, 18)
     today, _ = logical_day_bounds_nyc(_nyc(2026, 10, 15, 10))
     assert wake_for_day(today, [plan], cfg, now=_nyc(2026, 10, 15, 10)) == (
-        _nyc(2026, 10, 15, 12), None,
+        _nyc(2026, 10, 15, 11, 23), None,
     )
 
 
@@ -134,7 +134,7 @@ def test_midnight_overlap_owned_by_start_logical_day(tmp_path: Path) -> None:
     plan.event.start = _nyc(2026, 10, 15, 0)
     plan.event.end = _nyc(2026, 10, 16, 0)
     result = compute_wake(cfg, _nyc(2026, 10, 15, 5), lambda day: [plan])
-    assert result.wake_at == _nyc(2026, 10, 15, 12)
+    assert result.wake_at == _nyc(2026, 10, 15, 11, 23)
     assert result.warning is None
 
 
@@ -156,13 +156,13 @@ def test_day_filter_across_dst(tmp_path: Path, day: tuple[int, int, int]) -> Non
     now = _nyc(*day, 10)
     stale = _plan((now.astimezone(UTC) - timedelta(days=2)).astimezone(now.tzinfo))
     result = compute_wake(cfg, now, lambda start: [stale])
-    assert result.wake_at == _nyc(*day, 12)
+    assert result.wake_at == _nyc(*day, 11, 23)
     assert result.warning is None
 
 
 def test_planner_error_uses_next_day_not_today_fallback(tmp_path: Path) -> None:
     result = compute_wake(_config(tmp_path), _nyc(2026, 10, 15, 5), _broken)
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
     assert result.source == "fallback"
     assert result.warning == (
         "Alarm planning failed (RuntimeError); degraded computation"
@@ -255,7 +255,7 @@ def test_manual_state_load_failure_still_publishes_safety(tmp_path: Path) -> Non
     ) as service, patch("commutecompass.notify.build_notifier"):
         result, ok = publish(cfg, now=_nyc(2026, 10, 15, 5), plans_for_day=_provider({}))
     assert ok and result.warning
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
     service.assert_called_once()
 
 
@@ -265,7 +265,7 @@ def test_expired_retention_not_used(tmp_path: Path) -> None:
                             "day": "2026-10-15", "source": "calendar"})
     result = compute_wake(cfg, _nyc(2026, 10, 15, 9), _broken)
     assert result.source == "fallback"
-    assert result.wake_at == _nyc(2026, 10, 16, 12)
+    assert result.wake_at == _nyc(2026, 10, 16, 11, 23)
 
 
 def test_operational_warning_is_delivered_after_ha_publish(
@@ -385,3 +385,82 @@ def test_default_dry_run_isolates_provider_writes(
     assert scratch_roots and all(not root.exists() for root in scratch_roots)
     assert not Path(cfg.paths.db_path).exists()
     assert token.read_text() == "original"
+
+
+@pytest.mark.parametrize("seed_source", ["fallback", "calendar"])
+@pytest.mark.parametrize("force", [False, True])
+def test_repeated_retention_preserves_deadline_origin_for_manual_conflicts(
+    tmp_path: Path, seed_source: str, force: bool,
+) -> None:
+    from test_alarm import _commute_plan
+
+    from commutecompass.alarm_state import ManualWake, save_manual
+    from commutecompass.config import AlarmWindowConfig
+
+    cfg = _config(tmp_path, window=AlarmWindowConfig(
+        first_alarm_lead_minutes=60, prep_advance_minutes=15,
+    ))
+    plans = [_commute_plan(_nyc(2026, 10, 16, 9, 13))] if seed_source == "calendar" else []
+    with patch("commutecompass.ha_client.call_service", return_value=True), patch(
+        "commutecompass.notify.build_notifier",
+    ):
+        first, ok = publish(cfg, now=_nyc(2026, 10, 15, 20),
+                            plans_for_day=_provider({date(2026, 10, 16): plans}))
+        assert ok
+        # Republish twice through storage: source='retained' must not erase origin.
+        for hour in (21, 22):
+            retained, ok = publish(cfg, now=_nyc(2026, 10, 15, hour), plans_for_day=_broken)
+            assert ok and retained.source == "retained"
+            assert retained.wake_at == first.wake_at and retained.deadline_at == first.deadline_at
+        manual = ManualWake(_nyc(2026, 10, 16, 14), force)
+        save_manual(cfg, manual)
+        result, ok = publish(cfg, now=_nyc(2026, 10, 15, 23), plans_for_day=_broken)
+    assert ok
+    calendar_wins = seed_source == "calendar" and not force
+    assert result.source == ("retained" if calendar_wins else "manual")
+    assert result.deadline_at == (first.deadline_at if calendar_wins else manual.deadline_at)
+    assert result.wake_at == (first.wake_at if calendar_wins else _nyc(2026, 10, 16, 13))
+    assert result.warning and "degraded computation" in result.warning
+    if seed_source == "fallback":
+        assert "conflicts" not in result.warning
+    elif not force:
+        assert "conflicts" in result.warning
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("with_manual_bound", [False, True])
+def test_old_retained_window_without_origin_still_protects_calendar_deadline(
+    tmp_path: Path, force: bool, with_manual_bound: bool,
+) -> None:
+    from commutecompass.alarm_state import ManualWake, save_manual
+    from commutecompass.config import AlarmWindowConfig
+
+    cfg = _config(tmp_path, window=AlarmWindowConfig(
+        first_alarm_lead_minutes=60, prep_advance_minutes=15,
+    ))
+    # Before fallback windows existed, a retained non-null deadline meant calendar.
+    # Seed the actual pre-upgrade storage shape: no new deadline_source field.
+    save_last_publish(cfg, {
+        "wake_at": _nyc(2026, 10, 16, 7, 45).isoformat(),
+        "deadline_at": _nyc(2026, 10, 16, 8, 45).isoformat(),
+        "day": "2026-10-16", "source": "retained",
+        **({"manual_deadline_at": _nyc(2026, 10, 16, 10).isoformat()}
+           if with_manual_bound else {}),
+    })
+    # The historical bound may record a rejected later manual, not its winner.
+    manual = ManualWake(_nyc(2026, 10, 16, 10), force)
+    save_manual(cfg, manual)
+    with patch("commutecompass.ha_client.call_service", return_value=True), patch(
+        "commutecompass.notify.build_notifier",
+    ):
+        for hour in (20, 21):
+            result, ok = publish(cfg, now=_nyc(2026, 10, 15, hour), plans_for_day=_broken)
+            assert ok
+            assert result.source == ("manual" if force else "retained")
+            assert result.deadline_at == (manual.deadline_at if force
+                                          else _nyc(2026, 10, 16, 8, 45))
+            assert result.wake_at == (_nyc(2026, 10, 16, 9) if force
+                                      else _nyc(2026, 10, 16, 7, 45))
+            assert result.warning and "degraded computation" in result.warning
+            if not force:
+                assert "conflicts" in result.warning

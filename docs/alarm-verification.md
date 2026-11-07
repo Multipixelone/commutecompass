@@ -1,5 +1,137 @@
 # Alarm verification and activation
 
+## Shared prep advance and fallback window (2026-11-07): offline validation passed
+
+The agreed contract is in [alarm-design.md](alarm-design.md#calendar-and-fallback-wake-window-revised-2026-11-07).
+Background validators checked the reconciled source/tests in the isolated
+`fix/fallback-wake-window` worktree based on `6e8bb77`. All commands below exited 0:
+
+| Command | Result |
+|---|---|
+| `nix develop . --command pytest -q --cov=commutecompass --cov-report=term-missing --cov-fail-under=80` | 2533 passed, 37 warnings; 91.46% coverage (minimum 80%) |
+| `nix develop . --command ruff check .` | All checks passed |
+| `nix develop . --command mypy src tests` | No issues in 86 source files |
+| `nix flake check --print-build-logs` | Passed, including sandboxed mypy/pytest/ruff |
+| `nix build .#packages.x86_64-linux.default --print-build-logs` | Passed, including Python import check |
+
+Checks used `agent-run-long` with 30-minute limits. Full local logs are under
+`/tmp/opencode/agent-run-long.fallback-window-` with suffixes
+`pytest-final.l4T3ArdMrl/output.log`, `ruff-final.3DPwJjwsYH/output.log`,
+`mypy-final.TxzhoB2pDH/output.log`, `flake-final.PnPc9l9OSw/output.log` and
+`build-final.kgGVz8fBw5/output.log`. Initial validation identified test expectation,
+import and typing issues; these were corrected before the passing rerun.
+Nix omitted incompatible systems; this is x86_64-linux evidence only.
+Documentation-only result recording followed these checks. No HA writes, restart,
+playback, push or deployment occurred. Historical results below are **not**
+evidence for this revision, and offline tests do not prove live audibility.
+
+Acceptance requirements covered by the tests and source reconciliation:
+
+- `alarm.window.prep_advance_minutes` is canonical, integer 0–1440, default 0.
+  `calendar_advance_minutes` is a legacy alias for the same value for both
+  calendar and fallback. Equal dual keys are accepted; conflicting values are
+  rejected. Effective TOML/JSON output and writes use the canonical key.
+  `config set` through either name updates one setting; `config unset` through
+  either name removes both spellings and restores 0. Reset also removes the
+  shared override. Verify legacy-only files, duplicate aliases, invalid bounds,
+  conflict handling and unchanged unrelated settings.
+- With the window enabled, base final B is healthy buffered `leave_at` or the
+  configured `alarm.fallback_time` on its NYC logical day. Effective final L is
+  B minus the shared advance once; first wake W is L minus the configured first
+  lead. Keep `deadline_lead_minutes = 0`. `prep.prep_minutes` remains route/event
+  prep, not another alarm advance. The application first-lead default stays 37;
+  the 60-minute integration choice is not a new default.
+- For a noon fallback base, first lead 60 and deadline lead 0, expect the table
+  below. An enabled empty-calendar day supplies a wake/deadline pair and opens
+  the normal window; it is not a lone noon legacy alarm. Compare calendar and
+  fallback **effective finals**. Include a calendar leave of 12:15: advance 15
+  gives calendar final 12:00, so fallback final 11:45 wins even though the
+  calendar first ring is before the noon base.
+- Manual `alarm wake --leave 09:00` stays first 08:00 / final 09:00 with lead 60,
+  regardless of advance. Earlier effective calendar finals still compete and
+  `--force` still selects manual; fallback must not displace manual intent.
+  Retained effective timestamps must not be advanced twice.
+- Nap caps remain unadvanced (`leave_at - first lead` for healthy window plans,
+  otherwise eligible `prep_at - wake lead`). Fallback does not manufacture a cap.
+  Naps, prep-only wakes and disabled-window legacy timing/lifecycle remain
+  separate from fallback windows. Route timing, buffers and pings do not change.
+- Legacy helper payloads and v1 snapshots publish the same first/final pair.
+  Enabled fallback uses existing v1 kind `commute`; no new kind or schema.
+  Missing legacy deadlines still clear explicitly; an invalid v1 record is no
+  new information, not an implicit legacy fallback.
+- Feed fallback-generated pairs into fake-HA/fake-clock daemon tests: first ramp,
+  unlimited capped snoozes, timeout auto-snooze, 20% hold/re-ring, continuous
+  transition into final, desktop-only normal final dismissal, and the inclusive
+  L+10-minute recovery cutoff. Preserve master-off, skip/clear, activity, audio
+  failure latch, pending completion and active-session replacement protections.
+- Preserve NYC logical-day ownership, UTC elapsed arithmetic across both DST
+  folds and spring transition, and rollover when first wake crosses midnight or
+  02:00. Planning failures remain degraded recovery with warning, not successful
+  empty calendars: retain a valid future publication first, otherwise use the
+  existing manual / next-logical-day safety fallback policy with window geometry.
+
+| Noon base, 60-minute first lead, zero deadline lead | Advance 0 | Advance 15 |
+|---|---|---|
+| HA lights begin (published first minus 10 minutes) | 10:50 | 10:35 |
+| Published first ring | 11:00 | 10:45 |
+| Effective final / published deadline | 12:00 | 11:45 |
+
+### Source reconciliation checkpoint — static inspection only
+
+Current definitions match the shared geometry and alias contract:
+
+- `config.py::AlarmWindowConfig` stores `prep_advance_minutes`, normalizes the
+  legacy alias and rejects conflicting values. `_canonical_edit_key` makes set
+  and unset target one value; the model-based TOML/JSON renderers emit the
+  canonical name. Conflicting dual keys also make set/unset refuse without a
+  write; the configuration owner must repair the conflicting source first.
+- `alarm.py::_effective_deadline`, `_window_start` and `_fallback_window` apply
+  the advance/first lead once, bypassing them for disabled fallback.
+  `wake_for_day` compares effective finals when both candidates have windows;
+  `_earliest_alarm_plan` opts out of advance for nap caps. `compute_wake` uses the
+  same fallback geometry for degraded recovery. Retention preserves effective
+  timestamps and calendar/fallback provenance for manual conflict decisions.
+  `deadline_source` is internal persisted provenance only, not an HA wire field.
+- `alarm.py::build_payload` and `build_schedule` preserve the legacy/v1 wire
+  formats; a deadline selects existing v1 kind `commute`. The daemon's
+  `_commute_deadline` admits a window by exact geometry, and `_window_step`
+  supplies the existing lifecycle regardless of calendar/fallback origin.
+- `tests/test_config.py` defines canonical/alias round trips, cross-spelling
+  set/unset, equal/conflicting aliases and bounds. In
+  `tests/test_alarm_calendar_advance.py`,
+  `test_fallback_normal_window_publication_and_daemon_restart` covers both
+  contracts and both 0/15 advances with the worked lights/first/final times;
+  `test_calendar_fallback_selection_compares_effective_finals` covers competition.
+  Further cases cover manual force, retained fallback, degraded recovery, nap
+  caps, DST, and disabled fallback. The old unchanged-fallback case now applies
+  only to `disabled_fallback`.
+- Existing lifecycle/recovery cases remain in `tests/test_alarm_window.py` and
+  `tests/test_alarm_recovery.py`; contract cases in `tests/test_alarm.py` and
+  `tests/test_alarm_contract.py`. These definitions are not executed results.
+
+Static inspection alone does not establish a pass. The fresh validation results
+above establish offline behavior for the reconciled source/tests; no rendered
+HA result, live-device delivery or audible outcome is inferred.
+
+### Separate infra integration — not executed
+
+The [integration settings and ownership](alarm-design.md#infra-integration-guidance--separate-work-not-executed)
+are separate follow-up work: roll the application revision and, with approval,
+merge `alarm.fallback_time = "12:00"` if desired plus window `enabled = true`,
+`prep_advance_minutes = 15`, `first_alarm_lead_minutes = 60`, and
+`deadline_lead_minutes = 0`. Fallback time belongs under `[alarm]`, not
+`[alarm.window]`. A private legacy advance must be removed/migrated or equal to
+15 in the merged configuration; no private configuration was inspected here.
+
+Supplied read-only infra inspection reports the link overlay at
+`modules/link/commutecompass.nix:54–70` already sets alarm enabled, legacy
+publication and the 60-minute first lead from `lib/commute-alarm.nix`.
+`modules/iot/commutecompass-wake-window.nix:123–128,459` validates that same
+wake/deadline spacing, starts pending ten minutes before wake, and derives fade
+timing from the published timestamps. That consumer needs **no light change or
+second advance**. These are supplied source observations, not evaluated/rendered
+or deployed results. No infra edits or live actions were performed.
+
 ## Opt-in HA contract repair
 
 The additive implementation contract is [alarm-ha-contract.md](alarm-ha-contract.md).
@@ -14,12 +146,14 @@ render the versioned script before any separately authorized migration.
 
 ## Claims and evidence owners
 
-- Publisher lane: commute wake is buffered `Plan.leave_at` (L) minus 37 minutes;
-  final is L. No-anchor mornings retain the prep-minus-lead/noon fallback and
-  naps retain the future prep-minus-lead cap, with NYC/DST correctness.
-  Replanning never replaces tomorrow with an elapsed wake. Calendar/planning
-  failure never masquerades as safe no-events fallback. Evidence required:
-  pure computation and mocked jobs tests.
+- Publisher lane: enabled calendar and fallback windows use L = base final
+  minus the one shared prep advance, first wake L minus first lead, and final L
+  with deadline lead 0. Prep-only and window-disabled waking stay legacy; nap
+  caps stay unadvanced, with NYC/DST correctness. Replanning must not substitute
+  an elapsed wake for a future one or reapply the advance to retained timestamps.
+  Calendar/planning failure must remain explicit degraded recovery, not a
+  successful empty-calendar result. Evidence required: pure computation and
+  mocked jobs tests.
 - Daemon lane: future-only HA sensor transitions do not swallow deadlines;
   skip/off/explicit clear are authoritative even across cached outages;
   phase-dependent stop/snooze/timeouts and restart state work; audio failure
@@ -30,21 +164,22 @@ render the versioned script before any separately authorized migration.
   fails, not a periodic notification storm. Evidence required: evaluated Nix
   host config, rendered YAML and Jinja scenarios. These do not establish
   live-device delivery. The coordinated private infra migration is **pending**.
-- Orchestrator after writers reconcile: run assigned pytest/ruff/mypy checks
-  in a delegated validation lane; evaluate package/module integration
-  separately. Report baseline failures rather than hiding them. This docs-only
-  lane records source documentation; the reconciled validation run is reported
-  in the revised wake-window evidence section below.
+- Orchestrator after writers reconcile: delegated pytest/ruff/mypy checks and
+  separate Nix checks/build passed as recorded above. Source/test evidence remains
+  distinct from historical runs below and from unexecuted infra activation.
 
 ## Changes to earlier design notes
 
-- The route-departure D−50 / D−13 design is superseded by **L−37 / L**, where
-  **L = buffered `Plan.leave_at`**. Safety/weather/realtime buffers shift lights,
-  first ring and final earlier together. `Plan.depart_at` is informational only.
-- `alarm.build_payload` sends **`wake_at`, `next_prep_at`, `next_event`**;
-  `next_prep_at` is empty if absent. Only window-enabled payloads add
-  **`deadline_at`** (empty if no anchor). No `prep_at`, `logical_date`, `summary`
-  or `has_events` arguments are sent.
+- The route-departure D−50 / D−13 design is superseded by **L−first lead / L**,
+  where **L = base final minus shared prep advance**. Calendar bases use buffered
+  `Plan.leave_at`; fallback bases use `alarm.fallback_time`. Safety/weather/
+  realtime buffers already move the calendar base earlier; `Plan.depart_at` is
+  informational only. First lead defaults to 37, shared advance to 0.
+- Legacy `alarm.build_payload` sends **`wake_at`, `next_prep_at`, `next_event`**;
+  `next_prep_at` is empty if absent. Window-enabled or bound-manual payloads add
+  **`deadline_at`** (empty only for a wake with no window anchor). An enabled
+  fallback now has a real deadline. No `prep_at`, `logical_date`, `summary` or
+  `has_events` arguments are sent; the wire schema is unchanged.
 - Publication uses **`deadline_at`** and configuration reads
   **`input_text.commute_alarm_deadline_utc`**, replacing the departure helper.
   Defaults are `first_alarm_lead_minutes = 37` and
@@ -120,9 +255,11 @@ that the new leave-deadline contract passes:
   no-cap sentinel and unknown UTC authority. This was source approval, not
   device activation evidence.
 
-## Revised wake-window evidence (2026-11-03): validated
+## Historical revised wake-window evidence (2026-11-03)
 
-Reconciled L−37 / L revision, with no live HA writes or audio:
+Previously recorded validation for the L−37 / L revision, with no live HA writes
+or audio. These results predate shared prep advance and enabled fallback windows;
+they do **not** validate the 2026-11-07 revision:
 
 - Full pytest through `agent-run-long` (`leave-window-final-pytest`, 20-minute
   bound, `nix develop -c pytest -q`): **1,443 passed**.
@@ -138,10 +275,12 @@ Reconciled L−37 / L revision, with no live HA writes or audio:
 - No revised infra/module evaluation, deployment, live delivery or audible
   verification is claimed. Those remain follow-up activation gates below.
 
-The full suite includes the following cases in `tests/test_alarm.py`,
+The recorded suite covered the original cases in `tests/test_alarm.py`,
 `tests/test_alarm_window.py`, `tests/test_alarm_ramp.py` and planner/routing tests.
+The source-derived expectations below must be rechecked for the current revision;
+new fallback/alias cases are listed above, not included in that historical pass.
 
-### Door-leave anchor: source checked and test suite passed
+### Door-leave anchor: historical pass and current expectations
 
 - `tests/fixtures/directions_sample.json` starts with a WALKING step whose
   `departure_time.value` is **1746864000**; the route-level departure has the
@@ -156,18 +295,22 @@ The full suite includes the following cases in `tests/test_alarm.py`,
   `leave_at`. `prep_at` subtracts preparation time from `leave_at`. For
   approximate/no-exact-time routes it derives departure from event start minus
   duration. `Plan.depart_at` retains that unbuffered departure for information.
-- Verify with the fixture that L equals **1746864000 minus all buffers**,
-  `deadline_at` publishes L, first ring is L−37, and lights start L−47.
-  Increasing safety/weather/realtime buffer must move the complete window
-  earlier by exactly that increment, without double subtraction. Do not anchor
-  to the transit boarding time, event start, or informational `Plan.depart_at`.
+- With advance 0 and first lead 37, verify that L equals **1746864000 minus all
+  buffers**, `deadline_at` publishes L, first ring is L−37, and lights start L−47.
+  With a nonzero shared prep advance, subtract that once more from the base
+  `leave_at` to form L, not from the route or nap cap. Increasing safety/weather/
+  realtime buffer must move the complete calendar window earlier by exactly
+  that increment, without double subtraction. Do not anchor to transit boarding,
+  event start, or informational `Plan.depart_at`.
 
 ### Publisher, lifecycle and regression checklist
 
-- Publication/config migration: `deadline_at`, deadline UTC entity, 37/0
-  defaults, UTC folds and epoch-zero clear; old departure helper not consumed.
-  Only exact matching wake/deadline pairs enable the window. A genuine
-  no-anchor day clears yesterday's anchor; planning failure retains good state.
+- Publication/config migration: `deadline_at`, deadline UTC entity, first/final
+  leads 37/0 by default, UTC folds and epoch-zero clear; old departure helper
+  not consumed. Only exact matching wake/deadline pairs enable the window.
+  Enabled fallback days supply a new matching pair, not yesterday's anchor or
+  an empty deadline. Prep-only wakes still clear an absent anchor. Planning
+  failure retains valid future state or uses explicit warned safety recovery.
 - First ring uses the configured first ramp. Deadline locks **at first ring**,
   not at observation/publication; after lock earlier replans tighten it and
   later replans cannot extend it. Persist the original wake key.
@@ -190,9 +333,10 @@ The full suite includes the following cases in `tests/test_alarm.py`,
   the offset-bearing UTC dismissal instant and HA treats its update as a
   completion event. Failed/offline delivery retains that timestamp across
   restart. Preserve heartbeat/ack/failure-latch retry behavior.
-- Prove legacy naps/no-anchor paths are unchanged **byte-for-byte**: configured
-  first ramp, nine-minute snooze, maximum two snoozes, fifteen-minute terminal
-  timeout, HA stop works. Do not apply commute timeout/re-ring/final policies.
+- Prove naps, prep-only wakes and disabled-window legacy paths are unchanged:
+  configured first ramp, nine-minute snooze, maximum two snoozes, fifteen-minute
+  terminal timeout, HA stop works. Enabled fallback wakes are windows and must
+  instead use the same timeout/re-ring/final policies as calendar windows.
 - Verify worker/cache regressions: independent audio timing under blocked HA,
   serial commands and bounded subprocess calls, restoration after stop/failure,
   no post-restore worker write, failed start does not acknowledge playback,
@@ -200,8 +344,11 @@ The full suite includes the following cases in `tests/test_alarm.py`,
 
 ## Private infra contract follow-up — pending, NO deployment
 
-This is an exact coordination checklist for the separate infra owner. No infra
-files, running HA, devices or deployed services are changed by this docs lane.
+This is a consumer coordination checklist for the separate infra owner to verify
+or migrate where not yet satisfied. Supplied source inspection already confirms
+the 60-minute light geometry; no additional light change is needed for shared
+advance. No infra files, running HA, devices or deployed services are changed by
+this docs lane.
 
 1. `script.commute_publish_alarm` accepts **`deadline_at`**, stores offset-bearing
    UTC text in **`input_text.commute_alarm_deadline_utc`**, and clears a missing
@@ -213,8 +360,9 @@ files, running HA, devices or deployed services are changed by this docs lane.
    original wake remains in local done history for dedupe. Accept completion
    only at/after the current session's wake and not in the future; delayed
    retries must not restore lights or clear notifications for a newer session.
-2. Fade fairy lights from **L−47**, reaching **full warm by L−37**. Save
-   **`switch.fairy_lights_sync_receive`** and
+2. Fade fairy lights from **published wake−10 minutes**, reaching **full warm at
+   the published first wake** (L−47 / L−37 for lead 37; L−70 / L−60 for lead 60).
+   Apply no extra prep advance in HA. Save **`switch.fairy_lights_sync_receive`** and
    **`select.fairy_lights_live_override`**, disable sync, then restore those
    saved values on the `window_done` completion event. At first ring turn on
    **`light.smart_led_bulb`**.
@@ -236,19 +384,27 @@ Only after coordinated infra migration and fresh source validation:
 1. Deliberately update the private infra input and optional daemon/publish
    configuration. Confirm the enabled/master settings and HA contract together;
    repository edits alone are not deployment. Evaluate/render before applying.
-2. Confirm `alarm publish --dry-run` and `alarm status --json` show expected
-   future wake and buffered deadline, including epoch-zero clearing. Confirm
-   the sink is the physical speakers, not Snapcast.
+2. With separately authorized configuration and provider access, use
+   `commutecompass alarm publish --dry-run` to inspect the future first wake and
+   effective final (after the advance), including fallback geometry. Dry-run
+   skips HA publication but can read calendar/routing providers. Compare the
+   selected contract's HA schedule separately; `commutecompass alarm status
+   --json` is a legacy-helper diagnostic, not a v1 playback acknowledgement.
+   Check explicit epoch-zero clearing only when there is no window anchor.
+   Confirm the sink is the physical speakers, not Snapcast.
 3. With the user present and warned, test a short legacy nap: safe starting
    volume, ramp/loop, restore mute/volume, desktop and HA stop, nine-minute
    snooze/max-two and fifteen-minute terminal cap (shortened test settings if
    needed). Software percent does not measure physical loudness.
-4. Test the commute window with shortened timing: L−47 lights fade, L−37 first
-   ring/bulb, repeated five-minute capped snoozes and timeout auto-snooze,
-   20%/30 s/60 s re-rings, L final and no restart when already ringing, final
-   no-stop/no-snooze/no-timeout while continuously live and audible, and desktop
-   dismissal. Check original-wake done-history dedupe, dismissal-timestamp
-   completion events, fairy-light saved-state restoration and notification clearing.
+4. Only with explicit playback authorization and the user present, test both
+   calendar and fallback windows with controlled timing: lights ten minutes
+   before published first wake, first ring/bulb, repeated five-minute capped
+   snoozes and timeout auto-snooze, 20%/30 s/60 s re-rings, L final and no restart
+   when already ringing. Verify final no-stop/no-snooze/no-timeout while
+   continuously live and audible, and desktop dismissal. Check original-wake
+   done-history dedupe, dismissal-timestamp completion events, fairy-light
+   saved-state restoration and notification clearing. Verify the noon / 15 / 60
+   / 0 expected geometry above before any audible trial.
 5. Test each silent ringing notification and actions, including meds absent
    after first successful tap. Confirm HA stop only snoozes before final and
    cannot dismiss final. Check activity-monitor warning and off/skip/clear

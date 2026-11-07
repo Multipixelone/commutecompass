@@ -96,28 +96,138 @@ def _clear_env(keys: list[str]) -> None:
         os.environ.pop(key, None)
 
 
-def test_calendar_advance_config_round_trip(
+@pytest.mark.parametrize("key_name", ["prep_advance_minutes", "calendar_advance_minutes"])
+def test_prep_advance_config_round_trip(
     minimal_toml: Path, required_env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    key_name: str,
 ) -> None:
     from commutecompass.config import delete_config_field, list_overridden_allowlist_keys
 
     for key, value in required_env.items():
         monkeypatch.setenv(key, value)
-    key = "alarm.window.calendar_advance_minutes"
-    assert load_config(minimal_toml).alarm.window.calendar_advance_minutes == 0
+    key = f"alarm.window.{key_name}"
+    assert key in CONFIG_SET_ALLOWLIST
+    assert load_config(minimal_toml).alarm.window.prep_advance_minutes == 0
     assert update_config_field(minimal_toml, key, "15") == 15
     cfg = load_config(minimal_toml)
-    assert cfg.alarm.window.calendar_advance_minutes == 15
-    assert "calendar_advance_minutes = 15" in render_config_toml(cfg)
-    assert key in list_overridden_allowlist_keys(minimal_toml)
+    assert cfg.alarm.window.prep_advance_minutes == cfg.alarm.window.calendar_advance_minutes == 15
+    assert "prep_advance_minutes = 15" in render_config_toml(cfg)
+    assert "calendar_advance_minutes" not in render_config_toml(cfg)
+    assert '"prep_advance_minutes": 15' in render_config_json(cfg)
+    assert "calendar_advance_minutes" not in render_config_json(cfg)
+    assert "alarm.window.prep_advance_minutes" in list_overridden_allowlist_keys(minimal_toml)
     for invalid in ("-1", "1441", "fifteen"):
         before = minimal_toml.read_bytes()
         with pytest.raises(ConfigSetError):
             update_config_field(minimal_toml, key, invalid)
         assert minimal_toml.read_bytes() == before
     assert delete_config_field(minimal_toml, key)
-    assert load_config(minimal_toml).alarm.window.calendar_advance_minutes == 0
-    assert key not in list_overridden_allowlist_keys(minimal_toml)
+    cfg = load_config(minimal_toml)
+    assert cfg.alarm.window.prep_advance_minutes == cfg.alarm.window.calendar_advance_minutes == 0
+    assert not any("advance_minutes" in k for k in list_overridden_allowlist_keys(minimal_toml))
+
+
+@pytest.mark.parametrize("stored_name", ["prep_advance_minutes", "calendar_advance_minutes"])
+@pytest.mark.parametrize("edit_name", ["prep_advance_minutes", "calendar_advance_minutes"])
+def test_advance_alias_edits_and_unsets_never_leave_a_shadow(
+    minimal_toml: Path, required_env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    stored_name: str, edit_name: str,
+) -> None:
+    from commutecompass.config import delete_config_field
+
+    for key, value in required_env.items():
+        monkeypatch.setenv(key, value)
+    minimal_toml.write_text(minimal_toml.read_text() + f"\n[alarm.window]\n{stored_name} = 15\n")
+    original = minimal_toml.read_text()
+    cfg = load_config(minimal_toml)
+    assert cfg.alarm.window.prep_advance_minutes == cfg.alarm.window.calendar_advance_minutes == 15
+    key = f"alarm.window.{edit_name}"
+    assert update_config_field(minimal_toml, key, "30") == 30
+    cfg = load_config(minimal_toml)
+    assert cfg.alarm.window.prep_advance_minutes == cfg.alarm.window.calendar_advance_minutes == 30
+    assert delete_config_field(minimal_toml, key)
+    assert load_config(minimal_toml).alarm.window.prep_advance_minutes == 0
+    assert not delete_config_field(minimal_toml, key)
+    # Unset must also work against an untouched legacy file (not just an edit
+    # that already canonicalized its spelling).
+    minimal_toml.write_text(original)
+    assert delete_config_field(minimal_toml, key)
+    assert load_config(minimal_toml).alarm.window.prep_advance_minutes == 0
+
+
+@pytest.mark.parametrize("name", ["prep_advance_minutes", "calendar_advance_minutes"])
+@pytest.mark.parametrize("value", [0, 1440])
+def test_advance_model_alias_bounds_and_assignment(name: str, value: int) -> None:
+    from commutecompass.config import AlarmWindowConfig
+
+    window = AlarmWindowConfig.model_validate({name: value})
+    assert window.prep_advance_minutes == window.calendar_advance_minutes == value
+    window.calendar_advance_minutes = 15
+    assert window.prep_advance_minutes == 15
+    window.prep_advance_minutes = 30
+    assert window.calendar_advance_minutes == 30
+    assert window.model_dump()["prep_advance_minutes"] == 30
+    assert "calendar_advance_minutes" not in window.model_dump()
+
+
+@pytest.mark.parametrize("name", ["prep_advance_minutes", "calendar_advance_minutes"])
+@pytest.mark.parametrize("value", [-1, 1441])
+def test_advance_model_rejects_out_of_bounds(name: str, value: int) -> None:
+    from pydantic import ValidationError
+
+    from commutecompass.config import AlarmWindowConfig
+
+    with pytest.raises(ValidationError):
+        AlarmWindowConfig.model_validate({name: value})
+
+
+def test_conflicting_advance_aliases_rejected_without_rewriting_file(
+    minimal_toml: Path, required_env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic import ValidationError
+
+    from commutecompass.config import AlarmWindowConfig, delete_config_field
+
+    for key, value in required_env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValidationError):
+        AlarmWindowConfig.model_validate({
+            "prep_advance_minutes": 15, "calendar_advance_minutes": 30,
+        })
+    minimal_toml.write_text(minimal_toml.read_text() + (
+        "\n[alarm.window]\nprep_advance_minutes = 15\ncalendar_advance_minutes = 30\n"
+    ))
+    before = minimal_toml.read_bytes()
+    with pytest.raises(ValidationError):
+        load_config(minimal_toml)
+    assert minimal_toml.read_bytes() == before
+    for key in ("alarm.window.prep_advance_minutes", "alarm.window.calendar_advance_minutes"):
+        with pytest.raises(ConfigSetError):
+            update_config_field(minimal_toml, key, "20")
+        assert minimal_toml.read_bytes() == before
+        with pytest.raises(ConfigSetError):
+            delete_config_field(minimal_toml, key)
+        assert minimal_toml.read_bytes() == before
+
+
+def test_equal_advance_aliases_are_one_value(
+    minimal_toml: Path, required_env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commutecompass.config import AlarmWindowConfig, delete_config_field
+
+    for key, value in required_env.items():
+        monkeypatch.setenv(key, value)
+    window = AlarmWindowConfig.model_validate({
+        "prep_advance_minutes": 15, "calendar_advance_minutes": 15,
+    })
+    assert window.prep_advance_minutes == 15
+    minimal_toml.write_text(minimal_toml.read_text() + (
+        "\n[alarm.window]\nprep_advance_minutes = 15\ncalendar_advance_minutes = 15\n"
+    ))
+    assert update_config_field(minimal_toml, "alarm.window.calendar_advance_minutes", "30") == 30
+    assert load_config(minimal_toml).alarm.window.prep_advance_minutes == 30
+    assert delete_config_field(minimal_toml, "alarm.window.prep_advance_minutes")
+    assert load_config(minimal_toml).alarm.window.prep_advance_minutes == 0
 
 
 def test_validation_formatter_only_renders_schema_fields() -> None:

@@ -259,11 +259,22 @@ nix build .#packages.x86_64-linux.default
 ## Wake & nap alarm
 
 Enable `[alarm].enabled = true` and configure `[home_assistant]` plus
-`HOME_ASSISTANT_TOKEN`. Morning wake is the earlier of the first commute's
-`prep_at - wake_lead_minutes` and `fallback_time` (default noon, NYC). With no
-commutes it is still noon. Once today's wake has passed, publishing targets
-tomorrow's logical day; the next future prep (including later today) is sent
-minus the wake lead as HA's nap cap. Planning never replaces today's saved plans.
+`HOME_ASSISTANT_TOKEN`. With the wake window enabled (the default), compare the
+healthy calendar leave deadline with `fallback_time` (default noon, NYC), then
+subtract `alarm.window.prep_advance_minutes` once from the selected base final.
+First ring is that effective final minus `first_alarm_lead_minutes` (default 37).
+The shared advance defaults to 0; `calendar_advance_minutes` remains a legacy
+alias for the same setting, separate from `prep.prep_minutes`.
+
+For a noon fallback, advance 15, first lead 60 and deadline lead 0, lights begin
+at 10:35, first ring is 10:45 and final is 11:45. Advance 0 gives 10:50 / 11:00 /
+noon. HA derives lights from the published pair without another offset. Explicit
+manual `--leave X` deadlines stay exact and unadvanced. Prep-only and
+window-disabled wakes retain `prep_at - wake_lead_minutes` capped by the fallback
+clock. Nap caps remain unadvanced: healthy window plans use `leave_at - first
+lead`, otherwise `prep_at - wake lead`. Once today's first wake has passed,
+publishing targets the next logical day with a future wake; active windows remain
+locked. Planning never replaces today's saved plans.
 
 ```console
 commutecompass alarm publish --dry-run
@@ -279,8 +290,9 @@ commutecompass alarm daemon
 HA owns nap capping/warnings, skip auto-reset, and the final next-alarm
 selection. Provision the helpers, scripts and template sensor described in
 [`docs/alarm-design.md`](docs/alarm-design.md): `script.commute_publish_alarm`
-accepts `wake_at`, `next_prep_at` (ISO strings, or empty prep), and sanitized
-`next_event`; `script.commute_nap` accepts `minutes`; `script.commute_alarm_skip`
+accepts `wake_at`, `next_prep_at` (ISO strings, or empty prep), sanitized
+`next_event`, and `deadline_at` for enabled windows (including fallback) or bound
+manual deadlines; `script.commute_nap` accepts `minutes`; `script.commute_alarm_skip`
 skips the current next instant. `sensor.commute_next_alarm` exposes the earliest
 future unskipped wake/nap instant and `kind`/`event` attributes. Use timezone-aware
 ISO sensor values. Persisted UTC text mirrors preserve wake/nap/skip/cap instants
@@ -295,11 +307,14 @@ ignores alarms more than ten minutes stale at startup, and remembers completed
 instants across restarts. It uses a case-insensitive PipeWire sink substring
 (default `analog`, deliberately not Snapcast Living Room), saves volume/mute,
 unmutes, ramps 30→100% over two minutes, loops a synthesized tone (or `sound`
-file), and restores audio on stop, fifteen-minute timeout or SIGTERM. Stop and
-snooze buttons live in HA; keyboard/mouse activity on link also stops the alarm.
-Snooze is nine minutes, at most twice. Configure `sink` so it matches the intended
-output; a missing match is
-an audio error, never a fallback to another room.
+file), and restores audio when playback ends or on SIGTERM. Naps and legacy wakes
+have nine-minute snoozes (at most twice), a fifteen-minute timeout and HA stop.
+Calendar and fallback windows instead use unlimited capped five-minute snoozes
+before final; final has no timeout and ignores HA stop/snooze. Desktop activity
+normally dismisses final; master-off and explicit skip/clear remain escape
+hatches. See [the window lifecycle](docs/alarm-design.md#window-lifecycle) for
+re-ring and recovery details. Configure `sink` so it matches the intended output;
+a missing match is an audio error, never a fallback to another room.
 
 For NixOS set `services.commutecompass.alarm.enable = true`, choose the login
 `user`/`group` owning PipeWire, and set `alarm.runtimeDir` to its runtime directory
@@ -310,7 +325,8 @@ Activity-stop uses a dedicated `hypridle` monitor (included in the daemon PATH)
 and requires a running Wayland session with idle-notify support. It retries
 attachment after login or compositor exit; audio still works while unavailable. Set
 `alarm.wayland_display` if automatic socket discovery selects the wrong session;
-HA stop remains available without it. `alarm.stop_on_activity` defaults to true.
+HA stop remains available for naps/legacy wakes and snoozes a window before
+final, but cannot dismiss final. `alarm.stop_on_activity` defaults to true.
 
 The iPhone/HA layer is configured separately. The integration is maintained in
 the infra repository's `modules/iot/commutecompass-alarm.nix`; the legacy
