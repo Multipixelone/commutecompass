@@ -1129,7 +1129,7 @@ class TestAlarmConfig:
         assert a.fallback_time == "12:00"
         assert a.wake_lead_minutes == 0
         assert a.sink == "analog"
-        assert a.snooze_minutes == 9
+        assert a.snooze_minutes == 6.5
         assert a.max_snoozes == 2
         assert a.max_ring_minutes == 15
         assert a.poll_seconds == 30
@@ -1153,7 +1153,7 @@ class TestAlarmConfig:
         assert w.enabled is True
         assert w.first_alarm_lead_minutes == 37
         assert w.deadline_lead_minutes == 0
-        assert w.snooze_minutes == 5
+        assert w.snooze_minutes == 6.5
         assert (w.rering_start_percent, w.rering_hold_seconds, w.rering_ramp_seconds) == (
             20, 30, 60,
         )
@@ -1176,6 +1176,50 @@ class TestAlarmConfig:
         assert cfg.alarm.window.first_alarm_lead_minutes == 37
         assert cfg.alarm.window.deadline_lead_minutes == 0
         assert cfg.alarm.window.deadline_utc_entity == "input_text.commute_alarm_deadline_utc"
+
+    @pytest.mark.parametrize("window", [False, True], ids=["normal", "window"])
+    def test_snooze_minutes_retains_bounds(self, window: bool) -> None:
+        from pydantic import ValidationError
+
+        from commutecompass.config import AlarmConfig, AlarmWindowConfig
+
+        config_type = AlarmWindowConfig if window else AlarmConfig
+        for minutes in (1, 240):
+            assert config_type(snooze_minutes=minutes).snooze_minutes == minutes
+        for invalid_minutes in (0.5, 240.5):
+            with pytest.raises(ValidationError):
+                config_type(snooze_minutes=invalid_minutes)
+
+    @pytest.mark.parametrize(
+        "alarm_table,window_table,normal_seconds,window_seconds",
+        [
+            ("", "", 390, 390),
+            ("snooze_minutes = 6.5\n", "snooze_minutes = 6.5\n", 390, 390),
+            ("snooze_minutes = 9\n", "snooze_minutes = 4\n", 540, 240),
+        ],
+        ids=["defaults", "fractional-minutes", "whole-minute-overrides"],
+    )
+    def test_snooze_toml_to_daemon_preserves_duration(
+        self, tmp_path: Path, minimal_toml: Path, required_env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch, alarm_table: str, window_table: str,
+        normal_seconds: int, window_seconds: int,
+    ) -> None:
+        from datetime import timedelta
+
+        from commutecompass.alarm_daemon import Settings
+
+        for key, val in required_env.items():
+            monkeypatch.setenv(key, val)
+        p = tmp_path / "snooze.toml"
+        p.write_text(
+            minimal_toml.read_text()
+            + "\n[alarm]\n" + alarm_table + "\n[alarm.window]\n" + window_table
+        )
+        cfg = load_config(p)
+        settings = Settings.from_config(cfg.alarm)
+        assert settings.snooze == timedelta(seconds=normal_seconds)
+        assert settings.window is not None
+        assert settings.window.snooze == timedelta(seconds=window_seconds)
 
     def test_schedule_contract_defaults_legacy(self) -> None:
         from commutecompass.config import AlarmConfig

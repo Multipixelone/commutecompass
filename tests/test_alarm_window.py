@@ -70,37 +70,32 @@ def test_first_alarm_rings_at_d_minus_37_with_default_profile() -> None:
 
 
 @pytest.mark.parametrize("control", ["snooze_pressed_at", "stop_pressed_at"])
-def test_window_timeline_unlimited_five_minute_snoozes_then_final(control: str) -> None:
+def test_window_timeline_unlimited_six_and_half_minute_snoozes_then_final(control: str) -> None:
     st = ring_first()
-    now = m(-37)
-    rerings = 0
-    while True:
-        pressed_at = now + timedelta(seconds=10)
+    for pressed_minute, rering_minute in [
+        (-36, -29.5), (-29, -22.5), (-22, -15.5),
+        (-15, -8.5), (-8, -1.5), (-1, 0),
+    ]:
+        pressed_at = m(pressed_minute)
         st, acts = step(st, pressed_at, win(**{control: pressed_at}), W)
         assert kinds(acts) == ["stop:snooze", "state:snoozed"]
-        assert st.snooze_until is not None
-        expected = min(now + timedelta(seconds=10, minutes=5), DEADLINE)
-        assert st.snooze_until == expected
-        now = st.snooze_until
-        st, acts = step(st, now, win(), W)
+        assert st.snooze_until == m(rering_minute)
+        st, acts = step(st, m(rering_minute), win(), W)
         assert st.mode == "ringing"
-        if now == DEADLINE:
-            assert st.phase == "final"
-            start = [a for a in acts if isinstance(a, StartRing)]
-            assert start[0].profile is None  # full first-alarm ramp
-            break
-        rerings += 1
-        assert st.phase == "window"
         start = [a for a in acts if isinstance(a, StartRing)]
-        assert start[0].profile == REQUIET
-    assert rerings >= 6  # far beyond the legacy max of 2
-    assert st.snoozes == rerings + 1
+        if rering_minute == 0:
+            assert st.phase == "final"
+            assert start[0].profile is None  # full first-alarm ramp
+        else:
+            assert st.phase == "window"
+            assert start[0].profile == REQUIET
+    assert st.snoozes == 6  # window snoozes exceed the normal/nap max of 2
 
 
 def test_last_snooze_is_shortened_to_end_at_deadline() -> None:
     st = ring_first()
     st, _ = snooze(st, m(-3))
-    assert st.snooze_until == DEADLINE  # not D+2
+    assert st.snooze_until == DEADLINE  # not D+3m30s
     st, acts = step(st, m(-0.5), win(), W)
     assert acts == [] and st.mode == "snoozed"
     st, acts = step(st, DEADLINE, win(), W)
@@ -110,41 +105,41 @@ def test_last_snooze_is_shortened_to_end_at_deadline() -> None:
 def test_rering_uses_quiet_hold_profile_and_snooze_still_works_when_loud() -> None:
     st = ring_first()
     st, _ = snooze(st, m(-36))
-    st, acts = step(st, m(-31), win(), W)
+    st, acts = step(st, m(-29.5), win(), W)
     assert [a.profile for a in acts if isinstance(a, StartRing)] == [REQUIET]
     # Two minutes in, the re-ring is at full volume; snooze still honoured.
-    st, acts = snooze(st, m(-29))
+    st, acts = snooze(st, m(-27.5))
     assert kinds(acts) == ["stop:snooze", "state:snoozed"]
-    assert st.snooze_until == m(-24)
+    assert st.snooze_until == m(-21)
 
 
 def test_ha_stop_during_window_is_a_snooze_not_a_dismissal() -> None:
     st = ring_first()
     st, acts = step(st, m(-36), win(stop_pressed_at=m(-36)), W)
     assert kinds(acts) == ["stop:snooze", "state:snoozed"]
-    assert st.phase == "window" and st.snooze_until == m(-31)
+    assert st.phase == "window" and st.snooze_until == m(-29.5)
     # Stop while snoozed is ignored, the next ring still comes.
     st, acts = step(st, m(-33), win(stop_pressed_at=m(-33)), W)
     assert acts == [] and st.mode == "snoozed"
 
 
-def test_window_ring_timeout_repeats_five_minute_snoozes_then_final() -> None:
+def test_window_ring_timeout_repeats_six_and_half_minute_snoozes_then_final() -> None:
     st = ring_first()
     st, acts = step(st, m(-22.01), win(), W)
     assert acts == [] and st.mode == "ringing"  # not yet 15 minutes
     st, acts = step(st, m(-22), win(), W)
     assert kinds(acts) == ["stop:timeout", "state:snoozed"]
-    assert st.snooze_until == m(-17)
-    st, acts = step(st, m(-17.01), win(), W)
+    assert st.snooze_until == m(-15.5)
+    st, acts = step(st, m(-15.51), win(), W)
     assert acts == [] and st.mode == "snoozed"
-    st, acts = step(st, m(-17), win(), W)
+    st, acts = step(st, m(-15.5), win(), W)
     assert [a.profile for a in acts if isinstance(a, StartRing)] == [REQUIET]
-    assert st.ring_started == m(-17)
-    st, acts = step(st, m(-2.01), win(), W)
+    assert st.ring_started == m(-15.5)
+    st, acts = step(st, m(-0.51), win(), W)
     assert acts == [] and st.mode == "ringing"
-    st, acts = step(st, m(-2), win(), W)  # another full 15-minute ring
+    st, acts = step(st, m(-0.5), win(), W)  # another full 15-minute ring
     assert kinds(acts) == ["stop:timeout", "state:snoozed"]
-    assert st.snooze_until == DEADLINE  # now+5 is capped at D
+    assert st.snooze_until == DEADLINE  # now+6m30s is capped at D
     st, acts = step(st, DEADLINE, win(), W)
     assert st.phase == "final" and kinds(acts) == ["start", "state:ringing"]
     assert [a.profile for a in acts if isinstance(a, StartRing)] == [None]
@@ -166,7 +161,7 @@ def test_manual_control_close_to_deadline_caps_snooze(control: str) -> None:
 def test_ringing_through_deadline_becomes_final_without_restarting() -> None:
     st = ring_first()
     st, _ = snooze(st, m(-7))
-    st, _ = step(st, m(-2), win(), W)
+    st, _ = step(st, m(-0.5), win(), W)
     st, acts = step(st, DEADLINE, win(), W)
     assert acts == [] and st.phase == "final" and st.mode == "ringing"
 
@@ -270,16 +265,16 @@ def test_restart_mid_window_snoozed_keeps_deadline_and_final(tmp_path: Path) -> 
     clock[0] = m(-7)
     feed[0] = win(snooze_pressed_at=m(-7))
     d.run_once()
-    assert d.state.snooze_until == DEADLINE + timedelta(minutes=-2)
+    assert d.state.snooze_until == m(-0.5)
     # Restart while HA is down: cache alone must carry D and the deadline.
-    clock[0] = m(-1)
+    clock[0] = m(-0.5)
     player = ProfilePlayer()
     d2 = _daemon(tmp_path, [Inputs(ha_ok=False)], clock, player)
     assert d2.state.phase == "window" and d2.state.deadline == D
     d2.run_once()
     assert player.profiles == [REQUIET]
-    clock[0] = m(-0.9)
-    d2.run_once()  # re-ringing at D-1; reaching the deadline needs no snooze
+    clock[0] = m(-0.4)
+    d2.run_once()  # re-ringing at D-30s; reaching the deadline needs no snooze
     clock[0] = DEADLINE
     d2.run_once()
     assert str(d2.state.phase) == "final"
@@ -574,21 +569,22 @@ def test_window_disabled_keeps_legacy_semantics() -> None:
     assert kinds(acts) == ["stop:stop", "state:idle"]
 
 
-def test_naps_keep_nine_minute_two_snooze_fifteen_minute_semantics() -> None:
+def test_naps_use_normal_snooze_override_and_keep_two_snooze_fifteen_minute_limits() -> None:
+    settings = replace(W, snooze=timedelta(minutes=9))
     nap = m(-37)
     base = Inputs(ha_ok=True, next_alarm=nap, kind="nap", nap_at=nap, nap_known=True,
                   wake_known=True, deadline_at=m(0), deadline_known=True)
-    st, _ = step(DaemonState(), m(-38), base, W)
-    st, _ = step(st, nap, base, W)
+    st, _ = step(DaemonState(), m(-38), base, settings)
+    st, _ = step(st, nap, base, settings)
     assert st.phase == ""
-    st, _ = step(st, m(-36), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-36)}), W)
-    assert st.snooze_until == m(-27)  # 9 minutes
-    st, _ = step(st, m(-27), base, W)
-    st, _ = step(st, m(-26), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-26)}), W)
-    st, _ = step(st, m(-17), base, W)
-    st, acts = step(st, m(-16), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-16)}), W)
+    st, _ = step(st, m(-36), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-36)}), settings)
+    assert st.snooze_until == m(-27)  # normal override, not the window's 6m30s
+    st, _ = step(st, m(-27), base, settings)
+    st, _ = step(st, m(-26), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-26)}), settings)
+    st, _ = step(st, m(-17), base, settings)
+    st, acts = step(st, m(-16), Inputs(**{**base.__dict__, "snooze_pressed_at": m(-16)}), settings)
     assert st.mode == "ringing" and acts == []  # max 2 snoozes
-    st, acts = step(st, m(-2), base, W)
+    st, acts = step(st, m(-2), base, settings)
     assert kinds(acts) == ["stop:timeout", "state:idle"]
 
 
@@ -624,10 +620,10 @@ def test_dst_window_uses_absolute_minutes(deadline: datetime) -> None:
     st, _ = step(st, m(-7, deadline), Inputs(**{**inputs.__dict__,
                                                     "snooze_pressed_at": m(-7, deadline)}), W)
     assert st.snooze_until is not None
-    assert st.snooze_until.astimezone(UTC) == m(-2, deadline).astimezone(UTC)
-    st, _ = step(st, m(-2, deadline), inputs, W)
-    st, _ = step(st, m(-1, deadline), Inputs(**{**inputs.__dict__,
-                                                    "snooze_pressed_at": m(-1, deadline)}), W)
+    assert st.snooze_until.astimezone(UTC) == m(-0.5, deadline).astimezone(UTC)
+    st, _ = step(st, m(-0.5, deadline), inputs, W)
+    st, _ = step(st, m(-0.25, deadline), Inputs(**{**inputs.__dict__,
+                                                    "snooze_pressed_at": m(-0.25, deadline)}), W)
     assert st.snooze_until is not None
     assert st.snooze_until.astimezone(UTC) == deadline.astimezone(UTC)
     st, _ = step(st, deadline, inputs, W)
@@ -688,7 +684,7 @@ def test_build_daemon_wires_window_settings_and_activity_warning(
     assert d.settings.window.deadline_lead == timedelta(0)
     assert d.settings.stale_limit == timedelta(minutes=10)
     assert config.alarm.window.deadline_utc_entity == "input_text.commute_alarm_deadline_utc"
-    assert d.settings.snooze == timedelta(minutes=9) and d.settings.max_snoozes == 2
+    assert d.settings.snooze == timedelta(seconds=390) and d.settings.max_snoozes == 2
     caplog.clear()
     config.alarm.window = AlarmWindowConfig(enabled=False)
     assert build_daemon(config).settings.window is None

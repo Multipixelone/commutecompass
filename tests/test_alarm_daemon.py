@@ -112,23 +112,24 @@ def test_snooze_up_to_max_then_ignored() -> None:
     st, acts = step(st, at(1), inp(snooze_pressed_at=at(0.9)), S)
     assert st.mode == "snoozed" and st.snoozes == 1
     assert kinds(acts) == ["stop:snooze", "state:snoozed"]
-    assert st.snooze_until == at(10)
+    assert st.snooze_until == at(7.5)
 
-    st, acts = step(st, at(5), inp(snooze_pressed_at=at(0.9)), S)
+    st, acts = step(st, at(7.5) - timedelta(seconds=1), inp(snooze_pressed_at=at(0.9)), S)
     assert st.mode == "snoozed" and acts == []
-    st, acts = step(st, at(10), inp(snooze_pressed_at=at(0.9)), S)
+    st, acts = step(st, at(7.5), inp(snooze_pressed_at=at(0.9)), S)
     assert st.mode == "ringing" and kinds(acts) == ["start", "state:ringing"]
 
-    st, _ = step(st, at(11), inp(snooze_pressed_at=at(10.5)), S)
+    st, _ = step(st, at(8), inp(snooze_pressed_at=at(7.9)), S)
     assert st.mode == "snoozed" and st.snoozes == 2
-    st, _ = step(st, at(20), inp(snooze_pressed_at=at(10.5)), S)
+    assert st.snooze_until == at(14.5)
+    st, _ = step(st, at(14.5), inp(snooze_pressed_at=at(7.9)), S)
     assert st.mode == "ringing"
 
     # Third snooze exceeds max_snoozes=2 → ignored, keeps ringing.
-    st, acts = step(st, at(21), inp(snooze_pressed_at=at(20.5)), S)
+    st, acts = step(st, at(15.5), inp(snooze_pressed_at=at(15)), S)
     assert st.mode == "ringing" and acts == []
     # Stop still works.
-    st, acts = step(st, at(22), inp(stop_pressed_at=at(21.5)), S)
+    st, acts = step(st, at(16.5), inp(stop_pressed_at=at(16)), S)
     assert st.mode == "idle"
 
 
@@ -591,7 +592,7 @@ def test_snooze_across_dst_uses_elapsed_minutes() -> None:
     st, _ = step(DaemonState(), start, inp(start), S)
     st, _ = step(st, pressed, inp(start, snooze_pressed_at=pressed), S)
     assert st.snooze_until is not None
-    assert st.snooze_until.astimezone(UTC) - pressed.astimezone(UTC) == timedelta(minutes=9)
+    assert st.snooze_until.astimezone(UTC) - pressed.astimezone(UTC) == timedelta(seconds=390)
     assert st.snooze_until.fold == 1
 
 
@@ -666,10 +667,10 @@ def test_snooze_persists_deadline_count_restart(tmp_path: Path) -> None:
     st, _ = step(st, at(1), helper_inputs(snooze_pressed_at=at(0.5)), S)
     cache.save(st)
     st = cache.load()
-    assert st.mode == "snoozed" and st.snoozes == 1 and st.snooze_until == at(10)
-    st, acts = step(st, at(9), Inputs(ha_ok=False), S)
+    assert st.mode == "snoozed" and st.snoozes == 1 and st.snooze_until == at(7.5)
+    st, acts = step(st, at(7), Inputs(ha_ok=False), S)
     assert st.mode == "snoozed" and not acts
-    st, acts = step(st, at(10), Inputs(ha_ok=False), S)
+    st, acts = step(st, at(7.5), Inputs(ha_ok=False), S)
     assert st.mode == "ringing" and st.snoozes == 1 and kinds(acts) == ["start", "state:ringing"]
 
 
@@ -1126,7 +1127,7 @@ def test_nap_snooze_shutdown_restart_preserves_ha_cleanup_mode(tmp_path: Path) -
     clock[0] = at(14)
     states[cfg.snooze_button] = {"state": at(13.9).isoformat()}
     first.run_once()
-    assert first.state.snooze_until == at(23)
+    assert first.state.snooze_until == at(20.5)
     first.request_stop()
     first.run_forever()  # shutdown must not publish idle
     assert published == ["ringing", "snoozed"]
@@ -1141,7 +1142,7 @@ def test_nap_snooze_shutdown_restart_preserves_ha_cleanup_mode(tmp_path: Path) -
     clock[0] = at(20)
     resumed.run_once()
     assert published[-1] == "snoozed"  # HA cleanup sees active snooze, retains nap
-    clock[0] = at(23)
+    clock[0] = at(20.5)
     resumed.run_once()
     assert resumed.state.mode == "ringing" and player.events[0] == "start"
     assert published[-1] == "ringing" and "idle" not in published
@@ -1382,17 +1383,17 @@ def test_explicit_zero_schedule_cancels_despite_stale_sensor() -> None:
 @pytest.mark.parametrize("raw", [None, "unknown", "unavailable", ZERO])
 def test_cap_unknown_preserves_prior_zero_clears_without_ending_snooze(raw: str | None) -> None:
     cfg = AlarmConfig()
-    states = _states(**{cfg.next_prep_utc_entity: {"state": at(8).isoformat()}})
+    states = _states(**{cfg.next_prep_utc_entity: {"state": at(6).isoformat()}})
     st, _ = step(DaemonState(), at(0), inputs_from_states(states, cfg), S)
     states[cfg.snooze_button] = {"state": at(0.5).isoformat()}
     st, _ = step(st, at(1), inputs_from_states(states, cfg), S)
-    assert st.mode == "snoozed" and st.snooze_until == at(8)
+    assert st.mode == "snoozed" and st.snooze_until == at(6)
     states.pop(cfg.next_prep_utc_entity)
     if raw is not None:
         states[cfg.next_prep_utc_entity] = {"state": raw}
     st, acts = step(st, at(2), inputs_from_states(states, cfg), S)
     assert st.mode == "snoozed" and not acts
-    assert st.prep_threshold == (None if raw == ZERO else at(8))
+    assert st.prep_threshold == (None if raw == ZERO else at(6))
     # A genuine elapsed nonzero cap remains hard, unlike epoch zero.
     states[cfg.next_prep_utc_entity] = {"state": at(1.5).isoformat()}
     st, acts = step(st, at(2), inputs_from_states(states, cfg), S)

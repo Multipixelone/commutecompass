@@ -187,7 +187,7 @@ render the versioned script before any separately authorized migration.
   helper. Missing anchors must be cleared to offset-bearing epoch-zero text,
   `1970-01-01T00:00:00+00:00`, not left stale.
 - Keyboard/mouse activity is enabled: the desktop is out of reach of bed.
-  Before final, HA stop means five-minute capped snooze; final ignores HA stop
+  Before final, HA stop means 6-minute-30-second capped snooze; final ignores HA stop
   and snooze. Master-off and explicit skip/clear remain escape hatches.
 - Heartbeat proves connectivity, not functioning sound. Existing fallback also
   requires acknowledgement of the specific wake after successful playback
@@ -314,7 +314,7 @@ new fallback/alias cases are listed above, not included in that historical pass.
 - First ring uses the configured first ramp. Deadline locks **at first ring**,
   not at observation/publication; after lock earlier replans tighten it and
   later replans cannot extend it. Persist the original wake key.
-- Before final, manual snooze and HA stop are unlimited `min(now+5 min, L)`.
+- Before final, manual snooze and HA stop are unlimited `min(now+6 min 30 s, L)`.
   Fifteen-minute timeout auto-snoozes the same way instead of consuming the
   window. Repeat re-rings use **20% absolute sink**, hold **30 s**, ramp **60 s**
   to **100%**; not a fraction of the saved pre-alarm volume.
@@ -333,8 +333,9 @@ new fallback/alias cases are listed above, not included in that historical pass.
   the offset-bearing UTC dismissal instant and HA treats its update as a
   completion event. Failed/offline delivery retains that timestamp across
   restart. Preserve heartbeat/ack/failure-latch retry behavior.
-- Prove naps, prep-only wakes and disabled-window legacy paths are unchanged:
-  configured first ramp, nine-minute snooze, maximum two snoozes, fifteen-minute
+- Prove naps, prep-only wakes and disabled-window legacy paths retain their
+  policies with the new default snooze: configured first ramp,
+  6-minute-30-second snooze, maximum two snoozes, fifteen-minute
   terminal timeout, HA stop works. Enabled fallback wakes are windows and must
   instead use the same timeout/re-ring/final policies as calendar windows.
 - Verify worker/cache regressions: independent audio timing under blocked HA,
@@ -372,7 +373,7 @@ this docs lane.
    **`input_boolean.morning_meds_taken`** is off; toggle it once, guarding
    repeated/stale action delivery so it never toggles back. Clear the
    notification on the `window_done` completion event.
-4. HA stop maps to five-minute snooze capped at L before final, and is ignored
+4. HA stop maps to 6-minute-30-second snooze capped at L before final, and is ignored
    in final. Phone actions cannot bypass that phase gate.
 5. Leave existing iOS Clock and critical alerts untouched. The compatibility of
    those layers with the silent intent is **OPEN for Finn's decision**.
@@ -393,12 +394,12 @@ Only after coordinated infra migration and fresh source validation:
    Check explicit epoch-zero clearing only when there is no window anchor.
    Confirm the sink is the physical speakers, not Snapcast.
 3. With the user present and warned, test a short legacy nap: safe starting
-   volume, ramp/loop, restore mute/volume, desktop and HA stop, nine-minute
+   volume, ramp/loop, restore mute/volume, desktop and HA stop, 6-minute-30-second
    snooze/max-two and fifteen-minute terminal cap (shortened test settings if
    needed). Software percent does not measure physical loudness.
 4. Only with explicit playback authorization and the user present, test both
    calendar and fallback windows with controlled timing: lights ten minutes
-   before published first wake, first ring/bulb, repeated five-minute capped
+   before published first wake, first ring/bulb, repeated 6-minute-30-second capped
    snoozes and timeout auto-snooze, 20%/30 s/60 s re-rings, L final and no restart
    when already ringing. Verify final no-stop/no-snooze/no-timeout while
    continuously live and audible, and desktop dismissal. Check original-wake

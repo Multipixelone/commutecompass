@@ -136,7 +136,7 @@ def test_status_identity_rerings_and_continuous_final(tmp_path: Path) -> None:
     daemon.run_once()
     assert exports[-1]["state"] == "snoozed"
     assert exports[-1]["attributes"]["ring"]["playback"] == "stopped"
-    now[0] = m(-31)
+    now[0] = m(-29.5)
     current[0] = win()
     daemon.run_once()
     rering = exports[-1]["attributes"]
@@ -606,7 +606,7 @@ def test_v1_effective_next_prep_cap_matches_legacy_without_subtracting_lead_twic
     legacy = inputs_from_states(entities, legacy_cfg)
     for inputs in (v1, legacy):
         active, _ = step(DaemonState(), T0, inputs, Settings())
-        snoozed, _ = step(active, at(2), replace(inputs, snooze_pressed_at=at(2)), Settings())
+        snoozed, _ = step(active, at(4), replace(inputs, snooze_pressed_at=at(4)), Settings())
         assert snoozed.active_kind == "nap" and snoozed.snooze_until == at(10)
 
 

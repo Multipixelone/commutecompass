@@ -24,7 +24,7 @@ mornings when enabled; naps and prep-only wakes retain their legacy behavior.
 | Q6 | Shortcut hardening: triggers at 21:00 + charger connect + nap shortcut; create and verify a replacement alarm labelled "CommuteCompass", then remove older owned alarms; write back confirmation; HA warns at 23:30 if confirmation ≠ planned wake. |
 | Q7 | commutecompass **publishes** times to HA; HA owns nap logic + final "next alarm" selection. |
 | Q9 | `commutecompass alarm daemon` long-running on link, polls HA every 30 s, caches last known alarm locally, heartbeats to HA. |
-| Q10 | Configurable sink (substring match; default = analog, not snapcast "Living Room"). Legacy stop via HA (button/Shortcut) or keyboard/mouse activity on link (desktop out of reach of bed). Legacy snooze 9 min, max 2. |
+| Q10 | Configurable sink (substring match; default = analog, not snapcast "Living Room"). Legacy stop via HA (button/Shortcut) or keyboard/mouse activity on link (desktop out of reach of bed). Legacy snooze 6 min 30 s, max 2. |
 | Q11 | link follows the latest plan for pending wakes; a ringing/snoozed wake keeps its active identity across replacement publications (earlier, later, or next day). Phone keeps last confirmed; mismatch warning only at 23:30. |
 | Q12 | `input_boolean.commute_alarm_enabled` master switch; "Skip next alarm" auto-resets. CLI `alarm on/off/skip`. |
 | Q13 | Configurable sound; default synthesized tone (generated in cache on first start). |
@@ -323,7 +323,7 @@ A window requires an enabled daemon window and a published wake matching
 now supply that pair and use the **same window lifecycle** as calendar wakes.
 They are no longer noon-only legacy alarms. Naps, prep-only wakes, and
 window-disabled automatic wakes retain the configured legacy first ramp,
-nine-minute snooze, maximum two snoozes, fifteen-minute terminal timeout, and
+6-minute-30-second snooze, maximum two snoozes, fifteen-minute terminal timeout, and
 working HA stop. A missing/mismatched legacy deadline cannot open a window;
 invalid v1 tuples remain no new information rather than an automatic legacy
 fallback. Final dismissal rules below apply equally to calendar and fallback
@@ -337,8 +337,8 @@ windows.
    window; a later replan cannot extend it. Master-off, explicit skip/clear, or
    desktop activity ends the session.
 2. First ring uses the configured first-alarm ramp. Before L, manual snooze and
-   HA stop both snooze for `min(now + 5 min, L)` with **unlimited** repeats.
-   A fifteen-minute ring timeout is now an **automatic five-minute snooze**,
+   HA stop both snooze for `min(now + 6 min 30 s, L)` with **unlimited** repeats.
+   A fifteen-minute ring timeout is now an **automatic 6-minute-30-second snooze**,
    likewise capped at L, not a terminal dismissal.
 3. Every pre-final re-ring after snooze starts at **20% absolute sink volume**,
    holds for **30 s**, then ramps over **60 s** to **100%**, repeatedly as needed.
@@ -393,7 +393,7 @@ light geometry; this revision does not require changing that light logic:
   `input_boolean.morning_meds_taken` is off; its action toggles it once, never
   toggles it back on repeated/stale taps. Clear the notification on the
   `window_done` completion event. Notification actions do not bypass final-phase rules.
-- HA stop maps to the same five-minute capped snooze **before final** and is
+- HA stop maps to the same 6-minute-30-second capped snooze **before final** and is
   **ignored in final**. Do not wire it to unconditional final dismissal.
 - Leave existing iOS Clock and critical-alert behavior untouched. Whether those
   layers are compatible with the silent intent remains **OPEN: Finn decision**.

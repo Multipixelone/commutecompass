@@ -308,8 +308,8 @@ instants across restarts. It uses a case-insensitive PipeWire sink substring
 (default `analog`, deliberately not Snapcast Living Room), saves volume/mute,
 unmutes, ramps 30→100% over two minutes, loops a synthesized tone (or `sound`
 file), and restores audio when playback ends or on SIGTERM. Naps and legacy wakes
-have nine-minute snoozes (at most twice), a fifteen-minute timeout and HA stop.
-Calendar and fallback windows instead use unlimited capped five-minute snoozes
+have 6-minute-30-second snoozes (at most twice), a fifteen-minute timeout and HA stop.
+Calendar and fallback windows instead use unlimited capped 6-minute-30-second snoozes
 before final; final has no timeout and ignores HA stop/snooze. Desktop activity
 normally dismisses final; master-off and explicit skip/clear remain escape
 hatches. See [the window lifecycle](docs/alarm-design.md#window-lifecycle) for

@@ -250,7 +250,7 @@ sound = ""                       # empty = synthesized tone, otherwise a sound f
 ramp_start_percent = 30
 ramp_seconds = 120
 max_ring_minutes = 15
-snooze_minutes = 9
+snooze_minutes = 6.5
 max_snoozes = 2
 poll_seconds = 30
 cache_path = ""                  # empty = <db dir>/alarm-cache.json
@@ -275,7 +275,7 @@ window_done_entity = "input_text.commute_alarm_window_done_utc" # empty = don't 
 prep_advance_minutes = 0        # shared calendar AND fallback advance; legacy alias accepted
 first_alarm_lead_minutes = 37    # first alarm at published deadline-37m
 deadline_lead_minutes = 0        # final at published deadline; keep 0 for exact manual --leave
-snooze_minutes = 5               # unlimited; the last snooze is cut to end at the deadline
+snooze_minutes = 6.5             # unlimited; the last snooze is cut to end at the deadline
 rering_start_percent = 20        # re-rings hold here (absolute sink level) ...
 rering_hold_seconds = 30
 rering_ramp_seconds = 60         # ... then ramp to 100%

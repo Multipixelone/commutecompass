@@ -394,7 +394,7 @@ For calendar and fallback windows, L is the base final (`Plan.leave_at` or
 `alarm.fallback_time`) minus the one shared `alarm.window.prep_advance_minutes`
 (default 0). With default first lead 37 and deadline lead 0: lights L−47, first
 L−37, final L; with first lead 60: lights L−70, first L−60, final L. HA consumes
-published timestamps without another advance. Unlimited five-minute window
+published timestamps without another advance. Unlimited 6-minute-30-second window
 snoozes cap at L; re-rings use 20%/30-second hold/60-second ramp. Final has no
 timeout and ignores HA stop/snooze; desktop dismissal, master-off and explicit
 skip/clear retain their existing meaning. Naps remain legacy, as do automatic

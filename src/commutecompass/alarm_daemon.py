@@ -21,7 +21,7 @@ State machine::
 Commute wake window (``[alarm.window]``; only wakes whose published
 deadline D satisfies ``wake == D - first_alarm_lead``)::
 
-    window  ringing → snoozed   snooze, HA stop, or 15 min timeout: min(now + 5 min, D)
+    window  ringing → snoozed   snooze, HA stop, or 15 min timeout: min(now + 6 min 30 s, D)
     window  snoozed → ringing   snooze elapsed: re-ring 20%, hold 30 s, 60 s ramp
     window  *       → final     buffered door deadline D reached (first ring D - 37)
     restart *       → final     missed final recovered through D + 10 min inclusive
@@ -513,7 +513,7 @@ class WindowSettings:
 
     first_lead: timedelta = timedelta(minutes=37)
     deadline_lead: timedelta = timedelta(0)
-    snooze: timedelta = timedelta(minutes=5)
+    snooze: timedelta = timedelta(seconds=390)
     rering: RingProfile = RingProfile(0.2, 30.0, 60.0)
 
 @dataclass(frozen=True)
@@ -521,7 +521,7 @@ class Settings:
     """Subset of AlarmConfig the state machine needs."""
 
     max_ring: timedelta = timedelta(minutes=15)
-    snooze: timedelta = timedelta(minutes=9)
+    snooze: timedelta = timedelta(seconds=390)
     max_snoozes: int = 2
     stale_limit: timedelta = STALE_LIMIT
     # None disables the commute wake window (legacy behaviour for all alarms).

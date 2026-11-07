@@ -301,7 +301,7 @@ class AlarmWindowConfig(BaseModel):
     # Wake windows only: never change manual deadlines, nap caps or routes.
     prep_advance_minutes: int = Field(default=0, ge=0, le=24 * 60)
     deadline_lead_minutes: int = Field(default=0, ge=0, le=24 * 60)
-    snooze_minutes: int = Field(default=5, ge=1, le=240)
+    snooze_minutes: float = Field(default=6.5, ge=1, le=240)
     # Re-rings after a snooze: hold at an absolute sink level, then ramp.
     rering_start_percent: int = Field(default=20, ge=0, le=100)
     rering_hold_seconds: int = Field(default=30, ge=0, le=3600)
@@ -381,7 +381,7 @@ class AlarmConfig(BaseModel):
     ramp_start_percent: int = Field(default=30, ge=0, le=100)
     ramp_seconds: int = Field(default=120, ge=0, le=3600)
     max_ring_minutes: int = Field(default=15, ge=1, le=240)
-    snooze_minutes: int = Field(default=9, ge=1, le=240)
+    snooze_minutes: float = Field(default=6.5, ge=1, le=240)
     max_snoozes: int = Field(default=2, ge=0, le=20)
     poll_seconds: int = Field(default=30, ge=1, le=3600)
     # Empty = <db dir>/alarm-cache.json
